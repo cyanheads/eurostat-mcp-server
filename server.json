@@ -1,9 +1,9 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "eurostat-mcp-server",
-  "description": "",
+  "name": "cyanheads/eurostat-mcp-server",
+  "description": "MCP server for Eurostat — EU statistical data across 8,933 datasets covering economy, demography, trade, and regional NUTS data.",
   "repository": {
-    "url": "",
+    "url": "https://github.com/cyanheads/eurostat-mcp-server",
     "source": "github"
   },
   "version": "0.1.0",
