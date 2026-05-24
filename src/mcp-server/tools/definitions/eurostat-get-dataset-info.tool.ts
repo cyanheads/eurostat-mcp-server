@@ -10,7 +10,7 @@ import { getEurostatDataService } from '@/services/eurostat-data/eurostat-data-s
 export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
   title: 'Get Eurostat Dataset Info',
   description:
-    'Fetch metadata for a Eurostat dataset: dimensions with valid values, time range, observation count, and last-update date. Call this before eurostat_query_dataset to discover what dimension codes are valid (unit, na_item, geo, etc.). Uses a minimal Statistics API call (most recent period only) to extract dimension structure. Returns up to 10 sample values per dimension for orientation; use eurostat_get_dimension_values to list the full set for large dimensions.',
+    'Fetch metadata for a Eurostat dataset: dimensions with valid values, time range, observation count, and last-update date. Call this before eurostat_query_dataset to discover what dimension codes are valid (unit, na_item, geo, etc.). Returns up to 10 sample values per dimension for orientation; use eurostat_get_dimension_values to list the full set for large dimensions.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     dataset_code: z
