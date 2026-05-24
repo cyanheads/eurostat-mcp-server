@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/eurostat-mcp-server",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "mcpName": "io.github.cyanheads/eurostat-mcp-server",
   "description": "Search and query 8,933 Eurostat datasets — EU economy, demography, trade, health, and NUTS regional data via MCP. STDIO or Streamable HTTP.",
   "type": "module",
