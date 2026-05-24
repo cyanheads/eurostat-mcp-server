@@ -96,9 +96,14 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
           ),
       )
       .describe(
-        'Decoded observations. Each entry has one dimension entry per dimension in dimensionsUsed, plus value and optional status.',
+        'Decoded observations, capped at 5,000 rows. When truncated is true, apply dimension filters to narrow the result.',
       ),
-    obsCount: z.number().describe('Number of observations returned.'),
+    obsCount: z.number().describe('Total number of observations matched (before any cap).'),
+    truncated: z
+      .boolean()
+      .describe(
+        'True when the result exceeded 5,000 observations and was capped. Apply dimension filters to get the full result.',
+      ),
     timeRange: z
       .object({
         start: z.string().describe('Earliest period in this result.'),
@@ -140,8 +145,9 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
     {
       reason: 'conflicting_params',
       code: JsonRpcErrorCode.InvalidParams,
-      when: 'Both "geo" filter and geo_level were provided simultaneously.',
-      recovery: 'Use either a "geo" key in filters or the geo_level parameter — not both.',
+      when: 'Mutually exclusive parameters were combined: "geo" filter + geo_level, or since_period/until_period + last_n_periods.',
+      recovery:
+        'Use "geo" or geo_level (not both); use since_period/until_period or last_n_periods (not both).',
     },
   ],
 
@@ -162,19 +168,26 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       ctx,
     );
 
+    const OBS_CAP = 5_000;
+    const totalObs = result.observations.length;
+    const truncated = totalObs > OBS_CAP;
+    const observations = truncated ? result.observations.slice(0, OBS_CAP) : result.observations;
+
     ctx.log.info('Dataset query complete', {
       datasetCode: input.dataset_code,
-      obsCount: result.obsCount,
+      obsCount: totalObs,
+      truncated,
       missingObsCount: result.missingObsCount,
     });
 
-    return result;
+    return { ...result, observations, obsCount: totalObs, truncated };
   },
 
   format: (result) => {
     const lines: string[] = [
       `# ${result.datasetLabel} (\`${result.datasetCode}\`)`,
       `**Observations:** ${result.obsCount} (${result.missingObsCount} missing) | **Period:** ${result.timeRange.start} – ${result.timeRange.end}`,
+      `**Truncated:** ${result.truncated}${result.truncated ? ' — result capped at 5,000 rows. Add dimension filters to get the full result.' : ''}`,
       `**Dimensions:** ${result.dimensionsUsed.join(', ')}\n`,
     ];
 
@@ -191,7 +204,9 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       lines.push(`${dimParts.join(' | ')} → ${val}${statusPart}`);
     }
     if (result.observations.length > maxRows) {
-      lines.push(`\n_(${result.observations.length - maxRows} more observations not shown)_`);
+      lines.push(
+        `\n_(${result.observations.length - maxRows} more observations not shown in text)_`,
+      );
     }
 
     return [{ type: 'text', text: lines.join('\n') }];

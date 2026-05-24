@@ -327,6 +327,12 @@ export class EurostatDataService {
         { reason: 'conflicting_params' },
       );
     }
+    if (lastN && (sinceP || untilP)) {
+      throw invalidParams(
+        `"since_period"/"until_period" and "last_n_periods" are mutually exclusive — use one or the other.`,
+        { reason: 'conflicting_params' },
+      );
+    }
 
     const params: Record<string, string | string[]> = { lang };
 
