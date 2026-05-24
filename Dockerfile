@@ -1,12 +1,15 @@
 # ==============================================================================
 # Build Stage
 #
-# This stage installs all dependencies (including dev), builds the TypeScript
-# source code into JavaScript, and prepares the production assets.
+# Uses Node.js (real node binary) so that tsx can load its CJS shims during
+# compilation. oven/bun:1.3's node shim maps back to bun, which breaks tsx.
 # ==============================================================================
-FROM oven/bun:1.3 AS build
+FROM node:24-slim AS build
 
 WORKDIR /usr/src/app
+
+# Install bun for package management (faster installs, lockfile compat)
+RUN npm install -g bun@1.3
 
 # Copy dependency manifests for optimized layer caching
 COPY package.json bun.lock ./
@@ -17,8 +20,8 @@ RUN bun install --frozen-lockfile
 # Copy the rest of the source code
 COPY . .
 
-# Build the application
-RUN bun run build
+# Build the application (tsx runs under real node)
+RUN npx tsx scripts/build.ts
 
 
 # ==============================================================================
