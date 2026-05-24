@@ -49,7 +49,7 @@ export const eurostatDatasetResource = resource('eurostat://dataset/{dataset_cod
     metadataUrl: z.string().optional().describe('Link to ESMS metadata page, when available.'),
   }),
 
-  async handler(params, ctx) {
+  handler(params, ctx) {
     const svc = getEurostatDataService();
     return svc.getDatasetInfo(params.dataset_code, ctx);
   },

@@ -29,7 +29,7 @@ export class EurostatCatalogueService {
 
   // config and storage accepted to match the standard service init pattern;
   // this service uses only the Eurostat public API and per-request config.
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  // biome-ignore lint/complexity/noUselessConstructor: standard init pattern
   constructor(_config: AppConfig, _storage: StorageService) {}
 
   /** Ensure the TOC is loaded, fetching if not yet cached. */
@@ -61,12 +61,7 @@ export class EurostatCatalogueService {
     );
 
     const entries = this.parseToc(text);
-    const codeIndex = new Map<string, number>();
-    for (let i = 0; i < entries.length; i++) {
-      // noUncheckedIndexedAccess: entries[i] is always defined in a length-bounded loop
-      const e = entries[i];
-      if (e) codeIndex.set(e.code, i);
-    }
+    const codeIndex = new Map(entries.map((e, i) => [e.code, i] as const));
     ctx.log.info('TOC loaded', { entryCount: entries.length });
     return { entries, codeIndex, loadedAt: new Date() };
   }
@@ -90,17 +85,16 @@ export class EurostatCatalogueService {
       const cols = line.split('\t');
       if (cols.length < 7) continue;
 
-      // cols.length >= 7 is asserted above — these accesses are safe
-      const rawTitle = this.unquote(cols[0]!);
+      // Destructure after length guard — all indices 0-6 are safe
+      const [col0, col1, col2, col3, , col5, col6] = cols;
+      const rawTitle = col0 ? this.unquote(col0) : '';
       if (!rawTitle) continue;
 
-      // First column is the raw header row
-      const code = this.unquote(cols[1]!);
-      const typeRaw = this.unquote(cols[2]!);
+      const code = col1 ? this.unquote(col1) : '';
+      const typeRaw = col2 ? this.unquote(col2) : '';
 
       // Skip header row
-      if (code === 'code') continue;
-      if (!code) continue;
+      if (code === 'code' || !code) continue;
 
       const type = this.parseType(typeRaw);
       const depth = this.measureDepth(rawTitle);
@@ -113,11 +107,11 @@ export class EurostatCatalogueService {
         depthStack.pop();
       }
       const stackTop = depthStack[depthStack.length - 1];
-      const parentIndex = stackTop !== undefined ? stackTop.index : -1;
+      const parentIndex = stackTop?.index ?? -1;
 
-      const lastUpdated = cols[3] ? this.unquote(cols[3]) || undefined : undefined;
-      const dataStart = cols[5] ? this.unquote(cols[5]!).trim() || undefined : undefined;
-      const dataEnd = cols[6] ? this.unquote(cols[6]!).trim() || undefined : undefined;
+      const lastUpdated = col3 ? this.unquote(col3) || undefined : undefined;
+      const dataStart = col5 ? this.unquote(col5).trim() || undefined : undefined;
+      const dataEnd = col6 ? this.unquote(col6).trim() || undefined : undefined;
 
       // 8th column (index 7) is obs count — only present for datasets/tables
       let obsCount: number | undefined;
@@ -126,7 +120,7 @@ export class EurostatCatalogueService {
         const raw = col7.trim();
         if (raw) {
           const n = parseInt(raw, 10);
-          if (!isNaN(n)) obsCount = n;
+          if (!Number.isNaN(n)) obsCount = n;
         }
       }
 
@@ -151,7 +145,7 @@ export class EurostatCatalogueService {
   }
 
   private unquote(s: string): string {
-    const t = s?.trimEnd() ?? '';
+    const t = s.trimEnd();
     const trimmed = t.trimStart();
     if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
       // Preserve leading spaces — they encode depth (4 spaces per level)
@@ -183,12 +177,20 @@ export class EurostatCatalogueService {
     const path: string[] = [];
     let current: TocEntry | undefined = entries[entryIndex];
     while (current !== undefined && current.parentIndex >= 0) {
-      const parent: TocEntry | undefined = entries[current.parentIndex];
+      const parent = entries[current.parentIndex];
       if (parent === undefined) break;
       path.unshift(parent.label);
       current = parent;
     }
     return path;
+  }
+
+  /** Return indexes of entries satisfying a predicate. */
+  private indexesWhere(entries: TocEntry[], pred: (e: TocEntry) => boolean): number[] {
+    return entries.reduce<number[]>((acc, e, i) => {
+      if (pred(e)) acc.push(i);
+      return acc;
+    }, []);
   }
 
   /**
@@ -199,9 +201,9 @@ export class EurostatCatalogueService {
   private findRootChildren(entries: TocEntry[]): number[] {
     const rootIdx = entries.findIndex((e) => e.depth === 0 && e.type === 'folder');
     if (rootIdx === -1) {
-      return entries.map((_, i) => i).filter((i) => (entries[i]?.depth ?? -1) === 0);
+      return this.indexesWhere(entries, (e) => e.depth === 0);
     }
-    return entries.map((_, i) => i).filter((i) => entries[i]?.parentIndex === rootIdx);
+    return this.indexesWhere(entries, (e) => e.parentIndex === rootIdx);
   }
 
   /** Get immediate children of a folder code, or root theme folders if code is undefined. */
@@ -232,17 +234,13 @@ export class EurostatCatalogueService {
         { reason: 'not_found', themeCode },
       );
     }
-    const folderIdx: number = folderIdxMaybe;
-
-    const childIndexes = toc.entries
-      .map((_, i) => i)
-      .filter((i) => toc.entries[i]?.parentIndex === folderIdx);
+    const childIndexes = this.indexesWhere(toc.entries, (e) => e.parentIndex === folderIdxMaybe);
 
     const items = childIndexes.flatMap((i) => {
       const item = this.toBrowseItem(toc.entries, i);
       return item ? [item] : [];
     });
-    const parentPath = this.buildPath(toc.entries, folderIdx);
+    const parentPath = this.buildPath(toc.entries, folderIdxMaybe);
     parentPath.push(folderEntry.label);
 
     return { items, parentPath };

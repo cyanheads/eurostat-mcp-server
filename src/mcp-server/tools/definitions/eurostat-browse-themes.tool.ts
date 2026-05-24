@@ -81,8 +81,7 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
 
   async handler(input, ctx) {
     const svc = getEurostatCatalogueService();
-    const themeCode =
-      input.theme_code && input.theme_code.trim() ? input.theme_code.trim() : undefined;
+    const themeCode = input.theme_code?.trim() || undefined;
     const { items, parentPath } = await svc.browse(themeCode, ctx);
     ctx.log.info('Theme browse complete', { themeCode, itemCount: items.length });
     return { items, parentPath };

@@ -7,10 +7,10 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import {
-  invalidParams,
   McpError,
   notFound,
   serviceUnavailable,
+  validationError,
 } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
@@ -32,7 +32,7 @@ const asReqCtx = (ctx: Context) => ctx as unknown as Record<string, unknown> & t
 export class EurostatDataService {
   // config and storage accepted to match the standard service init pattern;
   // this service uses only the Eurostat public API and per-request config.
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  // biome-ignore lint/complexity/noUselessConstructor: standard init pattern
   constructor(_config: AppConfig, _storage: StorageService) {}
 
   private buildUrl(datasetCode: string, params: Record<string, string | string[]>): URL {
@@ -61,12 +61,9 @@ export class EurostatDataService {
         } catch (err) {
           // fetchWithTimeout throws McpError for non-2xx responses before the body is parsed.
           // Map 404s to a clean not_found rather than surfacing the raw FetchHttpError.
-          if (
-            err instanceof McpError &&
-            (err.data as Record<string, unknown> | undefined)?.['errorSource'] ===
-              'FetchHttpError' &&
-            (err.data as Record<string, unknown> | undefined)?.['statusCode'] === 404
-          ) {
+          const errData =
+            err instanceof McpError ? (err.data as Record<string, unknown> | undefined) : undefined;
+          if (errData?.errorSource === 'FetchHttpError' && errData?.statusCode === 404) {
             const datasetCode = url.pathname.split('/').at(-1) ?? url.pathname;
             throw notFound(
               `Dataset "${decodeURIComponent(datasetCode)}" not found. Use eurostat_search_datasets or eurostat_browse_themes to find a valid dataset code.`,
@@ -100,8 +97,7 @@ export class EurostatDataService {
     // Async response: query too large
     if (data.warning?.status === 413) {
       throw serviceUnavailable(
-        'Eurostat returned an asynchronous response — the query matched too many observations. ' +
-          'Add dimension filters (geo, unit, na_item, etc.) to reduce the result size and retry.',
+        'Eurostat returned an asynchronous response — the query matched too many observations. Add dimension filters (geo, unit, na_item, etc.) to reduce the result size and retry.',
         { reason: 'async_response', url },
       );
     }
@@ -112,20 +108,18 @@ export class EurostatDataService {
       if (!err) return; // noUncheckedIndexedAccess: length > 0 guarantees this, but guard for TS
       if (err.status === 404 || err.id === 100) {
         throw notFound(
-          `Dataset not found. Eurostat error: ${err.label}. ` +
-            `Verify the dataset code with eurostat_search_datasets or eurostat_browse_themes.`,
+          `Dataset not found. Eurostat error: ${err.label}. Verify the dataset code with eurostat_search_datasets or eurostat_browse_themes.`,
           { reason: 'not_found', eurostatError: err },
         );
       }
       if (err.status === 400) {
         if (err.id === 150) {
-          throw invalidParams(
-            `Invalid dimension code. Eurostat error: ${err.label}. ` +
-              `Use eurostat_get_dataset_info to see valid dimensions for this dataset.`,
+          throw validationError(
+            `Invalid dimension code. Eurostat error: ${err.label}. Use eurostat_get_dataset_info to see valid dimensions for this dataset.`,
             { reason: 'invalid_dimension', eurostatError: err },
           );
         }
-        throw invalidParams(`Bad request. Eurostat error: ${err.label}.`, {
+        throw validationError(`Bad request. Eurostat error: ${err.label}.`, {
           reason: 'conflicting_params',
           eurostatError: err,
         });
@@ -243,7 +237,7 @@ export class EurostatDataService {
       label: data.label ?? datasetCode,
       dimensions,
       timeRange: { start: oldest, end: latest },
-      obsCount: isNaN(obsCount) ? 0 : obsCount,
+      obsCount: Number.isNaN(obsCount) ? 0 : obsCount,
       lastUpdated,
       ...(metadataUrl && { metadataUrl }),
     };
@@ -271,9 +265,9 @@ export class EurostatDataService {
 
     const params: Record<string, string | string[]> = {};
     if (dimension === 'geo' && geoLevel) {
-      params['geoLevel'] = geoLevel;
+      params.geoLevel = geoLevel;
     } else {
-      params['lastTimePeriod'] = '1';
+      params.lastTimePeriod = '1';
     }
 
     const url = this.buildUrl(datasetCode, params);
@@ -282,8 +276,7 @@ export class EurostatDataService {
     const dimDef = data.dimension?.[dimension];
     if (!dimDef) {
       throw notFound(
-        `Dimension "${dimension}" not found in dataset "${datasetCode}". ` +
-          `Use eurostat_get_dataset_info to see valid dimensions.`,
+        `Dimension "${dimension}" not found in dataset "${datasetCode}". Use eurostat_get_dataset_info to see valid dimensions.`,
         { reason: 'not_found', datasetCode, dimension },
       );
     }
@@ -320,15 +313,14 @@ export class EurostatDataService {
     ctx.log.info('Querying dataset', { datasetCode, filters, geoLevel, sinceP, untilP, lastN });
 
     // Validate mutually exclusive params
-    if (filters['geo'] && geoLevel) {
-      throw invalidParams(
-        `"geo" filter and "geo_level" cannot be used together. ` +
-          `Use one or the other: "geo" for specific country/region codes, "geo_level" for filtering by NUTS hierarchy level.`,
+    if (filters.geo && geoLevel) {
+      throw validationError(
+        `"geo" filter and "geo_level" cannot be used together. Use one or the other: "geo" for specific country/region codes, "geo_level" for filtering by NUTS hierarchy level.`,
         { reason: 'conflicting_params' },
       );
     }
     if (lastN && (sinceP || untilP)) {
-      throw invalidParams(
+      throw validationError(
         `"since_period"/"until_period" and "last_n_periods" are mutually exclusive — use one or the other.`,
         { reason: 'conflicting_params' },
       );
@@ -340,10 +332,10 @@ export class EurostatDataService {
     for (const [dim, values] of Object.entries(filters)) {
       if (values.length > 0) params[dim] = values;
     }
-    if (geoLevel) params['geoLevel'] = geoLevel;
-    if (sinceP && !lastN) params['sinceTimePeriod'] = sinceP;
-    if (untilP && !lastN) params['untilTimePeriod'] = untilP;
-    if (lastN) params['lastTimePeriod'] = String(lastN);
+    if (geoLevel) params.geoLevel = geoLevel;
+    if (sinceP && !lastN) params.sinceTimePeriod = sinceP;
+    if (untilP && !lastN) params.untilTimePeriod = untilP;
+    if (lastN) params.lastTimePeriod = String(lastN);
 
     const url = this.buildUrl(datasetCode, params);
     const data = await this.fetchJson(url, ctx);
@@ -351,9 +343,7 @@ export class EurostatDataService {
     // Detect no-results case (empty value object, no error)
     if (data.id && data.value !== undefined && Object.keys(data.value).length === 0) {
       throw notFound(
-        `Query returned no observations for dataset "${datasetCode}". ` +
-          `The dimension filter combination may not exist in the data. ` +
-          `Verify dimension values with eurostat_get_dimension_values first.`,
+        `Query returned no observations for dataset "${datasetCode}". The dimension filter combination may not exist in the data. Verify dimension values with eurostat_get_dimension_values first.`,
         { reason: 'no_results', datasetCode, filters },
       );
     }
@@ -366,7 +356,7 @@ export class EurostatDataService {
     const oldest = this.extractAnnotation(data, 'OBS_PERIOD_OVERALL_OLDEST', 'title') ?? '';
     const latest = this.extractAnnotation(data, 'OBS_PERIOD_OVERALL_LATEST', 'title') ?? '';
     const timeCodes = observations
-      .map((o) => (o.dimensions as Record<string, { code: string } | undefined>)['time']?.code)
+      .map((o) => (o.dimensions as Record<string, { code: string } | undefined>).time?.code)
       .filter((c): c is string => c !== undefined)
       .sort();
     const timeRange = {

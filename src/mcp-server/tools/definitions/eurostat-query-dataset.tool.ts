@@ -138,13 +138,13 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
     },
     {
       reason: 'invalid_dimension',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'A dimension code in filters does not exist in this dataset (HTTP 400, Eurostat error id 150).',
       recovery: 'Use eurostat_get_dataset_info to see valid dimension codes for this dataset.',
     },
     {
       reason: 'conflicting_params',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'Mutually exclusive parameters were combined: "geo" filter + geo_level, or since_period/until_period + last_n_periods.',
       recovery:
         'Use "geo" or geo_level (not both); use since_period/until_period or last_n_periods (not both).',
