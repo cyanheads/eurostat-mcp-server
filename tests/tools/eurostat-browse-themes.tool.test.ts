@@ -3,7 +3,7 @@
  * @module tests/tools/eurostat-browse-themes.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { eurostatBrowseThemes } from '@/mcp-server/tools/definitions/eurostat-browse-themes.tool.js';
 
@@ -60,6 +60,9 @@ describe('eurostatBrowseThemes', () => {
     expect(result.items).toHaveLength(2);
     expect(result.parentPath).toEqual([]);
     expect(result.items[0]?.code).toBe('econ');
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.itemCount).toBe(2);
+    expect(enrichment.themeCode).toBeUndefined();
   });
 
   it('returns children and parentPath when theme_code provided', async () => {
@@ -75,6 +78,9 @@ describe('eurostatBrowseThemes', () => {
     expect(result.items).toHaveLength(2);
     expect(result.parentPath).toEqual(['Economy and finance']);
     expect(result.items[1]?.code).toBe('nama_10_gdp');
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.itemCount).toBe(2);
+    expect(enrichment.themeCode).toBe('econ');
   });
 
   it('throws not_found for an unknown theme_code', async () => {

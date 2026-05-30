@@ -74,10 +74,12 @@ export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
           .describe('A matched dataset entry.'),
       )
       .describe('Matching datasets, up to the requested limit.'),
-    totalMatches: z
-      .number()
-      .describe('Total number of datasets matching the query before the limit is applied.'),
   }),
+  enrichment: {
+    query: z.string().describe('Search terms as submitted.'),
+    totalMatches: z.number().describe('Total datasets matching the query before the limit.'),
+  },
+
   errors: [
     {
       reason: 'no_match',
@@ -105,12 +107,13 @@ export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
       totalMatches,
       returned: datasets.length,
     });
-    return { datasets, totalMatches };
+    ctx.enrich({ query: input.query, totalMatches });
+    return { datasets };
   },
 
   format: (result) => {
     const lines: string[] = [
-      `**${result.totalMatches} total match${result.totalMatches !== 1 ? 'es' : ''}** (showing ${result.datasets.length})\n`,
+      `**Showing ${result.datasets.length} result${result.datasets.length !== 1 ? 's' : ''}**\n`,
     ];
     for (const d of result.datasets) {
       lines.push(`## ${d.label}`);

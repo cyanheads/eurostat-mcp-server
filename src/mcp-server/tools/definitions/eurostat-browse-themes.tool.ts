@@ -69,6 +69,11 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
         'Breadcrumb from root to the requested theme (e.g., ["Economy and finance", "National accounts"]). Empty when browsing root.',
       ),
   }),
+  enrichment: {
+    itemCount: z.number().describe('Number of items returned in this level.'),
+    themeCode: z.string().optional().describe('Folder code that was browsed, or omitted for root.'),
+  },
+
   errors: [
     {
       reason: 'not_found',
@@ -84,6 +89,7 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
     const themeCode = input.theme_code?.trim() || undefined;
     const { items, parentPath } = await svc.browse(themeCode, ctx);
     ctx.log.info('Theme browse complete', { themeCode, itemCount: items.length });
+    ctx.enrich({ itemCount: items.length, ...(themeCode && { themeCode }) });
     return { items, parentPath };
   },
 

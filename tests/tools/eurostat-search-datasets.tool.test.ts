@@ -3,7 +3,7 @@
  * @module tests/tools/eurostat-search-datasets.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { eurostatSearchDatasets } from '@/mcp-server/tools/definitions/eurostat-search-datasets.tool.js';
 
@@ -45,8 +45,10 @@ describe('eurostatSearchDatasets', () => {
     const input = eurostatSearchDatasets.input.parse({ query: 'GDP' });
     const result = await eurostatSearchDatasets.handler(input, ctx);
     expect(result.datasets).toHaveLength(2);
-    expect(result.totalMatches).toBe(2);
     expect(result.datasets[0]?.code).toBe('nama_10_gdp');
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.totalMatches).toBe(2);
+    expect(enrichment.query).toBe('GDP');
   });
 
   it('throws no_match when no datasets found', async () => {
@@ -68,22 +70,20 @@ describe('eurostatSearchDatasets', () => {
   it('formats output with all relevant fields', () => {
     const result = {
       datasets: mockDatasets,
-      totalMatches: 2,
     };
     const blocks = eurostatSearchDatasets.format!(result);
     expect(blocks.some((b) => b.type === 'text')).toBe(true);
     const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+    expect(text).toContain('Showing 2 results');
     expect(text).toContain('nama_10_gdp');
     expect(text).toContain('GDP and main components');
     expect(text).toContain('Economy and finance');
     expect(text).toContain('1975');
-    expect(text).toContain('2 total matches');
   });
 
   it('formats output without optional fields', () => {
     const sparseResult = {
       datasets: [{ code: 'abc', label: 'Test dataset', type: 'table' as const, themePath: [] }],
-      totalMatches: 1,
     };
     const blocks = eurostatSearchDatasets.format!(sparseResult);
     const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');

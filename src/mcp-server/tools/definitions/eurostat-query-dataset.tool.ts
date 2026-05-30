@@ -114,6 +114,48 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       .number()
       .describe('Number of observations with null value (missing data points in the source).'),
   }),
+  enrichment: {
+    appliedFilters: z
+      .object({
+        filters: z
+          .record(z.string(), z.array(z.string()))
+          .describe('Dimension filters that were applied.'),
+        geoLevel: z.string().optional().describe('NUTS geo level filter applied, if any.'),
+        sincePeriod: z.string().optional().describe('Start of time range applied, if any.'),
+        untilPeriod: z.string().optional().describe('End of time range applied, if any.'),
+        lastNPeriods: z.number().optional().describe('Last N periods filter applied, if any.'),
+      })
+      .describe('Effective query parameters applied to the Eurostat API.'),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Guidance when the result was truncated at 5,000 rows. Omitted for normal results.',
+      ),
+  },
+
+  enrichmentTrailer: {
+    appliedFilters: {
+      render: (f) => {
+        const parts: string[] = [];
+        const filterKeys = Object.keys(f.filters);
+        if (filterKeys.length > 0) {
+          parts.push(
+            `- **Filters:** ${filterKeys.map((k) => `${k}=[${(f.filters[k] ?? []).join(', ')}]`).join('; ')}`,
+          );
+        }
+        if (f.geoLevel) parts.push(`- **Geo level:** ${f.geoLevel}`);
+        if (f.sincePeriod || f.untilPeriod) {
+          parts.push(`- **Period:** ${f.sincePeriod ?? '…'} – ${f.untilPeriod ?? 'latest'}`);
+        }
+        if (f.lastNPeriods) parts.push(`- **Last N periods:** ${f.lastNPeriods}`);
+        return parts.length > 0
+          ? `**Applied Filters:**\n${parts.join('\n')}`
+          : '**Applied Filters:** none';
+      },
+    },
+  },
+
   errors: [
     {
       reason: 'not_found',
@@ -179,6 +221,21 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       truncated,
       missingObsCount: result.missingObsCount,
     });
+
+    ctx.enrich({
+      appliedFilters: {
+        filters: input.filters,
+        ...(input.geo_level && { geoLevel: input.geo_level }),
+        ...(sinceP && { sincePeriod: sinceP }),
+        ...(untilP && { untilPeriod: untilP }),
+        ...(input.last_n_periods && { lastNPeriods: input.last_n_periods }),
+      },
+    });
+    if (truncated) {
+      ctx.enrich.notice(
+        `Result capped at ${OBS_CAP.toLocaleString()} rows. Add dimension filters (geo, unit, na_item) to reduce the result set.`,
+      );
+    }
 
     return { ...result, observations, obsCount: totalObs, truncated };
   },

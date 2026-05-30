@@ -3,7 +3,7 @@
  * @module tests/tools/eurostat-query-dataset.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { eurostatQueryDataset } from '@/mcp-server/tools/definitions/eurostat-query-dataset.tool.js';
 
@@ -65,6 +65,14 @@ describe('eurostatQueryDataset', () => {
     expect(result.missingObsCount).toBe(1);
     expect(result.datasetCode).toBe('nama_10_gdp');
     expect(result.observations).toHaveLength(3);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.appliedFilters?.filters).toEqual({
+      unit: ['CP_MEUR'],
+      na_item: ['B1GQ'],
+      geo: ['DE', 'FR', 'IT'],
+    });
+    expect(enrichment.appliedFilters?.sincePeriod).toBe('2023');
+    expect(enrichment.notice).toBeUndefined();
   });
 
   it('applies default empty filters and EN language', () => {
