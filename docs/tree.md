@@ -1,10 +1,15 @@
 # eurostat-mcp-server - Directory Structure
 
-Generated on: 2026-05-24 04:57:45
+Generated on: 2026-06-02 14:14:32
 
 ```text
 eurostat-mcp-server/
 ├── .claude/
+├── .claude-plugin/
+│   └── plugin.json
+├── .codex-plugin/
+│   ├── mcp.json
+│   └── plugin.json
 ├── .github/
 │   └── ISSUE_TEMPLATE/
 │       ├── bug_report.yml
@@ -24,12 +29,14 @@ eurostat-mcp-server/
 │   ├── build.ts
 │   ├── check-docs-sync.ts
 │   ├── check-framework-antipatterns.ts
+│   ├── check-skill-versions.ts
 │   ├── check-skills-sync.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── release-github.ts
 │   ├── split-changelog.ts
 │   └── tree.ts
 ├── skills/
@@ -57,6 +64,8 @@ eurostat-mcp-server/
 │   │   └── SKILL.md
 │   ├── api-linter/
 │   │   └── SKILL.md
+│   ├── api-mirror/
+│   │   └── SKILL.md
 │   ├── api-services/
 │   │   ├── references/
 │   │   │   ├── graph.md
@@ -75,13 +84,22 @@ eurostat-mcp-server/
 │   │   └── SKILL.md
 │   ├── api-workers/
 │   │   └── SKILL.md
+│   ├── code-simplifier/
+│   │   └── SKILL.md
 │   ├── design-mcp-server/
 │   │   └── SKILL.md
 │   ├── field-test/
 │   │   └── SKILL.md
+│   ├── git-wrapup/
+│   │   └── SKILL.md
 │   ├── maintenance/
 │   │   └── SKILL.md
-│   ├── migrate-mcp-ts-template/
+│   ├── orchestrations/
+│   │   ├── workflows/
+│   │   │   ├── field-test-fix.md
+│   │   │   ├── fix-wrapup-release.md
+│   │   │   ├── greenfield-build.md
+│   │   │   └── maintenance-release.md
 │   │   └── SKILL.md
 │   ├── polish-docs-meta/
 │   │   ├── references/
@@ -130,12 +148,16 @@ eurostat-mcp-server/
 │   ├── prompts/
 │   ├── resources/
 │   │   └── eurostat-dataset.resource.test.ts
+│   ├── services/
+│   │   ├── eurostat-catalogue-service.test.ts
+│   │   └── eurostat-data-service.test.ts
 │   └── tools/
 │       ├── eurostat-browse-themes.tool.test.ts
 │       ├── eurostat-get-dataset-info.tool.test.ts
 │       ├── eurostat-get-dimension-values.tool.test.ts
 │       ├── eurostat-query-dataset.tool.test.ts
-│       └── eurostat-search-datasets.tool.test.ts
+│       ├── eurostat-search-datasets.tool.test.ts
+│       └── security-and-edge-cases.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitignore
@@ -145,6 +167,7 @@ eurostat-mcp-server/
 ├── bun.lock
 ├── bunfig.toml
 ├── CHANGELOG.md
+├── CITATION.cff
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile

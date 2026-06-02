@@ -1,8 +1,8 @@
 # Agent Protocol
 
 **Server:** @cyanheads/eurostat-mcp-server
-**Version:** 0.1.9
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.16`
+**Version:** 0.1.10
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.21`
 **Engines:** Bun ≥1.3.2, Node ≥24.0.0
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -270,7 +270,9 @@ Available skills:
 | `api-telemetry` | OTel catalog: spans, metrics, completion logs, env config, cardinality rules |
 | `api-testing` | createMockContext, test patterns |
 | `api-utils` | Formatting, parsing, security, pagination, scheduling, telemetry helpers |
+| `api-mirror` | MirrorService: persistent SQLite-backed local mirror of bulk upstream datasets — Tier 3 opt-in |
 | `api-workers` | Cloudflare Workers runtime |
+| `orchestrations` | Chain task skills into a gated multi-phase pipeline when sub-agents are available |
 | `report-issue-framework` | File bug/feature request against @cyanheads/mcp-ts-core |
 | `report-issue-local` | File bug/feature request against this server's repo |
 
@@ -293,6 +295,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run lint:mcp` | Validate MCP definitions against spec |
 | `bun run lint:packaging` | Validate env var alignment between `manifest.json` and `server.json` (skipped cleanly when `manifest.json` is absent) |
 | `bun run list-skills` | List skills in `skills/` with name + description |
+| `bun run release:github` | Create GitHub Release from the latest annotated tag (attach `.mcpb`, enforce title format) |
 | `bun run bundle` | Build and pack as `dist/eurostat-mcp-server.mcpb` for one-click Claude Desktop install |
 | `bun run start:stdio` | Production mode (stdio) |
 | `bun run start:http` | Production mode (HTTP) |
