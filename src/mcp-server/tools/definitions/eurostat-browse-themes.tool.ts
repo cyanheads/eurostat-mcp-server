@@ -4,7 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getEurostatCatalogueService } from '@/services/eurostat-catalogue/eurostat-catalogue-service.js';
 
 export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
@@ -87,10 +87,22 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
   async handler(input, ctx) {
     const svc = getEurostatCatalogueService();
     const themeCode = input.theme_code?.trim() || undefined;
-    const { items, parentPath } = await svc.browse(themeCode, ctx);
-    ctx.log.info('Theme browse complete', { themeCode, itemCount: items.length });
-    ctx.enrich({ itemCount: items.length, ...(themeCode && { themeCode }) });
-    return { items, parentPath };
+    let browsed: Awaited<ReturnType<typeof svc.browse>>;
+    try {
+      browsed = await svc.browse(themeCode, ctx);
+    } catch (err) {
+      if ((err as McpError).data?.reason === 'not_found') {
+        throw ctx.fail('not_found', (err as Error).message, {
+          recovery: {
+            hint: 'Call eurostat_browse_themes without theme_code to see valid root themes, then navigate from there.',
+          },
+        });
+      }
+      throw err;
+    }
+    ctx.log.info('Theme browse complete', { themeCode, itemCount: browsed.items.length });
+    ctx.enrich({ itemCount: browsed.items.length, ...(themeCode && { themeCode }) });
+    return browsed;
   },
 
   format: (result) => {

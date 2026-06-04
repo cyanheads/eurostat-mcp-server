@@ -76,7 +76,22 @@ describe('eurostatGetDatasetInfo', () => {
     const ctx = createMockContext({ errors: eurostatGetDatasetInfo.errors });
     const input = eurostatGetDatasetInfo.input.parse({ dataset_code: 'nonexistent_xyz' });
     await expect(eurostatGetDatasetInfo.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'not_found' },
+      data: { reason: 'not_found', recovery: { hint: expect.stringContaining('nonexistent_xyz') } },
+    });
+  });
+
+  it('throws async_response with recovery hint for oversized metadata call', async () => {
+    vi.mocked(getEurostatDataService).mockReturnValue({
+      getDatasetInfo: vi
+        .fn()
+        .mockRejectedValue(
+          Object.assign(new Error('async response'), { data: { reason: 'async_response' } }),
+        ),
+    } as never);
+    const ctx = createMockContext({ errors: eurostatGetDatasetInfo.errors });
+    const input = eurostatGetDatasetInfo.input.parse({ dataset_code: 'nama_10_gdp' });
+    await expect(eurostatGetDatasetInfo.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'async_response', recovery: { hint: expect.stringContaining('retry') } },
     });
   });
 

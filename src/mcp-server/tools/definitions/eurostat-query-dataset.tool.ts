@@ -4,7 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getEurostatDataService } from '@/services/eurostat-data/eurostat-data-service.js';
 import { GEO_LEVEL_VALUES } from '@/services/eurostat-data/types.js';
 
@@ -199,16 +199,50 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
     const sinceP = input.since_period?.trim() || undefined;
     const untilP = input.until_period?.trim() || undefined;
 
-    const result = await svc.queryDataset(
-      input.dataset_code,
-      input.filters,
-      input.geo_level,
-      sinceP,
-      untilP,
-      input.last_n_periods,
-      input.lang,
-      ctx,
-    );
+    let result: Awaited<ReturnType<typeof svc.queryDataset>>;
+    try {
+      result = await svc.queryDataset(
+        input.dataset_code,
+        input.filters,
+        input.geo_level,
+        sinceP,
+        untilP,
+        input.last_n_periods,
+        input.lang,
+        ctx,
+      );
+    } catch (err) {
+      const reason = (err as McpError).data?.reason;
+      if (reason === 'no_results') {
+        throw ctx.fail('no_results', (err as Error).message, {
+          recovery: {
+            hint: `No observations matched. Verify dimension values for "${input.dataset_code}" using eurostat_get_dimension_values — invalid values silently return no data.`,
+          },
+        });
+      }
+      if (reason === 'async_response') {
+        throw ctx.fail('async_response', (err as Error).message, {
+          recovery: {
+            hint: `Query matched too many observations. Add dimension filters (e.g., unit, na_item, geo) to reduce the result size for "${input.dataset_code}".`,
+          },
+        });
+      }
+      if (reason === 'not_found') {
+        throw ctx.fail('not_found', (err as Error).message, {
+          recovery: {
+            hint: `Dataset "${input.dataset_code}" not found. Use eurostat_search_datasets or eurostat_browse_themes to find a valid code.`,
+          },
+        });
+      }
+      if (reason === 'invalid_dimension') {
+        throw ctx.fail('invalid_dimension', (err as Error).message, {
+          recovery: {
+            hint: `Use eurostat_get_dataset_info to see valid dimension codes for "${input.dataset_code}".`,
+          },
+        });
+      }
+      throw err;
+    }
 
     const OBS_CAP = 5_000;
     const totalObs = result.observations.length;

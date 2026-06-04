@@ -111,11 +111,11 @@ describe('eurostatQueryDataset', () => {
     const ctx = createMockContext({ errors: eurostatQueryDataset.errors });
     const input = eurostatQueryDataset.input.parse({ dataset_code: 'nonexistent_xyz' });
     await expect(eurostatQueryDataset.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'not_found' },
+      data: { reason: 'not_found', recovery: { hint: expect.stringContaining('nonexistent_xyz') } },
     });
   });
 
-  it('throws no_results when the filter combination matches nothing', async () => {
+  it('throws no_results with dataset-contextual recovery hint', async () => {
     vi.mocked(getEurostatDataService).mockReturnValue({
       queryDataset: vi
         .fn()
@@ -129,11 +129,14 @@ describe('eurostatQueryDataset', () => {
       filters: { geo: ['NONEXISTENT'] },
     });
     await expect(eurostatQueryDataset.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'no_results' },
+      data: {
+        reason: 'no_results',
+        recovery: { hint: expect.stringContaining('nama_10_gdp') },
+      },
     });
   });
 
-  it('throws async_response when query is too large', async () => {
+  it('throws async_response with dataset-contextual recovery hint', async () => {
     vi.mocked(getEurostatDataService).mockReturnValue({
       queryDataset: vi
         .fn()
@@ -144,7 +147,31 @@ describe('eurostatQueryDataset', () => {
     const ctx = createMockContext({ errors: eurostatQueryDataset.errors });
     const input = eurostatQueryDataset.input.parse({ dataset_code: 'nama_10_gdp' });
     await expect(eurostatQueryDataset.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'async_response' },
+      data: {
+        reason: 'async_response',
+        recovery: { hint: expect.stringContaining('nama_10_gdp') },
+      },
+    });
+  });
+
+  it('throws invalid_dimension with dataset-contextual recovery hint', async () => {
+    vi.mocked(getEurostatDataService).mockReturnValue({
+      queryDataset: vi
+        .fn()
+        .mockRejectedValue(
+          Object.assign(new Error('invalid dimension'), { data: { reason: 'invalid_dimension' } }),
+        ),
+    } as never);
+    const ctx = createMockContext({ errors: eurostatQueryDataset.errors });
+    const input = eurostatQueryDataset.input.parse({
+      dataset_code: 'nama_10_gdp',
+      filters: { bad_dim: ['X'] },
+    });
+    await expect(eurostatQueryDataset.handler(input, ctx)).rejects.toMatchObject({
+      data: {
+        reason: 'invalid_dimension',
+        recovery: { hint: expect.stringContaining('nama_10_gdp') },
+      },
     });
   });
 

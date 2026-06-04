@@ -94,7 +94,10 @@ describe('eurostatBrowseThemes', () => {
     const ctx = createMockContext({ errors: eurostatBrowseThemes.errors });
     const input = eurostatBrowseThemes.input.parse({ theme_code: 'nonexistent_xyz' });
     await expect(eurostatBrowseThemes.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'not_found' },
+      data: {
+        reason: 'not_found',
+        recovery: { hint: expect.stringContaining('eurostat_browse_themes') },
+      },
     });
   });
 

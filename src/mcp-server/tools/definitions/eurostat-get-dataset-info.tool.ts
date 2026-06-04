@@ -4,7 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getEurostatDataService } from '@/services/eurostat-data/eurostat-data-service.js';
 
 export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
@@ -89,7 +89,27 @@ export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
 
   async handler(input, ctx) {
     const svc = getEurostatDataService();
-    const meta = await svc.getDatasetInfo(input.dataset_code, ctx);
+    let meta: Awaited<ReturnType<typeof svc.getDatasetInfo>>;
+    try {
+      meta = await svc.getDatasetInfo(input.dataset_code, ctx);
+    } catch (err) {
+      const reason = (err as McpError).data?.reason;
+      if (reason === 'not_found') {
+        throw ctx.fail('not_found', (err as Error).message, {
+          recovery: {
+            hint: `Dataset "${input.dataset_code}" not found. Use eurostat_search_datasets or eurostat_browse_themes to find a valid code.`,
+          },
+        });
+      }
+      if (reason === 'async_response') {
+        throw ctx.fail('async_response', (err as Error).message, {
+          recovery: {
+            hint: 'This is unexpected for a metadata call; retry in a few seconds. If it persists, the dataset may be unusually large.',
+          },
+        });
+      }
+      throw err;
+    }
     ctx.log.info('Dataset info fetched', {
       datasetCode: input.dataset_code,
       dimensionCount: meta.dimensions.length,

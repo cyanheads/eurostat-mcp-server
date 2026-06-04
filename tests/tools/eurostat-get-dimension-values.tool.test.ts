@@ -98,7 +98,7 @@ describe('eurostatGetDimensionValues', () => {
       dimension: 'unit',
     });
     await expect(eurostatGetDimensionValues.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'not_found' },
+      data: { reason: 'not_found', recovery: { hint: expect.stringContaining('nonexistent_xyz') } },
     });
   });
 

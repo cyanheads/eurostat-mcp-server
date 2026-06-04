@@ -4,7 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getEurostatDataService } from '@/services/eurostat-data/eurostat-data-service.js';
 import { GEO_LEVEL_VALUES } from '@/services/eurostat-data/types.js';
 
@@ -59,12 +59,24 @@ export const eurostatGetDimensionValues = tool('eurostat_get_dimension_values', 
 
   async handler(input, ctx) {
     const svc = getEurostatDataService();
-    const result = await svc.getDimensionValues(
-      input.dataset_code,
-      input.dimension,
-      input.geo_level,
-      ctx,
-    );
+    let result: Awaited<ReturnType<typeof svc.getDimensionValues>>;
+    try {
+      result = await svc.getDimensionValues(
+        input.dataset_code,
+        input.dimension,
+        input.geo_level,
+        ctx,
+      );
+    } catch (err) {
+      if ((err as McpError).data?.reason === 'not_found') {
+        throw ctx.fail('not_found', (err as Error).message, {
+          recovery: {
+            hint: `Verify the dataset code with eurostat_search_datasets and the dimension code for "${input.dataset_code}" with eurostat_get_dataset_info.`,
+          },
+        });
+      }
+      throw err;
+    }
     ctx.log.info('Dimension values fetched', {
       datasetCode: input.dataset_code,
       dimension: input.dimension,
