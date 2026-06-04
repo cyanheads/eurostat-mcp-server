@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.11](changelog/0.1.x/0.1.11.md) — 2026-06-04
+
+Populate data.recovery.hint via ctx.fail in all four tool handlers — agents now get actionable next-step guidance on every declared error path
+
 ## [0.1.10](changelog/0.1.x/0.1.10.md) — 2026-06-02
 
 @cyanheads/mcp-ts-core ^0.9.16 → ^0.9.21 — per-request log context fix, secret-stripping in fetch errors, withRetry fail-fast; skill sync (api-mirror, orchestrations, 8 updated)
