@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.12](changelog/0.1.x/0.1.12.md) — 2026-06-15
+
+Adopt @cyanheads/mcp-ts-core ^0.10.6: server identity name/title, Docker HEALTHCHECK + image.version label, bundle cleaner for dependency-shipped agent docs, packaging/antipattern lint additions.
+
 ## [0.1.11](changelog/0.1.x/0.1.11.md) — 2026-06-04
 
 Populate data.recovery.hint via ctx.fail in all four tool handlers — agents now get actionable next-step guidance on every declared error path

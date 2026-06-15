@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "eurostat-mcp-server",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "Search and query 8,933 Eurostat datasets \u2014 EU economy, demography, trade, health, and NUTS regional data via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads"
