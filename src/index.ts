@@ -15,6 +15,8 @@ import { initEurostatCatalogueService } from './services/eurostat-catalogue/euro
 import { initEurostatDataService } from './services/eurostat-data/eurostat-data-service.js';
 
 await createApp({
+  name: 'eurostat-mcp-server',
+  title: 'eurostat-mcp-server',
   tools: [
     eurostatSearchDatasets,
     eurostatBrowseThemes,
