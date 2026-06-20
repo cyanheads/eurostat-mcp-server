@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.13](changelog/0.1.x/0.1.13.md) — 2026-06-20
+
+Adopt @cyanheads/mcp-ts-core ^0.10.9: DataCanvas describe() binder-error fix, SQL-gate invalid_sql classification, ctx.content collector, two new devcheck guards (dependency specifiers, plugin-manifest correctness).
+
 ## [0.1.12](changelog/0.1.x/0.1.12.md) — 2026-06-15
 
 Adopt @cyanheads/mcp-ts-core ^0.10.6: server identity name/title, Docker HEALTHCHECK + image.version label, bundle cleaner for dependency-shipped agent docs, packaging/antipattern lint additions.
