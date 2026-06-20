@@ -13,5 +13,8 @@
   },
   "outdated": {
     "allowlist": ["@cyanheads/mcp-ts-core"]
+  },
+  "packaging": {
+    "pluginManifests": true
   }
 }
