@@ -282,9 +282,9 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       `**Dimensions:** ${result.dimensionsUsed.join(', ')}\n`,
     ];
 
-    const maxRows = 200;
-    const shown = result.observations.slice(0, maxRows);
-    for (const obs of shown) {
+    // Render every observation so content[] carries the same rows as structuredContent —
+    // both surfaces are already bounded by the 5,000-row cap the handler applies.
+    for (const obs of result.observations) {
       // dimensions is typed as {} from passthrough() — cast to the runtime shape for rendering
       const dims = obs.dimensions as Record<string, { code: string; label: string } | undefined>;
       const dimParts = result.dimensionsUsed.map(
@@ -293,11 +293,6 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       const val = obs.value != null ? String(obs.value) : 'N/A';
       const statusPart = obs.status ? ` [${obs.status.code}: ${obs.status.label}]` : '';
       lines.push(`${dimParts.join(' | ')} → ${val}${statusPart}`);
-    }
-    if (result.observations.length > maxRows) {
-      lines.push(
-        `\n_(${result.observations.length - maxRows} more observations not shown in text)_`,
-      );
     }
 
     return [{ type: 'text', text: lines.join('\n') }];

@@ -225,7 +225,7 @@ describe('eurostatQueryDataset', () => {
     expect(text).toContain('Italy');
   });
 
-  it('formats truncation note when observations exceed 200', () => {
+  it('renders every observation past row 200 with no text-side truncation', () => {
     const manyObs = Array.from({ length: 205 }, (_, i) =>
       makeObs(`G${i}`, `Country ${i}`, '2023', i * 100),
     );
@@ -237,6 +237,36 @@ describe('eurostatQueryDataset', () => {
     };
     const blocks = eurostatQueryDataset.format!(largeResult);
     const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
-    expect(text).toContain('5 more observations not shown');
+    // Previously capped at 200 rows with an "N more not shown" note — now every row renders.
+    expect(text).not.toContain('not shown');
+    expect(text).toContain('geo=G0');
+    expect(text).toContain('geo=G204');
+    const renderedRows = text.split('\n').filter((l) => l.includes('→')).length;
+    expect(renderedRows).toBe(205);
+  });
+
+  it('content[] carries every structuredContent observation (full parity)', async () => {
+    const manyObs = Array.from({ length: 300 }, (_, i) =>
+      makeObs(`G${i}`, `Country ${i}`, '2023', i),
+    );
+    vi.mocked(getEurostatDataService).mockReturnValue({
+      queryDataset: vi.fn().mockResolvedValue({
+        ...mockQueryResult,
+        observations: manyObs,
+        obsCount: 300,
+        missingObsCount: 0,
+      }),
+    } as never);
+    const ctx = createMockContext({ errors: eurostatQueryDataset.errors });
+    const input = eurostatQueryDataset.input.parse({ dataset_code: 'nama_10_gdp' });
+    // What structuredContent carries (after the handler's 5,000-row cap)…
+    const structured = await eurostatQueryDataset.handler(input, ctx);
+    // …must match what content[] renders, row for row.
+    const blocks = eurostatQueryDataset.format!(structured);
+    const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+    const renderedRows = text.split('\n').filter((l) => l.includes('→')).length;
+    expect(structured.observations).toHaveLength(300);
+    expect(renderedRows).toBe(structured.observations.length);
+    expect(text).toContain('geo=G299');
   });
 });

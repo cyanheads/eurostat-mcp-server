@@ -162,6 +162,21 @@ describe('eurostatBrowseThemes', () => {
     expect(text).not.toContain('Period:');
   });
 
+  it('renders both hasChildren states explicitly (has children / no children)', () => {
+    const result = {
+      items: [
+        { code: 'econ', label: 'Economy', type: 'folder' as const, hasChildren: true },
+        { code: 'ds1', label: 'A dataset', type: 'dataset' as const, hasChildren: false },
+      ],
+      parentPath: [],
+    };
+    const blocks = eurostatBrowseThemes.format!(result);
+    const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+    // The false state was previously silent — now both boolean states render.
+    expect(text).toContain('(has children)');
+    expect(text).toContain('(no children)');
+  });
+
   it('renders the nextStep hint when present', () => {
     const result = {
       items: mockRootItems,

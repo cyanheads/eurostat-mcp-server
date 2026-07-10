@@ -127,7 +127,7 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
       const icon = item.type === 'folder' ? '📁' : '📊';
       lines.push(`${icon} **${item.label}**`);
       lines.push(
-        `  **Code:** ${item.code} | **Type:** ${item.type}${item.hasChildren ? ' (has children)' : ''}`,
+        `  **Code:** ${item.code} | **Type:** ${item.type}${item.hasChildren ? ' (has children)' : ' (no children)'}`,
       );
       if (item.dataStart || item.dataEnd) {
         lines.push(`  **Period:** ${item.dataStart ?? '?'} – ${item.dataEnd ?? '?'}`);
