@@ -55,6 +55,14 @@ export const eurostatGetDimensionValues = tool('eurostat_get_dimension_values', 
       recovery:
         'Verify the dataset code with eurostat_search_datasets and the dimension code with eurostat_get_dataset_info.',
     },
+    {
+      reason: 'async_response',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Eurostat returned an async warning — the dimension query matched too many observations.',
+      retryable: false,
+      recovery:
+        'Use eurostat_get_dataset_info for a sampled value set, or narrow the request with geo_level for the geo dimension.',
+    },
   ],
 
   async handler(input, ctx) {
@@ -68,10 +76,18 @@ export const eurostatGetDimensionValues = tool('eurostat_get_dimension_values', 
         ctx,
       );
     } catch (err) {
-      if ((err as McpError).data?.reason === 'not_found') {
+      const reason = (err as McpError).data?.reason;
+      if (reason === 'not_found') {
         throw ctx.fail('not_found', (err as Error).message, {
           recovery: {
             hint: `Verify the dataset code with eurostat_search_datasets and the dimension code for "${input.dataset_code}" with eurostat_get_dataset_info.`,
+          },
+        });
+      }
+      if (reason === 'async_response') {
+        throw ctx.fail('async_response', (err as Error).message, {
+          recovery: {
+            hint: `The "${input.dimension}" dimension query for "${input.dataset_code}" matched too many observations. Use eurostat_get_dataset_info for a sampled value set, or narrow with geo_level for the geo dimension.`,
           },
         });
       }

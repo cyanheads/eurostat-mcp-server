@@ -102,6 +102,27 @@ describe('eurostatGetDimensionValues', () => {
     });
   });
 
+  it('surfaces async_response with a dimension-contextual recovery hint', async () => {
+    vi.mocked(getEurostatDataService).mockReturnValue({
+      getDimensionValues: vi
+        .fn()
+        .mockRejectedValue(
+          Object.assign(new Error('async response'), { data: { reason: 'async_response' } }),
+        ),
+    } as never);
+    const ctx = createMockContext({ errors: eurostatGetDimensionValues.errors });
+    const input = eurostatGetDimensionValues.input.parse({
+      dataset_code: 'nama_10_gdp',
+      dimension: 'time',
+    });
+    await expect(eurostatGetDimensionValues.handler(input, ctx)).rejects.toMatchObject({
+      data: {
+        reason: 'async_response',
+        recovery: { hint: expect.stringContaining('nama_10_gdp') },
+      },
+    });
+  });
+
   it('formats output with all values', () => {
     const blocks = eurostatGetDimensionValues.format!(mockUnitResult);
     expect(blocks.some((b) => b.type === 'text')).toBe(true);

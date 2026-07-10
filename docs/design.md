@@ -259,7 +259,7 @@ metadata_url: string?    // link to ESMS metadata HTML
 
 ### `eurostat_get_dimension_values`
 
-Returns all valid values for a single dimension in a dataset. Uses the Statistics API — queries with all other dimensions omitted, fixing only the target dimension's containing scope. For `geo`, uses `geoLevel=country` by default; for other dimensions uses no filter (returns all available values in recent data).
+Returns all valid values for a single dimension in a dataset, using the Statistics API. `time` is the only dimension truncated by a `lastTimePeriod=1` slice, so it is enumerated over its full range by pinning every other dimension to a single representative value (drawn from a cheap probe query) and leaving `time` unfiltered — bounding the query to |time| observations so it returns the complete period set without the async 413 an unfiltered query risks on large datasets. Every other dimension's full codelist is present in any single period, so a `lastTimePeriod=1` slice is both complete and cheap; for `geo`, the NUTS-level filter is applied, defaulting to `country`.
 
 **Input:**
 - `dataset_code: string`

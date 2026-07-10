@@ -59,16 +59,29 @@ export class EurostatDataService {
             signal: ctx.signal,
           });
         } catch (err) {
-          // fetchWithTimeout throws McpError for non-2xx responses before the body is parsed.
-          // Map 404s to a clean not_found rather than surfacing the raw FetchHttpError.
+          // fetchWithTimeout throws an McpError for ANY non-2xx response BEFORE the JSON
+          // error body is parsed, so checkResponseErrors() never sees a live error response —
+          // it only runs on HTTP 200 (e.g. the async 413 warning). Re-parse the captured error
+          // body (already on err.data, truncated to 500 bytes) and route it through the same
+          // classifier so Eurostat's error array maps to the declared contract on the live
+          // path too: id 100 → not_found, id 150 → invalid_dimension, other 400 →
+          // conflicting_params. Both channels then carry the reason + recovery hint.
           const errData =
-            err instanceof McpError ? (err.data as Record<string, unknown> | undefined) : undefined;
-          if (errData?.errorSource === 'FetchHttpError' && errData?.statusCode === 404) {
-            const datasetCode = url.pathname.split('/').at(-1) ?? url.pathname;
-            throw notFound(
-              `Dataset "${decodeURIComponent(datasetCode)}" not found. Use eurostat_search_datasets or eurostat_browse_themes to find a valid dataset code.`,
-              { reason: 'not_found', datasetCode: decodeURIComponent(datasetCode) },
-            );
+            err instanceof McpError
+              ? (err.data as { errorSource?: string; responseBody?: string } | undefined)
+              : undefined;
+          if (
+            errData?.errorSource === 'FetchHttpError' &&
+            typeof errData.responseBody === 'string'
+          ) {
+            let parsed: JsonStatResponse | undefined;
+            try {
+              parsed = JSON.parse(errData.responseBody) as JsonStatResponse;
+            } catch {
+              // Body was truncated past the 500-byte cap or is non-JSON (e.g. an HTML
+              // error page) — fall through and rethrow the raw HTTP error unchanged.
+            }
+            if (parsed) this.checkResponseErrors(parsed, url.toString());
           }
           throw err;
         }
@@ -96,9 +109,12 @@ export class EurostatDataService {
   private checkResponseErrors(data: JsonStatResponse, url: string): void {
     // Async response: query too large
     if (data.warning?.status === 413) {
+      // Non-retryable: the same query re-run immediately just re-triggers the async warning.
+      // Fail fast so callers narrow the query instead of hammering the endpoint (matches the
+      // async_response contract's retryable: false).
       throw serviceUnavailable(
         'Eurostat returned an asynchronous response — the query matched too many observations. Add dimension filters (geo, unit, na_item, etc.) to reduce the result size and retry.',
-        { reason: 'async_response', url },
+        { reason: 'async_response', url, retryable: false },
       );
     }
 
@@ -252,8 +268,40 @@ export class EurostatDataService {
   }
 
   /**
-   * Get all valid values for a specific dimension.
-   * For 'geo', applies geoLevel filter; for others, uses lastTimePeriod=1.
+   * Build a filter that pins every dimension except `exceptDim` to its first (index 0)
+   * value, drawn from a probe response. Eurostat orders the primary/aggregate value first
+   * (e.g. an EU aggregate for `geo`), which typically carries the dataset's full time
+   * coverage — so pinning to it and leaving `exceptDim` unfiltered enumerates that
+   * dimension's complete value set with a minimal observation count.
+   */
+  private pinDimensions(data: JsonStatResponse, exceptDim: string): Record<string, string> {
+    const pins: Record<string, string> = {};
+    for (const dim of data.id ?? []) {
+      if (dim === exceptDim) continue;
+      const index = data.dimension?.[dim]?.category?.index;
+      if (!index) continue;
+      let firstCode: string | undefined;
+      let firstPos = Number.POSITIVE_INFINITY;
+      for (const [code, pos] of Object.entries(index)) {
+        if (pos < firstPos) {
+          firstPos = pos;
+          firstCode = code;
+        }
+      }
+      if (firstCode !== undefined) pins[dim] = firstCode;
+    }
+    return pins;
+  }
+
+  /**
+   * Get all valid values for a specific dimension in a dataset.
+   *
+   * `time` is the only dimension truncated by a `lastTimePeriod=1` slice, so it is enumerated
+   * by pinning the other dimensions to a single value each (from a cheap probe) and leaving
+   * `time` unfiltered — returning the full period range while keeping the query bounded to
+   * |time| observations (avoiding the async 413 an unfiltered query risks on large datasets).
+   * Every other dimension's full codelist is present in any single period, so `lastTimePeriod=1`
+   * is both complete and cheap; for `geo` the NUTS level is applied, defaulting to `country`.
    */
   async getDimensionValues(
     datasetCode: string,
@@ -263,15 +311,18 @@ export class EurostatDataService {
   ): Promise<DimensionValuesResult> {
     ctx.log.info('Fetching dimension values', { datasetCode, dimension, geoLevel });
 
-    const params: Record<string, string | string[]> = {};
-    if (dimension === 'geo' && geoLevel) {
-      params.geoLevel = geoLevel;
+    let data: JsonStatResponse;
+    if (dimension === 'time') {
+      const probe = await this.fetchJson(this.buildUrl(datasetCode, { lastTimePeriod: '1' }), ctx);
+      data = await this.fetchJson(
+        this.buildUrl(datasetCode, this.pinDimensions(probe, 'time')),
+        ctx,
+      );
     } else {
-      params.lastTimePeriod = '1';
+      const params: Record<string, string | string[]> = { lastTimePeriod: '1' };
+      if (dimension === 'geo') params.geoLevel = geoLevel ?? 'country';
+      data = await this.fetchJson(this.buildUrl(datasetCode, params), ctx);
     }
-
-    const url = this.buildUrl(datasetCode, params);
-    const data = await this.fetchJson(url, ctx);
 
     const dimDef = data.dimension?.[dimension];
     if (!dimDef) {

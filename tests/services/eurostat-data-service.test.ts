@@ -4,9 +4,9 @@
  * @module tests/services/eurostat-data-service.test
  */
 
-import type { McpError } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   EurostatDataService,
   getEurostatDataService,
@@ -408,5 +408,207 @@ describe('getEurostatDataService', () => {
     const a = getEurostatDataService();
     const b = getEurostatDataService();
     expect(a).toBe(b);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getDimensionValues — param building (fetch-stubbed, exercises the real HTTP path)
+// ---------------------------------------------------------------------------
+
+/** A 200 JSON-stat Response. */
+function okResponse(body: object): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+/** A non-2xx Response carrying a raw Eurostat error body (as fetchWithTimeout would receive it). */
+function errorResponse(status: number, body: string): Response {
+  return new Response(body, { status, statusText: status === 404 ? 'Not Found' : 'Bad Request' });
+}
+/** Build a minimal JSON-stat body enumerating each dimension → its ordered codes. */
+function jsonStat(dims: Record<string, string[]>): JsonStatResponse {
+  const id = Object.keys(dims);
+  return {
+    id,
+    size: id.map((d) => dims[d]?.length ?? 0),
+    label: 'Test Dataset',
+    dimension: Object.fromEntries(
+      id.map((d) => [
+        d,
+        {
+          label: d,
+          category: {
+            index: Object.fromEntries((dims[d] ?? []).map((c, i) => [c, i])),
+            label: Object.fromEntries((dims[d] ?? []).map((c) => [c, c])),
+          },
+        },
+      ]),
+    ),
+    value: {},
+  };
+}
+
+describe('EurostatDataService — getDimensionValues param building', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const svc = () => new EurostatDataService(mockConfig, mockStorage);
+  const paramsOf = (callIndex: number): URLSearchParams =>
+    new URL(String(fetchMock.mock.calls[callIndex]?.[0])).searchParams;
+
+  it('geo without geo_level applies the documented geoLevel=country default', async () => {
+    fetchMock.mockResolvedValue(okResponse(jsonStat({ geo: ['BE', 'BG', 'CZ'] })));
+    const res = await svc().getDimensionValues(
+      'nama_10_gdp',
+      'geo',
+      undefined,
+      createMockContext(),
+    );
+    expect(res.totalCount).toBe(3);
+    const p = paramsOf(0);
+    expect(p.get('geoLevel')).toBe('country');
+    expect(p.get('lastTimePeriod')).toBe('1');
+  });
+
+  it('geo with an explicit geo_level uses that value', async () => {
+    fetchMock.mockResolvedValue(okResponse(jsonStat({ geo: ['EU27_2020', 'EA'] })));
+    await svc().getDimensionValues('nama_10_gdp', 'geo', 'aggregate', createMockContext());
+    expect(paramsOf(0).get('geoLevel')).toBe('aggregate');
+  });
+
+  it('a non-time categorical dimension uses a bounded lastTimePeriod=1 slice', async () => {
+    fetchMock.mockResolvedValue(okResponse(jsonStat({ unit: ['CP_MEUR', 'CLV_I20'] })));
+    const res = await svc().getDimensionValues(
+      'nama_10_gdp',
+      'unit',
+      undefined,
+      createMockContext(),
+    );
+    expect(res.totalCount).toBe(2);
+    const p = paramsOf(0);
+    expect(p.get('lastTimePeriod')).toBe('1');
+    expect(p.has('geoLevel')).toBe(false);
+  });
+
+  it('time enumerates the full range by pinning other dims and leaving time unfiltered', async () => {
+    const probe = jsonStat({
+      freq: ['A'],
+      unit: ['CP_MEUR', 'CLV_I20'],
+      geo: ['EU27_2020', 'DE'],
+      time: ['2025'],
+    });
+    const fullRange = jsonStat({
+      freq: ['A'],
+      unit: ['CP_MEUR'],
+      geo: ['EU27_2020'],
+      time: ['2020', '2021', '2022', '2023', '2024', '2025'],
+    });
+    // The probe carries lastTimePeriod=1; the bounded query carries the pinned dims.
+    fetchMock.mockImplementation(async (input: string | URL) =>
+      okResponse(
+        new URL(String(input)).searchParams.get('lastTimePeriod') === '1' ? probe : fullRange,
+      ),
+    );
+    const res = await svc().getDimensionValues(
+      'nama_10_gdp',
+      'time',
+      undefined,
+      createMockContext(),
+    );
+    // Full period range — not just the latest slice (the bug was totalCount=1, [2025]).
+    expect(res.totalCount).toBe(6);
+    expect(res.values[0]?.code).toBe('2020');
+    expect(res.values.at(-1)?.code).toBe('2025');
+    // The bounded (second) query pins every other dim to its first value and does NOT
+    // restrict time — this is what removes the lastTimePeriod=1 truncation.
+    const bounded = paramsOf(1);
+    expect(bounded.has('lastTimePeriod')).toBe(false);
+    expect(bounded.has('time')).toBe(false);
+    expect(bounded.get('freq')).toBe('A');
+    expect(bounded.get('unit')).toBe('CP_MEUR');
+    expect(bounded.get('geo')).toBe('EU27_2020');
+  });
+
+  it('surfaces async_response (non-retryable) when a dimension query matches too many rows', async () => {
+    fetchMock.mockResolvedValue(
+      okResponse({ warning: { status: 413, label: 'ASYNCHRONOUS_RESPONSE' } }),
+    );
+    await expect(
+      svc().getDimensionValues('nama_10_gdp', 'unit', undefined, createMockContext()),
+    ).rejects.toMatchObject({ data: { reason: 'async_response', retryable: false } });
+    // retryable:false fails fast — no retry storm against an oversized query.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fetchJson — live error classification (fetch-stubbed, exercises the catch-block choke point)
+// ---------------------------------------------------------------------------
+
+describe('EurostatDataService — fetchJson error classification', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const query = (dataset: string, filters: Record<string, string[]>) =>
+    new EurostatDataService(mockConfig, mockStorage).queryDataset(
+      dataset,
+      filters,
+      undefined,
+      undefined,
+      undefined,
+      1,
+      'EN',
+      createMockContext(),
+    );
+
+  it('maps a live HTTP 400 (Eurostat id 150) to invalid_dimension with the ValidationError code', async () => {
+    // The full live path: fetchWithTimeout throws a FetchHttpError McpError for the 400 BEFORE
+    // the body is parsed — the fix re-parses the captured body and classifies it.
+    fetchMock.mockResolvedValue(
+      errorResponse(
+        400,
+        '{ "error": [{"status": 400,"id": 150,"label": "INVALID_QUERY_DIMENSION: Dimension \\"ZZZZ\\" is not defined"}]}',
+      ),
+    );
+    await expect(query('nama_10_gdp', { zzzz: ['x'] })).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_dimension' },
+    });
+    // ValidationError is non-transient — no retry storm.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('maps a live HTTP 404 (Eurostat id 100) to not_found via the same choke point', async () => {
+    fetchMock.mockResolvedValue(
+      errorResponse(
+        404,
+        '{ "error": [{"status": 404,"id": 100,"label": "ERR_NOT_FOUND_4: XYZ is not available for dissemination."}]}',
+      ),
+    );
+    await expect(query('XYZ', {})).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'not_found' },
+    });
+  });
+
+  it('rethrows the raw HTTP error when a truncated error body is not valid JSON', async () => {
+    // Bodies over the 500-byte cap arrive truncated and fail JSON.parse — must degrade, not crash.
+    fetchMock.mockResolvedValue(errorResponse(400, `${'x'.repeat(600)}…`));
+    await expect(query('nama_10_gdp', { zzzz: ['x'] })).rejects.toMatchObject({
+      data: { errorSource: 'FetchHttpError' },
+    });
   });
 });
