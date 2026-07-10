@@ -60,6 +60,8 @@ describe('eurostatBrowseThemes', () => {
     expect(result.items).toHaveLength(2);
     expect(result.parentPath).toEqual([]);
     expect(result.items[0]?.code).toBe('econ');
+    // Folder-only listing → drill-into-sub-themes hint (#13, folder branch).
+    expect(result.nextStep).toContain('sub-themes');
     const enrichment = getEnrichment(ctx);
     expect(enrichment.itemCount).toBe(2);
     expect(enrichment.themeCode).toBeUndefined();
@@ -78,9 +80,22 @@ describe('eurostatBrowseThemes', () => {
     expect(result.items).toHaveLength(2);
     expect(result.parentPath).toEqual(['Economy and finance']);
     expect(result.items[1]?.code).toBe('nama_10_gdp');
+    // Listing contains a queryable dataset → inspect-dimensions hint (#13, dataset branch).
+    expect(result.nextStep).toContain('eurostat_get_dataset_info');
     const enrichment = getEnrichment(ctx);
     expect(enrichment.itemCount).toBe(2);
     expect(enrichment.themeCode).toBe('econ');
+  });
+
+  it('omits nextStep for an empty folder (#13, empty branch)', async () => {
+    vi.mocked(getEurostatCatalogueService).mockReturnValue({
+      browse: vi.fn().mockResolvedValue({ items: [], parentPath: ['Economy and finance'] }),
+    } as never);
+    const ctx = createMockContext({ errors: eurostatBrowseThemes.errors });
+    const input = eurostatBrowseThemes.input.parse({ theme_code: 'empty_folder' });
+    const result = await eurostatBrowseThemes.handler(input, ctx);
+    expect(result.items).toHaveLength(0);
+    expect(result.nextStep).toBeUndefined();
   });
 
   it('throws not_found for an unknown theme_code', async () => {
@@ -145,5 +160,17 @@ describe('eurostatBrowseThemes', () => {
     expect(text).toContain('xyz');
     expect(text).toContain('Test folder');
     expect(text).not.toContain('Period:');
+  });
+
+  it('renders the nextStep hint when present', () => {
+    const result = {
+      items: mockRootItems,
+      parentPath: [],
+      nextStep: 'Pass a folder code back to theme_code to drill into sub-themes.',
+    };
+    const blocks = eurostatBrowseThemes.format!(result);
+    const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+    expect(text).toContain('Next step');
+    expect(text).toContain('sub-themes');
   });
 });

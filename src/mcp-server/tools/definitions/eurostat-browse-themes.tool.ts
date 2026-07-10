@@ -10,14 +10,14 @@ import { getEurostatCatalogueService } from '@/services/eurostat-catalogue/euros
 export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
   title: 'Browse Eurostat Theme Hierarchy',
   description:
-    'Navigate the Eurostat theme tree. Without theme_code returns the 11 top-level theme folders (Economy, Population, Transport, etc.) — the practical starting points. With a theme_code returns its immediate children: subtheme folders and datasets in that branch. Use this for structured discovery when you know the domain but not the dataset code, or to drill down from a broad topic to a specific dataset. Pair with eurostat_search_datasets for keyword-based discovery.',
+    'Navigate the Eurostat theme tree. Without theme_code returns the top-level theme folders (Economy, Population, Transport, etc.) — the practical starting points. With a theme_code returns its immediate children: subtheme folders and datasets in that branch. Use this for structured discovery when you know the domain but not the dataset code, or to drill down from a broad topic to a specific dataset. Pair with eurostat_search_datasets for keyword-based discovery.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({
     theme_code: z
       .string()
       .optional()
       .describe(
-        'Folder code to expand (e.g., "econ", "reg"). Omit to list the 11 top-level theme folders.',
+        'Folder code to expand (e.g., "econ", "reg"). Omit to list the top-level theme folders.',
       ),
   }),
   output: z.object({
@@ -61,12 +61,18 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
           .describe('A theme folder, dataset, or table entry.'),
       )
       .describe(
-        'Immediate children of the requested theme, or the 11 root themes if theme_code was omitted.',
+        'Immediate children of the requested theme, or the root themes if theme_code was omitted.',
       ),
     parentPath: z
       .array(z.string())
       .describe(
         'Breadcrumb from root to the requested theme (e.g., ["Economy and finance", "National accounts"]). Empty when browsing root.',
+      ),
+    nextStep: z
+      .string()
+      .optional()
+      .describe(
+        'Suggested next action based on these results. Populated when there is a clear follow-up call.',
       ),
   }),
   enrichment: {
@@ -102,7 +108,13 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
     }
     ctx.log.info('Theme browse complete', { themeCode, itemCount: browsed.items.length });
     ctx.enrich({ itemCount: browsed.items.length, ...(themeCode && { themeCode }) });
-    return browsed;
+    const nextStep =
+      browsed.items.length === 0
+        ? undefined
+        : browsed.items.some((i) => i.type !== 'folder')
+          ? `Pass a dataset/table code to eurostat_get_dataset_info to inspect dimensions. Pass a folder code back to theme_code to drill deeper.`
+          : `Pass a folder code back to theme_code to drill into sub-themes.`;
+    return { ...browsed, ...(nextStep && { nextStep }) };
   },
 
   format: (result) => {
@@ -123,6 +135,7 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
       if (item.obsCount != null)
         lines.push(`  **Observations:** ${item.obsCount.toLocaleString()}`);
     }
+    if (result.nextStep) lines.push(`\n**Next step:** ${result.nextStep}`);
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });

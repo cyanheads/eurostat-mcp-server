@@ -46,9 +46,30 @@ describe('eurostatSearchDatasets', () => {
     const result = await eurostatSearchDatasets.handler(input, ctx);
     expect(result.datasets).toHaveLength(2);
     expect(result.datasets[0]?.code).toBe('nama_10_gdp');
+    // nextStep is unconditional on a successful (non-throwing) search.
+    expect(result.nextStep).toBeDefined();
     const enrichment = getEnrichment(ctx);
     expect(enrichment.totalMatches).toBe(2);
     expect(enrichment.query).toBe('GDP');
+    // No nextCursor from the service → last page, not truncated.
+    expect(enrichment.truncated).toBe(false);
+    expect(enrichment.nextCursor).toBeUndefined();
+  });
+
+  it('forwards the cursor and surfaces pagination enrichment', async () => {
+    const mockSearch = vi
+      .fn()
+      .mockResolvedValue({ datasets: mockDatasets, totalMatches: 250, nextCursor: 'CURSOR_2' });
+    vi.mocked(getEurostatCatalogueService).mockReturnValue({ search: mockSearch } as never);
+    const ctx = createMockContext({ errors: eurostatSearchDatasets.errors });
+    const input = eurostatSearchDatasets.input.parse({ query: 'GDP', cursor: 'CURSOR_1' });
+    await eurostatSearchDatasets.handler(input, ctx);
+    // Cursor and limit (page size) forwarded to the service.
+    expect(mockSearch).toHaveBeenCalledWith('GDP', 20, 'CURSOR_1', ctx);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.totalMatches).toBe(250);
+    expect(enrichment.truncated).toBe(true);
+    expect(enrichment.nextCursor).toBe('CURSOR_2');
   });
 
   it('throws no_match when no datasets found', async () => {
@@ -89,5 +110,16 @@ describe('eurostatSearchDatasets', () => {
     const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
     expect(text).toContain('abc');
     expect(text).toContain('Test dataset');
+  });
+
+  it('renders the nextStep hint when present', () => {
+    const result = {
+      datasets: mockDatasets,
+      nextStep: 'Pass a "code" value to eurostat_get_dataset_info to inspect dimensions.',
+    };
+    const blocks = eurostatSearchDatasets.format!(result);
+    const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+    expect(text).toContain('Next step');
+    expect(text).toContain('eurostat_get_dataset_info');
   });
 });

@@ -180,6 +180,22 @@ describe('EurostatCatalogueService — browse', () => {
     expect(result.items.map((i) => i.code)).toEqual(['econ', 'pop']);
   });
 
+  it('unions the children of every depth-0 root at root level (#20)', async () => {
+    // The live TOC carries two depth-0 folder roots; both roots' depth-1
+    // children must surface at root, in root order (first root's, then second's).
+    const svc = await makeLoadedService([
+      tocLine('Database by themes', 'data', 'folder'),
+      tocLine('    Economy', 'econ', 'folder'),
+      tocLine('    Population', 'pop', 'folder'),
+      tocLine('Cross cutting topics', 'data2', 'folder'),
+      tocLine('    Tables on EU policy', 'tb_eu', 'folder'),
+      tocLine('    Cross cutting', 'cc', 'folder'),
+    ]);
+    const ctx = createMockContext();
+    const result = await svc.browse(undefined, ctx);
+    expect(result.items.map((i) => i.code)).toEqual(['econ', 'pop', 'tb_eu', 'cc']);
+  });
+
   it('returns children and parentPath for a valid themeCode', async () => {
     const svc = await makeLoadedService([
       tocLine('Database by themes', 'data', 'folder'),
@@ -261,41 +277,132 @@ describe('EurostatCatalogueService — search', () => {
       tocLine('Regional GDP data', 'reg_eco3gdp', 'dataset'),
     ]);
     const ctx = createMockContext();
-    const { datasets, totalMatches } = await svc.search('gdp', 10, ctx);
+    const { datasets, totalMatches } = await svc.search('gdp', 10, undefined, ctx);
     expect(totalMatches).toBe(2);
     expect(datasets.map((d) => d.code)).toContain('nama_10_gdp');
     expect(datasets.map((d) => d.code)).toContain('reg_eco3gdp');
   });
 
-  it('excludes folder entries from search results', async () => {
+  it('ANDs whitespace tokens — every token must match, order-independent (#14)', async () => {
     const svc = await makeLoadedService([
-      tocLine('Economy folder', 'econ', 'folder'),
-      tocLine('GDP dataset', 'nama_10_gdp', 'dataset'),
+      tocLine('Business demography by size class and NUTS 3 region', 'bd_size_r', 'dataset'),
+      tocLine('Business demography by legal form', 'bd_legal', 'dataset'),
     ]);
     const ctx = createMockContext();
-    const { datasets } = await svc.search('economy', 10, ctx);
-    // 'econ' folder matches by label but must be excluded
-    expect(datasets.map((d) => d.code)).not.toContain('econ');
+    // Non-contiguous, out-of-order tokens, all present only in the first label.
+    const { datasets, totalMatches } = await svc.search(
+      'business demography NUTS 3',
+      10,
+      undefined,
+      ctx,
+    );
+    expect(totalMatches).toBe(1);
+    expect(datasets[0]?.code).toBe('bd_size_r');
   });
 
-  it('respects the limit parameter', async () => {
+  it('returns zero matches when any single token is absent (#14)', async () => {
+    const svc = await makeLoadedService([
+      tocLine('Business demography by size class', 'bd_size', 'dataset'),
+    ]);
+    const ctx = createMockContext();
+    const { datasets, totalMatches } = await svc.search(
+      'business demography trade',
+      10,
+      undefined,
+      ctx,
+    );
+    expect(totalMatches).toBe(0);
+    expect(datasets).toHaveLength(0);
+  });
+
+  it('matches tokens found only in the theme breadcrumb (#14)', async () => {
+    const svc = await makeLoadedService([
+      tocLine('Root', 'root', 'folder'),
+      tocLine('    Regional statistics by NUTS classification', 'reg', 'folder'),
+      tocLine('        Economic accounts', 'aact_eaa', 'dataset'),
+    ]);
+    const ctx = createMockContext();
+    // "regional" lives only in the themePath — never in the label or code.
+    const { datasets } = await svc.search('regional economic accounts', 10, undefined, ctx);
+    expect(datasets.map((d) => d.code)).toContain('aact_eaa');
+  });
+
+  it('matches tokens found only in the dataset code (#14)', async () => {
+    const svc = await makeLoadedService([
+      tocLine('Gross domestic product', 'nama_10_gdp', 'dataset'),
+    ]);
+    const ctx = createMockContext();
+    // "nama" appears only in the code, "gross" only in the label.
+    const { datasets } = await svc.search('nama gross', 10, undefined, ctx);
+    expect(datasets[0]?.code).toBe('nama_10_gdp');
+  });
+
+  it('excludes folder entries from search results', async () => {
+    const svc = await makeLoadedService([
+      tocLine('Economy', 'econ', 'folder'),
+      tocLine('Economy and GDP', 'nama_10_gdp', 'dataset'),
+    ]);
+    const ctx = createMockContext();
+    const { datasets } = await svc.search('economy', 10, undefined, ctx);
+    // 'econ' folder matches by label but must be excluded; the matching dataset stays.
+    expect(datasets.map((d) => d.code)).not.toContain('econ');
+    expect(datasets.map((d) => d.code)).toContain('nama_10_gdp');
+  });
+
+  it('paginates with an opaque cursor — page size, nextCursor, no overlap or omission (#16)', async () => {
+    const svc = await makeLoadedService([
+      tocLine('GDP alpha', 'gdp_a', 'dataset'),
+      tocLine('GDP beta', 'gdp_b', 'dataset'),
+      tocLine('GDP gamma', 'gdp_c', 'dataset'),
+      tocLine('GDP delta', 'gdp_d', 'dataset'),
+      tocLine('GDP epsilon', 'gdp_e', 'dataset'),
+    ]);
+    const ctx = createMockContext();
+
+    const page1 = await svc.search('gdp', 2, undefined, ctx);
+    expect(page1.totalMatches).toBe(5);
+    expect(page1.datasets).toHaveLength(2);
+    expect(page1.nextCursor).toBeDefined();
+
+    const page2 = await svc.search('gdp', 2, page1.nextCursor, ctx);
+    expect(page2.datasets).toHaveLength(2);
+    expect(page2.nextCursor).toBeDefined();
+
+    const page3 = await svc.search('gdp', 2, page2.nextCursor, ctx);
+    expect(page3.datasets).toHaveLength(1);
+    // Last page carries no continuation cursor.
+    expect(page3.nextCursor).toBeUndefined();
+
+    // Every match retrieved exactly once, in stable order, across the three pages.
+    const seen = [...page1.datasets, ...page2.datasets, ...page3.datasets].map((d) => d.code);
+    expect(seen).toEqual(['gdp_a', 'gdp_b', 'gdp_c', 'gdp_d', 'gdp_e']);
+  });
+
+  it('respects the limit as the page size', async () => {
     const svc = await makeLoadedService([
       tocLine('GDP alpha', 'gdp_a', 'dataset'),
       tocLine('GDP beta', 'gdp_b', 'dataset'),
       tocLine('GDP gamma', 'gdp_c', 'dataset'),
     ]);
     const ctx = createMockContext();
-    const { datasets, totalMatches } = await svc.search('gdp', 2, ctx);
+    const { datasets, totalMatches, nextCursor } = await svc.search('gdp', 2, undefined, ctx);
     expect(totalMatches).toBe(3);
     expect(datasets).toHaveLength(2);
+    expect(nextCursor).toBeDefined();
   });
 
   it('returns empty datasets array for no-match query', async () => {
     const svc = await makeLoadedService([tocLine('GDP dataset', 'nama_10_gdp', 'dataset')]);
     const ctx = createMockContext();
-    const { datasets, totalMatches } = await svc.search('xyz_nonexistent_123', 10, ctx);
+    const { datasets, totalMatches, nextCursor } = await svc.search(
+      'xyz_nonexistent_123',
+      10,
+      undefined,
+      ctx,
+    );
     expect(datasets).toHaveLength(0);
     expect(totalMatches).toBe(0);
+    expect(nextCursor).toBeUndefined();
   });
 
   it('includes themePath in results', async () => {
@@ -305,14 +412,14 @@ describe('EurostatCatalogueService — search', () => {
       tocLine('        GDP dataset', 'nama_10_gdp', 'dataset'),
     ]);
     const ctx = createMockContext();
-    const { datasets } = await svc.search('gdp', 10, ctx);
+    const { datasets } = await svc.search('gdp', 10, undefined, ctx);
     expect(datasets[0]?.themePath).toContain('Economy');
   });
 
   it('matches table type entries', async () => {
     const svc = await makeLoadedService([tocLine('Trade summary table', 'trade_sum', 'table')]);
     const ctx = createMockContext();
-    const { datasets } = await svc.search('trade', 10, ctx);
+    const { datasets } = await svc.search('trade', 10, undefined, ctx);
     expect(datasets[0]?.type).toBe('table');
     expect(datasets[0]?.code).toBe('trade_sum');
   });
@@ -320,7 +427,7 @@ describe('EurostatCatalogueService — search', () => {
   it('handles unicode in labels', async () => {
     const svc = await makeLoadedService([tocLine('Données démographiques', 'demo_fr', 'dataset')]);
     const ctx = createMockContext();
-    const { datasets } = await svc.search('données', 10, ctx);
+    const { datasets } = await svc.search('données', 10, undefined, ctx);
     expect(datasets[0]?.code).toBe('demo_fr');
   });
 });

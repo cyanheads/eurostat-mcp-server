@@ -26,7 +26,7 @@ await createApp({
   ],
   resources: [eurostatDatasetResource],
   prompts: [],
-  instructions: `Eurostat MCP server — EU statistical data across 8,933 datasets.
+  instructions: `Eurostat MCP server — EU statistical data across the Eurostat catalogue.
 Workflow: eurostat_search_datasets or eurostat_browse_themes to find a dataset code → eurostat_get_dataset_info to see dimensions → eurostat_get_dimension_values to list valid filter values → eurostat_query_dataset to fetch observations.
 Apply dimension filters to avoid async response errors on large datasets.`,
   landing: { requireAuth: false },

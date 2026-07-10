@@ -10,20 +10,30 @@ import { getEurostatCatalogueService } from '@/services/eurostat-catalogue/euros
 export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
   title: 'Search Eurostat Datasets',
   description:
-    'Search the Eurostat catalogue (8,933 datasets) by keyword. Returns matching datasets with codes, descriptions, period coverage, and theme breadcrumbs. Use this to discover dataset codes before calling eurostat_get_dataset_info or eurostat_query_dataset. Results are limited to datasets and predefined tables — folders are excluded.',
+    'Search the Eurostat catalogue by keyword. Returns matching datasets with codes, descriptions, period coverage, and theme breadcrumbs. Use this to discover dataset codes before calling eurostat_get_dataset_info or eurostat_query_dataset. Results are limited to datasets and predefined tables — folders are excluded.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({
     query: z
       .string()
       .min(1)
-      .describe('Search terms — case-insensitive substring match against dataset labels.'),
+      .describe(
+        'Search terms. Split on whitespace into tokens; every token must match (AND), case-insensitively, somewhere across the dataset label, theme breadcrumb, or code. Word order does not matter, so "business demography NUTS 3" or "regional economic accounts" resolve without naming a label verbatim.',
+      ),
     limit: z
       .number()
       .int()
       .min(1)
       .max(100)
       .default(20)
-      .describe('Maximum number of results to return (1–100). Default is 20.'),
+      .describe(
+        'Page size — maximum datasets returned per page (1–100). Default is 20. To retrieve matches beyond one page, pass the returned nextCursor back as cursor; the page size is fixed by this first call.',
+      ),
+    cursor: z
+      .string()
+      .optional()
+      .describe(
+        "Opaque pagination cursor from a previous call's nextCursor. Omit for the first page; pass it back to fetch the next page of matches over a stable order.",
+      ),
   }),
   output: z.object({
     datasets: z
@@ -73,11 +83,30 @@ export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
           })
           .describe('A matched dataset entry.'),
       )
-      .describe('Matching datasets, up to the requested limit.'),
+      .describe('Matching datasets for the current page, up to the requested limit.'),
+    nextStep: z
+      .string()
+      .optional()
+      .describe(
+        'Suggested next action based on these results. Populated when there is a clear follow-up call.',
+      ),
   }),
   enrichment: {
     query: z.string().describe('Search terms as submitted.'),
-    totalMatches: z.number().describe('Total datasets matching the query before the limit.'),
+    totalMatches: z
+      .number()
+      .describe('Total datasets matching the query across all pages, before the page limit.'),
+    truncated: z
+      .boolean()
+      .describe(
+        'True when more matches remain beyond this page — pass nextCursor as cursor to fetch them.',
+      ),
+    nextCursor: z
+      .string()
+      .optional()
+      .describe(
+        'Opaque cursor for the next page of matches. Pass it back as cursor. Omitted on the last page.',
+      ),
   },
 
   errors: [
@@ -92,7 +121,12 @@ export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
 
   async handler(input, ctx) {
     const svc = getEurostatCatalogueService();
-    const { datasets, totalMatches } = await svc.search(input.query, input.limit, ctx);
+    const { datasets, totalMatches, nextCursor } = await svc.search(
+      input.query,
+      input.limit,
+      input.cursor,
+      ctx,
+    );
 
     if (datasets.length === 0) {
       throw ctx.fail('no_match', `No datasets matched "${input.query}".`, {
@@ -102,13 +136,23 @@ export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
       });
     }
 
+    const hasMore = nextCursor !== undefined;
     ctx.log.info('Dataset search complete', {
       query: input.query,
       totalMatches,
       returned: datasets.length,
+      hasMore,
     });
-    ctx.enrich({ query: input.query, totalMatches });
-    return { datasets };
+    ctx.enrich({
+      query: input.query,
+      totalMatches,
+      truncated: hasMore,
+      ...(hasMore && { nextCursor }),
+    });
+    return {
+      datasets,
+      nextStep: `Pass a "code" value to eurostat_get_dataset_info to inspect dimensions, or to eurostat_query_dataset to fetch data.`,
+    };
   },
 
   format: (result) => {
@@ -125,6 +169,7 @@ export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
       if (d.lastUpdated) lines.push(`**Last updated:** ${d.lastUpdated}`);
       if (d.themePath.length > 0) lines.push(`**Theme:** ${d.themePath.join(' › ')}`);
     }
+    if (result.nextStep) lines.push(`\n**Next step:** ${result.nextStep}`);
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });

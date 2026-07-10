@@ -6,8 +6,8 @@
 
 | Name | Description | Key Inputs | Annotations |
 |:-----|:------------|:-----------|:------------|
-| `eurostat_search_datasets` | Search the Eurostat catalogue (8,933 datasets) by keyword. Returns matching datasets with codes, descriptions, and period coverage. | `query`, `limit` | `readOnlyHint: true` |
-| `eurostat_browse_themes` | List the Eurostat theme hierarchy. At root returns the 11 second-level theme folders (Economy, Population, Transport, etc.) — the practical entry points for navigation. With a `theme_code` returns its immediate children (subthemes and datasets). Enables tree-navigation for dataset discovery without text search. | `theme_code?` | `readOnlyHint: true, openWorldHint: false` |
+| `eurostat_search_datasets` | Search the Eurostat catalogue by keyword (whitespace tokens ANDed across label, theme breadcrumb, and code). Returns matching datasets with codes, descriptions, and period coverage; cursor-paginated. | `query`, `limit`, `cursor?` | `readOnlyHint: true` |
+| `eurostat_browse_themes` | List the Eurostat theme hierarchy. At root returns the second-level theme folders (Economy, Population, Transport, etc.) — the practical entry points for navigation. With a `theme_code` returns its immediate children (subthemes and datasets). Enables tree-navigation for dataset discovery without text search. | `theme_code?` | `readOnlyHint: true, openWorldHint: false` |
 | `eurostat_get_dataset_info` | Fetch metadata for a dataset: dimensions, their codes and descriptions, time range, obs count, and last-updated date. The prerequisite call before querying data — reveals what `unit`, `na_item`, and other dimension values are valid. | `dataset_code` | `readOnlyHint: true` |
 | `eurostat_get_dimension_values` | List valid values for a specific dimension in a dataset (e.g., all `unit` codes for `nama_10_gdp`). Useful when the full dimension list from `get_dataset_info` is large and needs exploring. | `dataset_code`, `dimension` | `readOnlyHint: true` |
 | `eurostat_query_dataset` | Fetch statistical data from a dataset with dimension filters. Returns decoded observations (code, label, value, status flag) plus metadata about the query. Supports `geoLevel` for NUTS hierarchy filtering. | `dataset_code`, `filters{}`, `geo_level?`, `since_period?`, `until_period?`, `last_n_periods?`, `lang?` | `readOnlyHint: true` |
@@ -35,8 +35,8 @@ Target users: economic researchers comparing EU countries or regions, journalist
 ## Requirements
 
 - Read-only; no writes to Eurostat
-- Dataset discovery by text search across 8,933 datasets
-- Theme tree navigation (11 second-level theme folders as practical root, hierarchical subthemes)
+- Dataset discovery by keyword search across the Eurostat catalogue
+- Theme tree navigation (second-level theme folders as practical root, hierarchical subthemes)
 - Dataset metadata: dimensions, valid dimension values, time range, obs count
 - Data queries filtered by any combination of dimensions (geo, time, unit, na_item, etc.)
 - `geoLevel` support: `aggregate`, `country`, `nuts1`, `nuts2`, `nuts3`
@@ -176,11 +176,12 @@ Returns all valid values for a named codelist (e.g., `GEO`, `FREQ`, `UNIT`, `NA_
 
 ### `eurostat_search_datasets`
 
-Searches the in-memory TOC index (loaded from the catalogue TXT file). Text matching runs against dataset labels — case-insensitive substring. Returns datasets only (not folders), ranked by label relevance.
+Searches the in-memory TOC index (loaded from the catalogue TXT file). The query is tokenized on whitespace and every token must match (AND), case-insensitively, somewhere in a combined `label + theme_path + code` haystack — so concept-order and theme-named queries resolve even when no single label contains the phrase verbatim. Returns datasets only (not folders), in TOC order. Paginated with the framework's opaque-cursor primitive (`paginateArray`): `limit` is the page size and the returned `next_cursor` fetches the next page over a stable order.
 
 **Input:**
-- `query: string` — search terms
-- `limit: number` (default 20, max 100) — max results
+- `query: string` — search terms (tokenized, AND-matched across label + theme_path + code)
+- `limit: number` (default 20, max 100) — page size
+- `cursor: string?` — opaque pagination cursor from a prior call's `next_cursor`; omit for the first page
 
 **Output:**
 ```
@@ -194,15 +195,16 @@ datasets: [{
   obs_count: number?
   theme_path: string[]   // breadcrumb: ["Economy and finance", "National accounts", ...]
 }]
-total_matches: number    // full count, not just the slice
+next_step: string?       // suggested follow-up tool call
 ```
+Enrichment (both surfaces): `total_matches` (full count across all pages), `truncated` (true when more matches remain beyond this page), `next_cursor?` (opaque cursor for the next page; omitted on the last page — pass back as `cursor`).
 
 **Errors:**
 - `no_match` (NotFound): no datasets matched the query
 
 ### `eurostat_browse_themes`
 
-Navigation tool for the TOC tree. Without `theme_code` returns the 11 second-level theme folders (the TOC root contains a single "Database by themes" folder; this tool skips that wrapper and returns its children directly as the practical starting point). With `theme_code` returns its immediate children (subthemes and datasets in that branch).
+Navigation tool for the TOC tree. Without `theme_code` returns the second-level theme folders. The TOC may contain more than one depth-0 root folder — historically a single "Database by themes" wrapper, but the live TOC also carries a separate "Cross cutting topics" root — so this tool skips every depth-0 wrapper and unions their depth-1 children, in root order, ensuring all top-level themes are reachable from a root-level browse. With `theme_code` returns its immediate children (subthemes and datasets in that branch).
 
 **Input:**
 - `theme_code: string?` — folder code to expand; omit for root
@@ -220,6 +222,7 @@ items: [{
   obs_count?: number
 }]
 parent_path: string[]   // breadcrumb from root to current
+next_step: string?      // suggested follow-up (drill into folders or inspect a dataset); omitted for empty results
 ```
 
 **Errors:**
@@ -354,7 +357,7 @@ missing_obs_count: number         // observations with null value
 
 **Why `geo` filter and `geoLevel` are mutually exclusive at the tool layer:** This mirrors the Eurostat API constraint — sending both causes a 400 error with `"'geo' parameter and 'geoLevel' parameter cannot be set at the same time."` The server validates and rejects early with a clear message rather than passing through to Eurostat.
 
-**Why dataset search runs against the TOC (not the SDMX catalog):** The SDMX `dataflow` endpoint returns 8,220 datasets (not all are in the TOC; the TOC has 8,933 entries including predefined tables). The TOC also includes theme hierarchy which powers `browse_themes`. Using one source for both tools keeps the implementation simpler and avoids two large fetch operations.
+**Why dataset search runs against the TOC (not the SDMX catalog):** The TOC carries more entries than the SDMX `dataflow` endpoint — it includes predefined tables the dataflow list omits (at the 2026-05 design pass the counts were ~8,220 SDMX dataflows vs ~8,933 TOC entries; both drift upstream over time, so treat these figures as historical). The TOC also includes theme hierarchy which powers `browse_themes`. Using one source for both tools keeps the implementation simpler and avoids two large fetch operations.
 
 **Why no `eurostat_get_codelist` tool:** The SDMX codelist endpoint (e.g., `/codelist/ESTAT/GEO`) returns global codelists with 4,292+ geo entries — the vast majority are irrelevant to any specific dataset. The `get_dimension_values` tool is dataset-scoped and returns only the values that actually appear in the data, which is what agents need.
 

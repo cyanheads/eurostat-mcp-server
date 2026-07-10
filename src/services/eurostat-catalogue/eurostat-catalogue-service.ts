@@ -8,7 +8,7 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { fetchWithTimeout, paginateArray, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import type { BrowseItem, DatasetResult, TocEntry } from './types.js';
 
@@ -194,16 +194,20 @@ export class EurostatCatalogueService {
   }
 
   /**
-   * Find the "root" of the TOC — the 11 second-level theme folders.
-   * The TOC has a single depth-0 root ("Database by themes"); we skip it
-   * and return its depth-1 children as the practical entry points.
+   * Find the top-level theme folders — the depth-1 children of every depth-0
+   * folder root. The live TOC can carry more than one depth-0 root (e.g.
+   * "Database by themes" plus a separate "Cross cutting topics" block), so we
+   * union the children of all of them, in root order, to keep every top-level
+   * theme reachable from a root-level browse.
    */
   private findRootChildren(entries: TocEntry[]): number[] {
-    const rootIdx = entries.findIndex((e) => e.depth === 0 && e.type === 'folder');
-    if (rootIdx === -1) {
+    const rootIdxs = this.indexesWhere(entries, (e) => e.depth === 0 && e.type === 'folder');
+    if (rootIdxs.length === 0) {
       return this.indexesWhere(entries, (e) => e.depth === 0);
     }
-    return this.indexesWhere(entries, (e) => e.parentIndex === rootIdx);
+    return rootIdxs.flatMap((rootIdx) =>
+      this.indexesWhere(entries, (e) => e.parentIndex === rootIdx),
+    );
   }
 
   /** Get immediate children of a folder code, or root theme folders if code is undefined. */
@@ -262,25 +266,33 @@ export class EurostatCatalogueService {
   }
 
   /**
-   * Search datasets by case-insensitive substring match against labels.
-   * Returns datasets only (not folders), up to `limit` results.
+   * Search datasets by keyword. The query is tokenized on whitespace and every
+   * token must match (AND), case-insensitively, somewhere in a combined
+   * `label + themePath + code` haystack — so concept-order and theme-named
+   * queries resolve even when no single label contains the phrase verbatim.
+   * Returns datasets only (not folders). Results are paginated with an opaque
+   * cursor (`limit` = page size, capped at 100); pass the returned `nextCursor`
+   * back as `cursor` to page through the rest over a stable catalogue order.
    */
   async search(
     query: string,
     limit: number,
+    cursor: string | undefined,
     ctx: Context,
-  ): Promise<{ datasets: DatasetResult[]; totalMatches: number }> {
+  ): Promise<{ datasets: DatasetResult[]; totalMatches: number; nextCursor?: string }> {
     const toc = await this.ensureLoaded(ctx);
-    const q = query.toLowerCase();
+    const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
 
-    const matched = toc.entries
-      .map((e, i) => ({ e, i }))
-      .filter(({ e }) => e.type !== 'folder' && e.label.toLowerCase().includes(q));
+    const matched = toc.entries.flatMap((e, i) => {
+      if (e.type === 'folder') return [];
+      const themePath = this.buildPath(toc.entries, i);
+      const haystack = `${e.label} ${themePath.join(' ')} ${e.code}`.toLowerCase();
+      return tokens.every((t) => haystack.includes(t)) ? [{ e, themePath }] : [];
+    });
 
-    const totalMatches = matched.length;
-    const sliced = matched.slice(0, limit);
+    const page = paginateArray(matched, cursor, limit, 100, asReqCtx(ctx));
 
-    const datasets: DatasetResult[] = sliced.map(({ e, i }) => ({
+    const datasets: DatasetResult[] = page.items.map(({ e, themePath }) => ({
       code: e.code,
       label: e.label,
       type: e.type as 'dataset' | 'table',
@@ -288,10 +300,14 @@ export class EurostatCatalogueService {
       ...(e.dataEnd && { dataEnd: e.dataEnd }),
       ...(e.lastUpdated && { lastUpdated: e.lastUpdated }),
       ...(e.obsCount !== undefined && { obsCount: e.obsCount }),
-      themePath: this.buildPath(toc.entries, i),
+      themePath,
     }));
 
-    return { datasets, totalMatches };
+    return {
+      datasets,
+      totalMatches: page.totalCount ?? matched.length,
+      ...(page.nextCursor !== undefined && { nextCursor: page.nextCursor }),
+    };
   }
 }
 
