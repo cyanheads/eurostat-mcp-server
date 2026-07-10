@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.15](changelog/0.1.x/0.1.15.md) — 2026-07-10
+
+content[]/structuredContent parity for query_dataset and browse_themes; get_dimension_values returns the full time range and defaults geo to country; invalid dimension values now surface the declared error contract.
+
 ## [0.1.14](changelog/0.1.x/0.1.14.md) — 2026-07-10
 
 Tokenized multi-word search, cursor pagination, and nextStep hints for the discovery tools; multi-root theme browse fix; stale catalogue counts removed; mcp-ts-core ^0.10.9 → ^0.10.14.
