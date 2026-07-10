@@ -1,6 +1,6 @@
 <div align="center">
   <h1>@cyanheads/eurostat-mcp-server</h1>
-  <p><b>Search and query 8,933 Eurostat datasets — EU economy, demography, trade, health, and NUTS regional data via MCP. STDIO or Streamable HTTP.</b>
+  <p><b>Search and query the Eurostat catalogue — EU economy, demography, trade, health, and NUTS regional data via MCP. STDIO or Streamable HTTP.</b>
   <div>5 Tools • 1 Resource</div>
   </p>
 </div>
@@ -9,7 +9,7 @@
 
 
 
-[![Version](https://img.shields.io/badge/Version-0.1.13-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/eurostat-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/eurostat-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/eurostat-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.14-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/eurostat-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/eurostat-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/eurostat-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -35,7 +35,7 @@
 
 | Tool | Description |
 |:---|:---|
-| `eurostat_search_datasets` | Search the Eurostat catalogue (8,933 datasets) by keyword — returns codes, descriptions, period coverage, and theme breadcrumbs |
+| `eurostat_search_datasets` | Search the Eurostat catalogue by keyword — returns codes, descriptions, period coverage, and theme breadcrumbs |
 | `eurostat_browse_themes` | Navigate the Eurostat theme hierarchy — list root themes or drill into subthemes and datasets |
 | `eurostat_get_dataset_info` | Fetch metadata for a dataset: dimensions with sample values, time range, observation count, and last-update date |
 | `eurostat_get_dimension_values` | List all valid codes for a specific dimension (e.g., all geo codes, all unit codes); supports NUTS hierarchy filtering |
@@ -45,9 +45,10 @@
 
 Search the Eurostat dataset catalogue by keyword.
 
-- Case-insensitive substring match against dataset labels across 8,933 datasets
+- Tokenized keyword match — whitespace-separated tokens are ANDed case-insensitively across each dataset's label, theme breadcrumb, and code, so word order and theme-named queries resolve without a verbatim label
 - Returns code, label, type (dataset/table), period coverage, observation count, and theme breadcrumb
-- Configurable result limit (1–100, default 20); reports total matches before the limit
+- Cursor pagination: `limit` (1–100, default 20) sets the page size, `totalMatches` reports the full count, and passing the returned `nextCursor` back as `cursor` pages through every match over a stable order
+- `nextStep` hint on each result points at the next tool to call
 - Catalogue loaded once per session from the Eurostat TOC file
 - Pair with `eurostat_browse_themes` for structured domain exploration when keywords are unclear
 
@@ -57,10 +58,10 @@ Search the Eurostat dataset catalogue by keyword.
 
 Navigate the Eurostat theme tree.
 
-- Without `theme_code`: returns the 11 top-level themes (Economy and finance, Population, Transport, etc.)
+- Without `theme_code`: returns the top-level themes (Economy and finance, Population, Transport, etc.)
 - With `theme_code`: returns immediate children — subtheme folders and datasets in that branch
 - Each entry includes code, label, type (folder/dataset/table), data period, and observation count where available
-- Returns a breadcrumb path from root to the current node
+- Returns a breadcrumb path from root to the current node, plus a `nextStep` hint suited to the level (drill into folders or inspect a dataset)
 - Use for structured discovery when you know the domain but not the exact dataset code
 
 ---

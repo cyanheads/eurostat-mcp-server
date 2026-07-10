@@ -7,7 +7,8 @@
       "tsc-alias",
       "depcheck",
       "tsx",
-      "@cyanheads/mcp-ts-core"
+      "@cyanheads/mcp-ts-core",
+      "@socketsecurity/bun-security-scanner"
     ],
     "ignorePatterns": []
   },

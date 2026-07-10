@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.cyanheads/eurostat-mcp-server",
-  "description": "Search and query 8,933 Eurostat datasets — EU economy, demography, trade, and NUTS regional data.",
+  "description": "Search and query the Eurostat catalogue — EU economy, demography, trade, and NUTS regional data.",
   "repository": {
     "url": "https://github.com/cyanheads/eurostat-mcp-server",
     "source": "github"
@@ -12,14 +12,14 @@
       "url": "https://eurostat.caseyjhand.com/mcp"
     }
   ],
-  "version": "0.1.13",
+  "version": "0.1.14",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/eurostat-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.1.13",
+      "version": "0.1.14",
       "packageArguments": [
         {
           "type": "positional",
@@ -62,7 +62,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/eurostat-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.1.13",
+      "version": "0.1.14",
       "packageArguments": [
         {
           "type": "positional",

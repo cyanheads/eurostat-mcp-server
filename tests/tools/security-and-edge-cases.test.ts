@@ -186,6 +186,7 @@ describe('Injection resistance', () => {
     "'; DROP TABLE datasets; --",
     '<script>alert(1)</script>',
     '../../../etc/passwd',
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: intentional SSTI template-injection payload — the ${...} is fixture data under test, not a mistaken template literal
     `${'${7*7}'}`,
     '{{7*7}}',
     '\x00\x01\x02',
