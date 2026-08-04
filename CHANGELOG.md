@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.0](changelog/0.6.x/0.6.0.md) — 2026-08-04 · ⚠️ Breaking
+
+eurostat_query_dataset's observations[].status carries only the OBS_FLAG now, confidentiality moved to a new confStatus field (#35); a wholly-confidential slice no longer wrongly raises no_results (#36).
+
 ## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-08-04
 
 eurostat_download_dataset reads the SDMX 2.1 TSV bulk endpoint — roughly half the bytes of eurostat_query_dataset — and stages a whole dataset on the dataframe canvas (#8).
