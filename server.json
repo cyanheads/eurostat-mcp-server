@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.cyanheads/eurostat-mcp-server",
-  "description": "Search and query the Eurostat catalogue — EU economy, demography, trade, and NUTS regional data.",
+  "description": "Search and query the Eurostat catalogue \u2014 EU economy, demography, trade, and NUTS regional data.",
   "repository": {
     "url": "https://github.com/cyanheads/eurostat-mcp-server",
     "source": "github"
@@ -12,14 +12,14 @@
       "url": "https://eurostat.caseyjhand.com/mcp"
     }
   ],
-  "version": "0.3.0",
+  "version": "0.4.0",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/eurostat-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "packageArguments": [
         {
           "type": "positional",
@@ -58,6 +58,33 @@
           "format": "string",
           "isRequired": false,
           "default": "43200000"
+        },
+        {
+          "name": "CANVAS_PROVIDER_TYPE",
+          "description": "Set to 'duckdb' to enable the dataframe canvas, which lists the eurostat_dataframe_describe and eurostat_dataframe_query tools and lets eurostat_query_dataset stage a match larger than its 5,000-row inline cap as a SQL table. The DuckDB binding ships with the server, so this variable is the only switch.",
+          "format": "string",
+          "isRequired": false,
+          "default": "none"
+        },
+        {
+          "name": "CANVAS_TEMP_PATH",
+          "description": "Directory DuckDB writes canvas spill files to. Must be writable by the server process. Defaults to a 'mcp-canvas' directory under the OS temp directory.",
+          "format": "string",
+          "isRequired": false
+        },
+        {
+          "name": "CANVAS_TTL_MS",
+          "description": "Sliding lifetime of a staged dataframe canvas in milliseconds; every call against it extends the window. Defaults to 24 hours.",
+          "format": "string",
+          "isRequired": false,
+          "default": "86400000"
+        },
+        {
+          "name": "CANVAS_DEFAULT_ROW_LIMIT",
+          "description": "Maximum rows a single eurostat_dataframe_query returns before the result is reported as truncated.",
+          "format": "string",
+          "isRequired": false,
+          "default": "10000"
         }
       ],
       "transport": {
@@ -69,7 +96,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/eurostat-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "packageArguments": [
         {
           "type": "positional",
@@ -142,6 +169,33 @@
           "format": "string",
           "isRequired": false,
           "default": "43200000"
+        },
+        {
+          "name": "CANVAS_PROVIDER_TYPE",
+          "description": "Set to 'duckdb' to enable the dataframe canvas, which lists the eurostat_dataframe_describe and eurostat_dataframe_query tools and lets eurostat_query_dataset stage a match larger than its 5,000-row inline cap as a SQL table. The DuckDB binding ships with the server, so this variable is the only switch.",
+          "format": "string",
+          "isRequired": false,
+          "default": "none"
+        },
+        {
+          "name": "CANVAS_TEMP_PATH",
+          "description": "Directory DuckDB writes canvas spill files to. Must be writable by the server process. Defaults to a 'mcp-canvas' directory under the OS temp directory.",
+          "format": "string",
+          "isRequired": false
+        },
+        {
+          "name": "CANVAS_TTL_MS",
+          "description": "Sliding lifetime of a staged dataframe canvas in milliseconds; every call against it extends the window. Defaults to 24 hours.",
+          "format": "string",
+          "isRequired": false,
+          "default": "86400000"
+        },
+        {
+          "name": "CANVAS_DEFAULT_ROW_LIMIT",
+          "description": "Maximum rows a single eurostat_dataframe_query returns before the result is reported as truncated.",
+          "format": "string",
+          "isRequired": false,
+          "default": "10000"
         }
       ],
       "transport": {

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-08-04
+
+eurostat_query_dataset stages a match past its 5,000-row inline cap onto an optional DuckDB dataframe canvas; two new tools, eurostat_dataframe_describe and eurostat_dataframe_query, read it (#8).
+
 ## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-08-04 · ⚠️ Breaking
 
 `get_dataset_info` output and the dataset resource narrow `dimensions[].valuesCount`/`sampleValues` to optional — a failed time-enumeration request now returns partial metadata instead of failing (#34); `query_dataset`'s row cap moves into the decoder (#27); duplicate `browse_themes` folder codes resolve to their first placement (#32).

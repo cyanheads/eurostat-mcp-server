@@ -1,6 +1,6 @@
 # eurostat-mcp-server - Directory Structure
 
-Generated on: 2026-08-04 08:37:05
+Generated on: 2026-08-04 10:28:31
 
 ```text
 eurostat-mcp-server/
@@ -25,6 +25,7 @@ eurostat-mcp-server/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
+│   ├── 0.4.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -143,6 +144,8 @@ eurostat-mcp-server/
 │   │   └── tools/
 │   │       └── definitions/
 │   │           ├── eurostat-browse-themes.tool.ts
+│   │           ├── eurostat-dataframe-describe.tool.ts
+│   │           ├── eurostat-dataframe-query.tool.ts
 │   │           ├── eurostat-get-dataset-info.tool.ts
 │   │           ├── eurostat-get-dimension-values.tool.ts
 │   │           ├── eurostat-query-dataset.tool.ts
@@ -151,19 +154,25 @@ eurostat-mcp-server/
 │   │   ├── eurostat-catalogue/
 │   │   │   ├── eurostat-catalogue-service.ts
 │   │   │   └── types.ts
-│   │   └── eurostat-data/
-│   │       ├── eurostat-data-service.ts
-│   │       └── types.ts
+│   │   ├── eurostat-data/
+│   │   │   ├── eurostat-data-service.ts
+│   │   │   └── types.ts
+│   │   └── canvas-accessor.ts
 │   └── index.ts
 ├── tests/
+│   ├── helpers/
+│   │   └── real-canvas.ts
 │   ├── prompts/
 │   ├── resources/
 │   │   └── eurostat-dataset.resource.test.ts
 │   ├── services/
+│   │   ├── canvas-accessor.test.ts
 │   │   ├── eurostat-catalogue-service.test.ts
 │   │   └── eurostat-data-service.test.ts
 │   └── tools/
 │       ├── eurostat-browse-themes.tool.test.ts
+│       ├── eurostat-dataframe-describe.tool.test.ts
+│       ├── eurostat-dataframe-query.tool.test.ts
 │       ├── eurostat-get-dataset-info.tool.test.ts
 │       ├── eurostat-get-dimension-values.tool.test.ts
 │       ├── eurostat-query-dataset.tool.test.ts
