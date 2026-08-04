@@ -57,6 +57,10 @@ export class EurostatDataService {
         try {
           response = await fetchWithTimeout(url.toString(), requestTimeoutMs, asReqCtx(ctx), {
             signal: ctx.signal,
+            // 400 (invalid dimension / conflicting params) and 404 (unknown dataset) are
+            // modeled outcomes reclassified below into the declared error contract, not
+            // service failures — log them at debug. The thrown McpError is unchanged.
+            expectedStatuses: [400, 404],
           });
         } catch (err) {
           // fetchWithTimeout throws an McpError for ANY non-2xx response BEFORE the JSON
@@ -68,15 +72,12 @@ export class EurostatDataService {
           // conflicting_params. Both channels then carry the reason + recovery hint.
           const errData =
             err instanceof McpError
-              ? (err.data as { errorSource?: string; responseBody?: string } | undefined)
+              ? (err.data as { errorSource?: string; body?: string } | undefined)
               : undefined;
-          if (
-            errData?.errorSource === 'FetchHttpError' &&
-            typeof errData.responseBody === 'string'
-          ) {
+          if (errData?.errorSource === 'FetchHttpError' && typeof errData.body === 'string') {
             let parsed: JsonStatResponse | undefined;
             try {
-              parsed = JSON.parse(errData.responseBody) as JsonStatResponse;
+              parsed = JSON.parse(errData.body) as JsonStatResponse;
             } catch {
               // Body was truncated past the 500-byte cap or is non-JSON (e.g. an HTML
               // error page) — fall through and rethrow the raw HTTP error unchanged.
