@@ -1,6 +1,6 @@
 # eurostat-mcp-server - Directory Structure
 
-Generated on: 2026-08-04 10:28:31
+Generated on: 2026-08-04 16:09:40
 
 ```text
 eurostat-mcp-server/
@@ -146,11 +146,15 @@ eurostat-mcp-server/
 │   │           ├── eurostat-browse-themes.tool.ts
 │   │           ├── eurostat-dataframe-describe.tool.ts
 │   │           ├── eurostat-dataframe-query.tool.ts
+│   │           ├── eurostat-download-dataset.tool.ts
 │   │           ├── eurostat-get-dataset-info.tool.ts
 │   │           ├── eurostat-get-dimension-values.tool.ts
 │   │           ├── eurostat-query-dataset.tool.ts
 │   │           └── eurostat-search-datasets.tool.ts
 │   ├── services/
+│   │   ├── eurostat-bulk/
+│   │   │   ├── eurostat-bulk-service.ts
+│   │   │   └── types.ts
 │   │   ├── eurostat-catalogue/
 │   │   │   ├── eurostat-catalogue-service.ts
 │   │   │   └── types.ts
@@ -167,12 +171,14 @@ eurostat-mcp-server/
 │   │   └── eurostat-dataset.resource.test.ts
 │   ├── services/
 │   │   ├── canvas-accessor.test.ts
+│   │   ├── eurostat-bulk-service.test.ts
 │   │   ├── eurostat-catalogue-service.test.ts
 │   │   └── eurostat-data-service.test.ts
 │   └── tools/
 │       ├── eurostat-browse-themes.tool.test.ts
 │       ├── eurostat-dataframe-describe.tool.test.ts
 │       ├── eurostat-dataframe-query.tool.test.ts
+│       ├── eurostat-download-dataset.tool.test.ts
 │       ├── eurostat-get-dataset-info.tool.test.ts
 │       ├── eurostat-get-dimension-values.tool.test.ts
 │       ├── eurostat-query-dataset.tool.test.ts
