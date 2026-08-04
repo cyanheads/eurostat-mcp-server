@@ -13,10 +13,12 @@ import { eurostatDatasetResource } from '@/mcp-server/resources/definitions/euro
 import { eurostatBrowseThemes } from '@/mcp-server/tools/definitions/eurostat-browse-themes.tool.js';
 import { eurostatDataframeDescribe } from '@/mcp-server/tools/definitions/eurostat-dataframe-describe.tool.js';
 import { eurostatDataframeQuery } from '@/mcp-server/tools/definitions/eurostat-dataframe-query.tool.js';
+import { eurostatDownloadDataset } from '@/mcp-server/tools/definitions/eurostat-download-dataset.tool.js';
 import { eurostatGetDatasetInfo } from '@/mcp-server/tools/definitions/eurostat-get-dataset-info.tool.js';
 import { eurostatGetDimensionValues } from '@/mcp-server/tools/definitions/eurostat-get-dimension-values.tool.js';
 import { eurostatQueryDataset } from '@/mcp-server/tools/definitions/eurostat-query-dataset.tool.js';
 import { eurostatSearchDatasets } from '@/mcp-server/tools/definitions/eurostat-search-datasets.tool.js';
+import { setCanvas } from '@/services/canvas-accessor.js';
 import {
   observationRowSchema,
   toObservationRow,
@@ -35,6 +37,15 @@ vi.mock('@/services/eurostat-data/eurostat-data-service.js', async (importOrigin
   getEurostatDataService: vi.fn(),
 }));
 
+// Same reasoning for the bulk service: the download tool also imports the real column
+// schema builder from this module.
+vi.mock('@/services/eurostat-bulk/eurostat-bulk-service.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/eurostat-bulk/eurostat-bulk-service.js')>()),
+  getEurostatBulkService: vi.fn(),
+}));
+
+import { getEurostatBulkService } from '@/services/eurostat-bulk/eurostat-bulk-service.js';
+import type { BulkDownload } from '@/services/eurostat-bulk/types.js';
 import { getEurostatCatalogueService } from '@/services/eurostat-catalogue/eurostat-catalogue-service.js';
 import { getEurostatDataService } from '@/services/eurostat-data/eurostat-data-service.js';
 
@@ -127,6 +138,37 @@ const minimalQueryResult = {
   appliedFilters: {},
 };
 
+/** A one-row bulk download, enough for the download tool's success path. */
+function minimalDownload(): BulkDownload {
+  const download: BulkDownload = {
+    header: { dimensions: ['freq', 'geo'], periods: ['2024'] },
+    url: 'https://ec.europa.eu/eurostat/api/dissemination/sdmx/2.1/data/nama_10_gdp?format=TSV',
+    stats: {
+      bytesRead: 64,
+      budgetExceeded: false,
+      compressed: false,
+      rowCount: 0,
+      missingCount: 0,
+      periodsSeen: [],
+    },
+    rows: async function* () {
+      download.stats.rowCount = 1;
+      download.stats.periodsSeen = ['2024'];
+      yield {
+        freq: 'A',
+        geo: 'DE',
+        time: '2024',
+        obs_value: 4_000_000,
+        obs_flag: null,
+        obs_flag_label: null,
+        conf_status: null,
+        conf_status_label: null,
+      };
+    },
+  };
+  return download;
+}
+
 // ---------------------------------------------------------------------------
 // Input validation — Zod rejects bad inputs before the handler runs
 // ---------------------------------------------------------------------------
@@ -196,6 +238,29 @@ describe('Input validation', () => {
           }),
         ).not.toThrow();
       }
+    });
+  });
+
+  describe('eurostatDownloadDataset', () => {
+    it('rejects empty dataset_code', () => {
+      expect(() => eurostatDownloadDataset.input.parse({ dataset_code: '' })).toThrow();
+    });
+
+    it('rejects a preview_limit outside 1..500', () => {
+      for (const preview_limit of [0, -1, 501, 10_000, 1.5]) {
+        expect(() =>
+          eurostatDownloadDataset.input.parse({ dataset_code: 'nama_10_gdp', preview_limit }),
+        ).toThrow();
+      }
+    });
+
+    it('rejects a filters map whose values are not arrays of strings', () => {
+      expect(() =>
+        eurostatDownloadDataset.input.parse({
+          dataset_code: 'nama_10_gdp',
+          filters: { geo: 'AT' },
+        }),
+      ).toThrow();
     });
   });
 
@@ -307,6 +372,78 @@ describe('Injection resistance', () => {
       await expect(eurostatQueryDataset.handler(input, ctx)).resolves.toBeDefined();
     });
   });
+
+  describe('eurostatDownloadDataset — injection in dataset_code, filters and periods', () => {
+    beforeEach(() => {
+      vi.mocked(getEurostatBulkService).mockReturnValue({
+        startDownload: vi.fn().mockImplementation(async () => minimalDownload()),
+      } as never);
+      vi.mocked(getEurostatDataService).mockReturnValue({
+        getDimensionOrder: vi.fn().mockResolvedValue(['freq', 'geo']),
+      } as never);
+      setCanvas(undefined);
+    });
+
+    for (const injection of injectionStrings) {
+      it(`survives injection in dataset_code: ${JSON.stringify(injection).slice(0, 40)}`, async () => {
+        const ctx = createMockContext({
+          errors: eurostatDownloadDataset.errors,
+          tenantId: 'default',
+        });
+        const input = eurostatDownloadDataset.input.parse({ dataset_code: injection });
+        await expect(eurostatDownloadDataset.handler(input, ctx)).resolves.toBeDefined();
+      });
+    }
+
+    for (const injection of injectionStrings.slice(0, 5)) {
+      it(`survives injection in a filter value: ${JSON.stringify(injection).slice(0, 40)}`, async () => {
+        const ctx = createMockContext({
+          errors: eurostatDownloadDataset.errors,
+          tenantId: 'default',
+        });
+        const input = eurostatDownloadDataset.input.parse({
+          dataset_code: 'nama_10_gdp',
+          filters: { geo: [injection] },
+        });
+        await expect(eurostatDownloadDataset.handler(input, ctx)).resolves.toBeDefined();
+      });
+    }
+
+    it('survives injection in since_period and until_period', async () => {
+      const ctx = createMockContext({
+        errors: eurostatDownloadDataset.errors,
+        tenantId: 'default',
+      });
+      const input = eurostatDownloadDataset.input.parse({
+        dataset_code: 'nama_10_gdp',
+        since_period: "'; DROP TABLE; --",
+        until_period: '../../../etc/passwd',
+      });
+      await expect(eurostatDownloadDataset.handler(input, ctx)).resolves.toBeDefined();
+    });
+
+    it('rejects a filter naming an unknown dimension rather than sending a wrong-arity key', async () => {
+      vi.mocked(getEurostatBulkService).mockReturnValue({
+        startDownload: vi.fn().mockRejectedValue(
+          new McpError(JsonRpcErrorCode.ValidationError, 'unknown dimension', {
+            reason: 'invalid_dimension',
+          }),
+        ),
+      } as never);
+      const ctx = createMockContext({
+        errors: eurostatDownloadDataset.errors,
+        tenantId: 'default',
+      });
+      const input = eurostatDownloadDataset.input.parse({
+        dataset_code: 'nama_10_gdp',
+        filters: { '../../etc': ['x'] },
+      });
+      await expect(eurostatDownloadDataset.handler(input, ctx)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'invalid_dimension' },
+      });
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -348,6 +485,25 @@ describe('Secret leakage prevention', () => {
     const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
     expect(text).not.toContain('SUPER_SECRET_DO_NOT_LEAK');
   });
+
+  it('eurostatDownloadDataset format output does not contain env secret', () => {
+    const blocks = eurostatDownloadDataset.format!({
+      datasetCode: 'nama_10_gdp',
+      dimensionsUsed: ['freq', 'geo'],
+      rowCount: 1,
+      missingCount: 0,
+      periodRange: { start: '2024', end: '2024' },
+      bytesRead: 64,
+      compressed: false,
+      budgetExceeded: false,
+      observations: [{ freq: 'A', geo: 'DE', time: '2024', obs_value: 4_000_000 }],
+    });
+    const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+    expect(text).not.toContain('SUPER_SECRET_DO_NOT_LEAK');
+    for (const v of sensitiveValues) {
+      expect(text).not.toContain(v);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -376,6 +532,43 @@ describe('Oversized inputs', () => {
     expect(() =>
       eurostatGetDimensionValues.input.parse({ dataset_code: longCode, dimension: 'unit' }),
     ).not.toThrow();
+  });
+
+  it('download: a 10,000-character dataset_code is accepted by the schema, not truncated', () => {
+    const longCode = 'x'.repeat(10_000);
+    const input = eurostatDownloadDataset.input.parse({ dataset_code: longCode });
+    expect(input.dataset_code).toHaveLength(10_000);
+  });
+
+  it('download: a filters map with 1,000 dimensions and 1,000 values parses without blowing up', () => {
+    const filters = Object.fromEntries(
+      Array.from({ length: 1_000 }, (_, i) => [`dim${i}`, ['a'.repeat(500)]]),
+    );
+    filters.geo = Array.from({ length: 1_000 }, (_, i) => `G${i}`);
+    const input = eurostatDownloadDataset.input.parse({ dataset_code: 'nama_10_gdp', filters });
+    expect(Object.keys(input.filters)).toHaveLength(1_001);
+  });
+
+  it('download: oversized period strings are accepted by the schema and trimmed by the handler', async () => {
+    vi.mocked(getEurostatBulkService).mockReturnValue({
+      startDownload: vi.fn().mockImplementation(async () => minimalDownload()),
+    } as never);
+    setCanvas(undefined);
+    const startDownload = vi.mocked(getEurostatBulkService)().startDownload;
+    const ctx = createMockContext({ errors: eurostatDownloadDataset.errors, tenantId: 'default' });
+    const input = eurostatDownloadDataset.input.parse({
+      dataset_code: 'nama_10_gdp',
+      since_period: `  ${'9'.repeat(5_000)}  `,
+    });
+    await eurostatDownloadDataset.handler(input, ctx);
+    expect(startDownload).toHaveBeenCalledWith(
+      'nama_10_gdp',
+      [],
+      {},
+      '9'.repeat(5_000),
+      undefined,
+      expect.anything(),
+    );
   });
 });
 

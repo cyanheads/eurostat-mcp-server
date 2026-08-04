@@ -11,7 +11,7 @@ import { GEO_LEVEL_VALUES } from '@/services/eurostat-data/types.js';
 export const eurostatGetDimensionValues = tool('eurostat_get_dimension_values', {
   title: 'Get Eurostat Dimension Values',
   description:
-    'List all valid values for a specific dimension in a Eurostat dataset (e.g., all unit codes for nama_10_gdp, all geo codes for a regional dataset). Use this when eurostat_get_dataset_info returns more values than the 10-item sample, or to confirm exact codes before querying. For the "geo" dimension, use geo_level to filter by NUTS hierarchy (country, nuts1, nuts2, nuts3). Invalid dimension_value codes passed to eurostat_query_dataset silently return no data; use this tool to verify codes first.',
+    'List all valid values for a specific dimension in a Eurostat dataset (e.g., all unit codes for nama_10_gdp, all geo codes for a regional dataset). Use this when eurostat_get_dataset_info returns more values than the 10-item sample, or to confirm exact codes before querying. For the "geo" dimension, use geo_level to filter by NUTS hierarchy (country, nuts1, nuts2, nuts3). Invalid dimension_value codes silently return no data from eurostat_query_dataset, and are rejected by Eurostat as a fault on eurostat_download_dataset; use this tool to verify codes first.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     dataset_code: z.string().min(1).describe('Dataset code (e.g., "nama_10_gdp").'),
@@ -38,7 +38,7 @@ export const eurostatGetDimensionValues = tool('eurostat_get_dimension_values', 
             code: z
               .string()
               .describe(
-                'Dimension value code. Use these as filter values in eurostat_query_dataset.',
+                'Dimension value code. Use these as filter values in eurostat_query_dataset and eurostat_download_dataset.',
               ),
             label: z.string().describe('Human-readable label for this value.'),
           })

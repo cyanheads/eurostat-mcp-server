@@ -10,14 +10,14 @@ import { acquireCanvas, getCanvas } from '@/services/canvas-accessor.js';
 export const eurostatDataframeDescribe = tool('eurostat_dataframe_describe', {
   title: 'Describe Eurostat Dataframes',
   description:
-    'List the tables staged on a Eurostat dataframe canvas, with their row counts and column names and types. Call this before eurostat_dataframe_query to learn the table and column names to write SQL against. The canvas_id comes from a eurostat_query_dataset response that reported a staged table. Every observation column is flat: each dimension contributes a code column named after the dimension (e.g. "geo") and a label column beside it (e.g. "geo_label"), alongside obs_value, obs_flag, and obs_flag_label.',
+    'List the tables staged on a Eurostat dataframe canvas, with their row counts and column names and types. Call this before eurostat_dataframe_query to learn the table and column names to write SQL against. The canvas_id comes from a eurostat_query_dataset or eurostat_download_dataset response that reported a staged table. Every observation column is flat, but the two stagers write different column sets, so read the columns reported here rather than assuming: eurostat_query_dataset gives each dimension a code column named after the dimension (e.g. "geo") plus a label companion (e.g. "geo_label"), alongside obs_value, obs_flag and obs_flag_label; eurostat_download_dataset gives code columns only — the bulk endpoint carries no labels — plus a "time" column and obs_value, obs_flag, obs_flag_label, conf_status and conf_status_label. The two also disagree on what obs_flag holds, which a column list cannot show: JSON-stat folds confidentiality into the observation status, so a confidential cell reads obs_flag "|C" on a eurostat_query_dataset table but obs_flag null with conf_status "C" on a eurostat_download_dataset one. Join tables from the two stagers on dimension codes and time; obs_flag does not mean the same thing on both sides.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({
     canvas_id: z
       .string()
       .min(1)
       .describe(
-        'Canvas identifier returned by eurostat_query_dataset as canvasId. Identifies the workspace holding the staged tables.',
+        'Canvas identifier returned as canvasId by eurostat_query_dataset or eurostat_download_dataset. Identifies the workspace holding the staged tables.',
       ),
   }),
   output: z.object({

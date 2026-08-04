@@ -10,7 +10,7 @@ import { getEurostatCatalogueService } from '@/services/eurostat-catalogue/euros
 export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
   title: 'Search Eurostat Datasets',
   description:
-    'Search the Eurostat catalogue by keyword. Returns matching datasets with codes, descriptions, period coverage, and theme breadcrumbs. Use this to discover dataset codes before calling eurostat_get_dataset_info or eurostat_query_dataset. Results are limited to datasets and predefined tables — folders are excluded.',
+    'Search the Eurostat catalogue by keyword. Returns matching datasets with codes, descriptions, period coverage, and theme breadcrumbs. Use this to discover dataset codes before calling eurostat_get_dataset_info, then eurostat_query_dataset for a slice of a dataset or eurostat_download_dataset for the whole of one. Results are limited to datasets and predefined tables — folders are excluded.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     query: z
@@ -44,7 +44,7 @@ export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
             code: z
               .string()
               .describe(
-                'Dataset code (e.g., "nama_10_gdp"). Use this in eurostat_get_dataset_info and eurostat_query_dataset.',
+                'Dataset code (e.g., "nama_10_gdp"). Use this in eurostat_get_dataset_info, eurostat_query_dataset, and eurostat_download_dataset.',
               ),
             label: z.string().describe('Human-readable dataset title.'),
             type: z
@@ -169,7 +169,7 @@ export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
     });
     return {
       datasets,
-      nextStep: `Pass a "code" value to eurostat_get_dataset_info to inspect dimensions, or to eurostat_query_dataset to fetch data.`,
+      nextStep: `Pass a "code" value to eurostat_get_dataset_info to inspect dimensions, to eurostat_query_dataset to fetch a slice, or to eurostat_download_dataset to pull the whole dataset.`,
     };
   },
 

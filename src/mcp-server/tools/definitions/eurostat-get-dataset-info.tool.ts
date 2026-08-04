@@ -10,7 +10,7 @@ import { getEurostatDataService } from '@/services/eurostat-data/eurostat-data-s
 export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
   title: 'Get Eurostat Dataset Info',
   description:
-    'Fetch metadata for a Eurostat dataset: dimensions with valid values, time range, observation count, and last-update date. Call this before eurostat_query_dataset to discover what dimension codes are valid (unit, na_item, geo, etc.). Returns up to 10 sample values per dimension for orientation; use eurostat_get_dimension_values to list the full set for large dimensions.',
+    'Fetch metadata for a Eurostat dataset: dimensions with valid values, time range, observation count, and last-update date. Call this before eurostat_query_dataset or eurostat_download_dataset to discover what dimension codes are valid (unit, na_item, geo, etc.); eurostat_download_dataset builds its positional filter key from this dimension list, so a filter naming a dimension absent here is rejected outright. Returns up to 10 sample values per dimension for orientation; use eurostat_get_dimension_values to list the full set for large dimensions.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     dataset_code: z
@@ -30,7 +30,7 @@ export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
             code: z
               .string()
               .describe(
-                'Dimension code (e.g., "unit", "geo", "na_item"). Use these as filter keys in eurostat_query_dataset.',
+                'Dimension code (e.g., "unit", "geo", "na_item"). Use these as filter keys in eurostat_query_dataset and eurostat_download_dataset.',
               ),
             label: z.string().describe('Human-readable dimension name (e.g., "Unit of measure").'),
             valuesCount: z

@@ -5,22 +5,17 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
-import { acquireCanvas, getCanvas } from '@/services/canvas-accessor.js';
+import { acquireCanvas, getCanvas, newTableName } from '@/services/canvas-accessor.js';
 import {
   getEurostatDataService,
   observationRowSchema,
 } from '@/services/eurostat-data/eurostat-data-service.js';
 import { GEO_LEVEL_VALUES, OBS_CAP } from '@/services/eurostat-data/types.js';
 
-/** Fresh handle for one staged result set. Distinct per call — each is its own match. */
-function newTableName(): string {
-  return `df_${globalThis.crypto.randomUUID().slice(0, 8)}`;
-}
-
 export const eurostatQueryDataset = tool('eurostat_query_dataset', {
   title: 'Query Eurostat Dataset',
   description:
-    'Fetch statistical data from a Eurostat dataset with dimension filters. Returns decoded observations with dimension codes and labels, numeric values, and status flags (e.g., "p" = provisional, "e" = estimated), capped at 5,000 inline rows. Call eurostat_get_dataset_info first to discover valid dimension codes and values. Apply filters to keep the result set manageable — large unfiltered queries may trigger an async response error. Use filters.geo for specific country/region codes, or geo_level for NUTS hierarchy filtering (mutually exclusive). Use last_n_periods for the N most recent periods without knowing the end date. When the match exceeds the inline cap on a deployment that runs a dataframe canvas, the whole match is also staged as a SQL table and the response names it in tableName — read the rest with eurostat_dataframe_query rather than re-querying Eurostat.',
+    'Fetch statistical data from a Eurostat dataset with dimension filters. Returns decoded observations with dimension codes and labels, numeric values, and status flags (e.g., "p" = provisional, "e" = estimated), capped at 5,000 inline rows. Call eurostat_get_dataset_info first to discover valid dimension codes and values. Apply filters to keep the result set manageable — large unfiltered queries may trigger an async response error. Use filters.geo for specific country/region codes, or geo_level for NUTS hierarchy filtering (mutually exclusive). Use last_n_periods for the N most recent periods without knowing the end date. This tool fetches a slice: past the inline cap, either narrow the filters, or — on a deployment that runs a dataframe canvas — read the staged SQL table this response names in tableName with eurostat_dataframe_query rather than re-querying Eurostat. When the target is a whole dataset rather than a slice, eurostat_download_dataset reads the SDMX bulk endpoint instead and is the cheaper route.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     dataset_code: z.string().min(1).describe('Dataset code (e.g., "nama_10_gdp"). Required.'),
@@ -111,13 +106,13 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
           ),
       )
       .describe(
-        'Decoded observations, capped at 5,000 rows. Past the cap these are the first 5,000 the response enumerates — the leading combinations of the dataset dimensions, neither a sample nor the most recent periods. When tableName is set, these same rows and every row past the cap are staged on the dataframe canvas; when it is absent, narrow the query with dimension filters or a period range to choose which observations you get.',
+        'Decoded observations, capped at 5,000 rows. Past the cap these are the first 5,000 the response enumerates — the leading combinations of the dataset dimensions, neither a sample nor the most recent periods. When tableName is set, these same rows and every row past the cap are staged on the dataframe canvas; when it is absent, narrow the query with dimension filters or a period range to choose which observations you get, or switch to eurostat_download_dataset when the whole dataset is what is wanted.',
       ),
     obsCount: z.number().describe('Total number of observations matched (before any cap).'),
     truncated: z
       .boolean()
       .describe(
-        'True when the result exceeded 5,000 observations, so the returned rows are a prefix of the match rather than all of it. When tableName is set, the whole match is on the canvas and reachable with eurostat_dataframe_query; when it is absent, narrowing the query with dimension filters is what brings the rest into reach.',
+        'True when the result exceeded 5,000 observations, so the returned rows are a prefix of the match rather than all of it. When tableName is set, the whole match is on the canvas and reachable with eurostat_dataframe_query; when it is absent, narrowing the query with dimension filters, or downloading the dataset with eurostat_download_dataset, is what brings the rest into reach.',
       ),
     canvasId: z
       .string()
@@ -352,7 +347,7 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       ctx.enrich.notice(
         staged
           ? `Inline rows capped at ${OBS_CAP.toLocaleString()} of ${result.obsCount.toLocaleString()} matched. All ${staged.stagedRowCount.toLocaleString()} are staged as table "${staged.tableName}" on canvas "${staged.canvasId}" — reach them with eurostat_dataframe_query, or narrow the query with dimension filters (geo, unit, na_item) to shrink what Eurostat sends.`
-          : `Result capped at ${OBS_CAP.toLocaleString()} of ${result.obsCount.toLocaleString()} matched rows. Add dimension filters (geo, unit, na_item) or a period range to bring the rest into reach.`,
+          : `Result capped at ${OBS_CAP.toLocaleString()} of ${result.obsCount.toLocaleString()} matched rows. Add dimension filters (geo, unit, na_item) or a period range to bring the rest into reach, or call eurostat_download_dataset when the whole dataset is what is wanted.`,
       );
     }
 
@@ -369,7 +364,7 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       ? ''
       : result.tableName
         ? ' — inline rows capped at 5,000; the whole match is staged on the canvas below'
-        : ' — result capped at 5,000 rows. Add dimension filters to bring the rest into reach.';
+        : ' — result capped at 5,000 rows. Add dimension filters, or call eurostat_download_dataset for the whole dataset.';
     const lines: string[] = [
       `# ${result.datasetLabel} (\`${result.datasetCode}\`)`,
       `**Observations:** ${result.obsCount} (${result.missingObsCount} missing) | **Period:** ${period}`,

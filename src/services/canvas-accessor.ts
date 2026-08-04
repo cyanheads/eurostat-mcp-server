@@ -25,6 +25,14 @@ export function getCanvas(): DataCanvas | undefined {
 }
 
 /**
+ * A fresh handle for one staged table. Distinct per call — every staging call is
+ * its own result set, and a reused name would replace the previous table.
+ */
+export function newTableName(): string {
+  return `df_${globalThis.crypto.randomUUID().slice(0, 8)}`;
+}
+
+/**
  * Errno codes meaning the configured scratch root cannot be written to.
  *
  * `ENOENT` is deliberately absent — `mkdir` is recursive, so a missing parent

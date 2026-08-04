@@ -406,6 +406,27 @@ export class EurostatDataService {
   }
 
   /**
+   * The dataset's dimensions in key order, `time` excluded.
+   *
+   * This is the order the SDMX positional key is built from, and it is read from
+   * the JSON-stat `id` array of a one-period slice — the cheapest response that
+   * carries the full dimension list. Verified against live SDMX TSV headers on
+   * 4-, 6- and 7-dimension datasets: the TSV header's comma-joined key field is
+   * exactly this array.
+   */
+  async getDimensionOrder(datasetCode: string, ctx: Context): Promise<string[]> {
+    const data = await this.fetchJson(this.buildUrl(datasetCode, { lastTimePeriod: '1' }), ctx);
+    const order = (data.id ?? []).filter((dim) => dim !== 'time');
+    if (order.length === 0) {
+      throw serviceUnavailable(
+        `Eurostat reported no dimensions for dataset "${datasetCode}", so a positional filter key cannot be built. Retry without filters to download the whole dataset.`,
+        { reason: 'upstream_fault', datasetCode },
+      );
+    }
+    return order;
+  }
+
+  /**
    * Build a filter that pins every dimension except `exceptDim` to its first (index 0)
    * value, drawn from a probe response. Eurostat orders the primary/aggregate value first
    * (e.g. an EU aggregate for `geo`), which typically carries the dataset's full time
