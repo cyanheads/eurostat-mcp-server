@@ -182,6 +182,60 @@ describe('eurostatBrowseThemes', () => {
     expect(text).toContain('(no children)');
   });
 
+  it('passes the other placements of an ambiguous code through to the caller (#32)', async () => {
+    vi.mocked(getEurostatCatalogueService).mockReturnValue({
+      browse: vi.fn().mockResolvedValue({
+        items: mockChildItems,
+        parentPath: ['Database by themes', 'Health and safety'],
+        otherPlacements: [['Cross cutting topics', 'Health and safety']],
+      }),
+    } as never);
+    const ctx = createMockContext({ errors: eurostatBrowseThemes.errors });
+    const input = eurostatBrowseThemes.input.parse({ theme_code: 'hsw_ac' });
+    const result = await eurostatBrowseThemes.handler(input, ctx);
+    expect(result.otherPlacements).toEqual([['Cross cutting topics', 'Health and safety']]);
+  });
+
+  it('advertises otherPlacements as an optional output field (#32)', () => {
+    // The wire contract: unambiguous codes — the overwhelming majority — must validate
+    // without it, and an ambiguous one must be able to carry its breadcrumbs.
+    expect(
+      eurostatBrowseThemes.output.parse({ items: [], parentPath: [] }).otherPlacements,
+    ).toBeUndefined();
+    expect(
+      eurostatBrowseThemes.output.parse({
+        items: [],
+        parentPath: ['Database by themes'],
+        otherPlacements: [['Cross cutting topics']],
+      }).otherPlacements,
+    ).toEqual([['Cross cutting topics']]);
+  });
+
+  it('omits otherPlacements when the code has one placement (#32)', async () => {
+    const ctx = createMockContext({ errors: eurostatBrowseThemes.errors });
+    const input = eurostatBrowseThemes.input.parse({ theme_code: 'econ' });
+    const result = await eurostatBrowseThemes.handler(input, ctx);
+    expect(result.otherPlacements).toBeUndefined();
+  });
+
+  it('names the branches it did not take on the content[] surface (#32)', () => {
+    const blocks = eurostatBrowseThemes.format!({
+      items: mockChildItems,
+      parentPath: ['Database by themes', 'Health and safety'],
+      otherPlacements: [['Cross cutting topics', 'Health and safety']],
+    });
+    const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+    expect(text).toContain('Also filed under');
+    expect(text).toContain('Cross cutting topics › Health and safety');
+    expect(text).toContain('1 other branch');
+  });
+
+  it('says nothing about placements for an unambiguous code (#32)', () => {
+    const blocks = eurostatBrowseThemes.format!({ items: mockRootItems, parentPath: [] });
+    const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+    expect(text).not.toContain('Also filed under');
+  });
+
   it('renders the nextStep hint when present', () => {
     const result = {
       items: mockRootItems,

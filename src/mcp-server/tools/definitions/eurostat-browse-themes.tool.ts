@@ -68,6 +68,16 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
       .describe(
         'Breadcrumb from root to the requested theme (e.g., ["Database by themes", "Economy and finance"]). Empty when browsing root.',
       ),
+    otherPlacements: z
+      .array(
+        z
+          .array(z.string())
+          .describe('Breadcrumb from root to one other folder carrying the requested code.'),
+      )
+      .optional()
+      .describe(
+        'Breadcrumbs of the other branches that file this same theme_code. Eurostat lists a few folder codes in more than one branch; the items above come from the first one the catalogue lists, which never has fewer children than the branches named here but can list different ones. theme_code takes a bare code, so those branches cannot be addressed directly — browse down to them from the root instead. Omitted when the code has a single placement — the normal case.',
+      ),
     nextStep: z
       .string()
       .optional()
@@ -134,6 +144,11 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
       }
       if (item.obsCount != null)
         lines.push(`  **Observations:** ${item.obsCount.toLocaleString()}`);
+    }
+    if (result.otherPlacements && result.otherPlacements.length > 0) {
+      lines.push(
+        `\n**Also filed under:** this code appears in ${result.otherPlacements.length} other branch${result.otherPlacements.length !== 1 ? 'es' : ''} — ${result.otherPlacements.map((p) => p.join(' › ')).join('; ')}. The items above are from the branch listed first in the catalogue.`,
+      );
     }
     if (result.nextStep) lines.push(`\n**Next step:** ${result.nextStep}`);
     return [{ type: 'text', text: lines.join('\n') }];

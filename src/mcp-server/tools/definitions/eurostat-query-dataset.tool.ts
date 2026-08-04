@@ -6,7 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getEurostatDataService } from '@/services/eurostat-data/eurostat-data-service.js';
-import { GEO_LEVEL_VALUES } from '@/services/eurostat-data/types.js';
+import { GEO_LEVEL_VALUES, OBS_CAP } from '@/services/eurostat-data/types.js';
 
 export const eurostatQueryDataset = tool('eurostat_query_dataset', {
   title: 'Query Eurostat Dataset',
@@ -96,7 +96,7 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
           ),
       )
       .describe(
-        'Decoded observations, capped at 5,000 rows. When truncated is true, apply dimension filters to narrow the result.',
+        'Decoded observations, capped at 5,000 rows. Past the cap these are the first 5,000 the response enumerates — the leading combinations of the dataset dimensions, neither a sample nor the most recent periods — so narrow the query with dimension filters or a period range to choose which observations you get.',
       ),
     obsCount: z.number().describe('Total number of observations matched (before any cap).'),
     truncated: z
@@ -110,21 +110,23 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
           .string()
           .optional()
           .describe(
-            'Earliest period in this result. Omitted when the observations carry no time dimension and Eurostat reports no overall period.',
+            'Earliest period matched. Omitted when the match carries no time dimension and Eurostat reports no overall period.',
           ),
         end: z
           .string()
           .optional()
           .describe(
-            'Most recent period in this result. Omitted when the observations carry no time dimension and Eurostat reports no overall period.',
+            'Most recent period matched. Omitted when the match carries no time dimension and Eurostat reports no overall period.',
           ),
       })
       .describe(
-        'Time coverage of the returned observations. Each bound is omitted when neither the observations nor Eurostat report it — an omitted bound is unknown, not empty.',
+        'Time coverage of everything matched — the same set obsCount counts, so it can reach periods absent from observations when truncated is true. Each bound is omitted when neither the match nor Eurostat report it — an omitted bound is unknown, not empty.',
       ),
     missingObsCount: z
       .number()
-      .describe('Number of observations with null value (missing data points in the source).'),
+      .describe(
+        'Number of matched observations with null value (missing data points in the source), counted across everything matched rather than only the returned rows.',
+      ),
   }),
   enrichment: {
     appliedFilters: z
@@ -258,15 +260,14 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       throw err;
     }
 
-    const OBS_CAP = 5_000;
+    // The service caps `observations` while decoding, so its length says nothing about how
+    // large the match was. `obsCount` is the full total and is what truncation turns on.
     const { appliedFilters, ...queryResult } = result;
-    const totalObs = result.observations.length;
-    const truncated = totalObs > OBS_CAP;
-    const observations = truncated ? result.observations.slice(0, OBS_CAP) : result.observations;
+    const truncated = result.obsCount > OBS_CAP;
 
     ctx.log.info('Dataset query complete', {
       datasetCode: input.dataset_code,
-      obsCount: totalObs,
+      obsCount: result.obsCount,
       truncated,
       missingObsCount: result.missingObsCount,
     });
@@ -289,7 +290,7 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       );
     }
 
-    return { ...queryResult, observations, obsCount: totalObs, truncated };
+    return { ...queryResult, truncated };
   },
 
   format: (result) => {
@@ -306,7 +307,7 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
     ];
 
     // Render every observation so content[] carries the same rows as structuredContent —
-    // both surfaces are already bounded by the 5,000-row cap the handler applies.
+    // both surfaces are already bounded by the row cap the decoder applies.
     for (const obs of result.observations) {
       // dimensions is typed as {} from passthrough() — cast to the runtime shape for rendering
       const dims = obs.dimensions as Record<string, { code: string; label: string } | undefined>;

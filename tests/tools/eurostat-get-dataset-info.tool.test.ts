@@ -214,6 +214,51 @@ describe('eurostatGetDatasetInfo', () => {
     expect(result.timeRange.end).toBeUndefined();
   });
 
+  it('advertises a dimension value set as optional in the output schema (#34)', () => {
+    // The wire contract: a `time` entry whose count was never measured must validate, or the
+    // only ways to answer are a fabricated number or a failed call.
+    const parsed = eurostatGetDatasetInfo.output.parse({
+      code: 'nama_10_gdp',
+      label: 'GDP',
+      dimensions: [{ code: 'time', label: 'Time' }],
+      timeRange: {},
+    });
+    expect(parsed.dimensions[0]?.valuesCount).toBeUndefined();
+    expect(parsed.dimensions[0]?.sampleValues).toBeUndefined();
+  });
+
+  it('surfaces an unmeasured time period count as omitted, not as one (#34)', async () => {
+    vi.mocked(getEurostatDataService).mockReturnValue({
+      getDatasetInfo: vi.fn().mockResolvedValue({
+        ...mockMeta,
+        dimensions: [
+          ...mockMeta.dimensions.filter((d) => d.code !== 'time'),
+          { code: 'time', label: 'Time' },
+        ],
+      }),
+    } as never);
+    const ctx = createMockContext({ errors: eurostatGetDatasetInfo.errors });
+    const input = eurostatGetDatasetInfo.input.parse({ dataset_code: 'nama_10_gdp' });
+    const result = await eurostatGetDatasetInfo.handler(input, ctx);
+    const time = result.dimensions.find((d) => d.code === 'time');
+    expect(time?.valuesCount).toBeUndefined();
+    expect(time?.valuesCount).not.toBe(1);
+    // The dimension is still advertised, and every measured dimension is untouched.
+    expect(time?.label).toBe('Time');
+    expect(result.dimensions.find((d) => d.code === 'geo')?.valuesCount).toBe(41);
+  });
+
+  it('formats an unmeasured dimension without crashing or printing "undefined" (#34)', () => {
+    const blocks = eurostatGetDatasetInfo.format!({
+      ...mockMeta,
+      dimensions: [{ code: 'time', label: 'Time' }],
+    });
+    const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+    expect(text).toContain('value count not reported by Eurostat');
+    expect(text).toContain('eurostat_get_dimension_values');
+    expect(text).not.toContain('undefined');
+  });
+
   it('formats hint when dimension has more values than sample', () => {
     const blocks = eurostatGetDatasetInfo.format!(mockMeta);
     const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');

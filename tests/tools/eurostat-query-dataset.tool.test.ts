@@ -315,7 +315,7 @@ describe('eurostatQueryDataset', () => {
     } as never);
     const ctx = createMockContext({ errors: eurostatQueryDataset.errors });
     const input = eurostatQueryDataset.input.parse({ dataset_code: 'nama_10_gdp' });
-    // What structuredContent carries (after the handler's 5,000-row cap)…
+    // What structuredContent carries (already bounded by the decoder's row cap)…
     const structured = await eurostatQueryDataset.handler(input, ctx);
     // …must match what content[] renders, row for row.
     const blocks = eurostatQueryDataset.format!(structured);

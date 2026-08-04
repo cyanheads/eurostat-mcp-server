@@ -66,13 +66,25 @@ export interface DatasetMeta {
   timeRange: { start?: string; end?: string };
 }
 
+/**
+ * One dimension of a dataset.
+ *
+ * `valuesCount`/`sampleValues` are absent when the dimension's value set could not be
+ * measured. That happens for `time`, whose real period range takes a second request the
+ * rest of the metadata does not depend on: when that request fails, the fields are omitted
+ * rather than filled from the one-period slice, which would report a period count of 1 for
+ * every dataset.
+ */
 export interface DimensionInfo {
   code: string;
   label: string;
-  /** First 10 values as orientation. */
-  sampleValues: Array<{ code: string; label: string }>;
-  /** Distinct values for this dimension: the dataset's full period set for `time`, the most recent period's codelist otherwise. */
-  valuesCount: number;
+  /** First 10 values as orientation. Absent when the value set was not measured. */
+  sampleValues?: Array<{ code: string; label: string }>;
+  /**
+   * Distinct values for this dimension: the dataset's full period set for `time`, the most
+   * recent period's codelist otherwise. Absent when the value set was not measured.
+   */
+  valuesCount?: number;
 }
 
 export interface DimensionValuesResult {
@@ -85,6 +97,11 @@ export interface DimensionValuesResult {
 /**
  * A decoded query result.
  *
+ * `observations` is capped at `OBS_CAP`; `obsCount`, `missingObsCount` and `timeRange`
+ * describe the whole match, so `obsCount` and `observations.length` diverge whenever the
+ * cap bites. They are counted from the response's cell keys rather than from the decoded
+ * array, so capping never changes what they report.
+ *
  * `timeRange` bounds are absent when neither the returned observations nor the dataset-wide
  * annotations report them — an unknown bound is not an empty period.
  */
@@ -94,11 +111,22 @@ export interface QueryResult {
   datasetCode: string;
   datasetLabel: string;
   dimensionsUsed: string[];
+  /** Observations with no value across the whole match, not just the decoded page. */
   missingObsCount: number;
+  /** Observations matched upstream, before the `OBS_CAP` decode cap. */
   obsCount: number;
+  /** Decoded observations, capped at `OBS_CAP` — the first cap rows in linear-index order. */
   observations: Observation[];
   timeRange: { start?: string; end?: string };
 }
+
+/**
+ * Upper bound on decoded observations returned for one query.
+ *
+ * Applied inside the decoder, so an oversized match never materializes as observation
+ * objects. The totals alongside `observations` stay honest about the full match.
+ */
+export const OBS_CAP = 5_000;
 
 export type GeoLevel = 'aggregate' | 'country' | 'nuts1' | 'nuts2' | 'nuts3';
 

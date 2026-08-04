@@ -12,7 +12,7 @@ import {
   getEurostatDataService,
   initEurostatDataService,
 } from '@/services/eurostat-data/eurostat-data-service.js';
-import type { JsonStatResponse } from '@/services/eurostat-data/types.js';
+import { type JsonStatResponse, OBS_CAP } from '@/services/eurostat-data/types.js';
 
 /** Minimal mock AppConfig and StorageService — service ignores both */
 const mockConfig = {} as never;
@@ -83,7 +83,7 @@ describe('EurostatDataService — decodeObservations', () => {
       { 0: 3_867_000, 1: 4_000_000 },
     );
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const obs = (svc as any).decodeObservations(data);
+    const obs = (svc as any).decodeObservations(data, OBS_CAP);
     expect(obs).toHaveLength(2);
     expect(obs[0].dimensions.geo.code).toBe('DE');
     expect(obs[0].dimensions.time.code).toBe('2023');
@@ -99,7 +99,7 @@ describe('EurostatDataService — decodeObservations', () => {
       { 0: null },
     );
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const obs = (svc as any).decodeObservations(data);
+    const obs = (svc as any).decodeObservations(data, OBS_CAP);
     expect(obs[0].value).toBeNull();
   });
 
@@ -112,7 +112,7 @@ describe('EurostatDataService — decodeObservations', () => {
       { p: 'provisional' },
     );
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const obs = (svc as any).decodeObservations(data);
+    const obs = (svc as any).decodeObservations(data, OBS_CAP);
     expect(obs[0].status?.code).toBe('p');
     expect(obs[0].status?.label).toBe('provisional');
   });
@@ -126,7 +126,7 @@ describe('EurostatDataService — decodeObservations', () => {
       // no statusLabels entry for 'x'
     );
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const obs = (svc as any).decodeObservations(data);
+    const obs = (svc as any).decodeObservations(data, OBS_CAP);
     expect(obs[0].status?.code).toBe('x');
     expect(obs[0].status?.label).toBe('x'); // label falls back to code
   });
@@ -142,15 +142,88 @@ describe('EurostatDataService — decodeObservations', () => {
       { 0: 500 },
     );
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const obs = (svc as any).decodeObservations(data);
+    const obs = (svc as any).decodeObservations(data, OBS_CAP);
     expect(obs).toHaveLength(1);
     expect(obs[0].dimensions.geo.code).toBe('DE');
   });
 
   it('returns empty array when data has no id/size/dimension', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const obs = (svc as any).decodeObservations({});
+    const obs = (svc as any).decodeObservations({}, OBS_CAP);
     expect(obs).toHaveLength(0);
+  });
+
+  it('stops at the limit instead of building every cell first (#27)', () => {
+    const data = buildJsonStat(
+      [{ code: 'DE', label: 'Germany' }],
+      Array.from({ length: 10 }, (_, i) => ({ code: String(2000 + i), label: String(2000 + i) })),
+      Object.fromEntries(Array.from({ length: 10 }, (_, i) => [i, i * 100])),
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const obs = (svc as any).decodeObservations(data, 3);
+    expect(obs).toHaveLength(3);
+    // The kept rows are the lowest linear indexes — an order the decoder walks itself, so
+    // the same response always yields the same rows regardless of upstream key order.
+    expect(
+      obs.map((o: { dimensions: { time: { code: string } } }) => o.dimensions.time.code),
+    ).toEqual(['2000', '2001', '2002']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// scanCells — totals counted without decoding (#27)
+// ---------------------------------------------------------------------------
+
+describe('EurostatDataService — scanCells', () => {
+  let svc: EurostatDataService;
+
+  beforeEach(() => {
+    svc = new EurostatDataService(mockConfig, mockStorage);
+  });
+
+  it('counts every populated cell, including status-only ones, and the periods they span', () => {
+    const data = buildJsonStat(
+      [
+        { code: 'DE', label: 'Germany' },
+        { code: 'FR', label: 'France' },
+      ],
+      [
+        { code: '2022', label: '2022' },
+        { code: '2023', label: '2023' },
+        { code: '2024', label: '2024' },
+      ],
+      // DE: 2022 present, 2023 null, 2024 absent. FR: 2023 present.
+      { 0: 10, 1: null, 4: 20 },
+      // FR/2024 carries a status flag but no value — decodable, and missing.
+      { '5': 'n' },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const scan = (svc as any).scanCells(data);
+    expect(scan.obsCount).toBe(4);
+    expect(scan.missingObsCount).toBe(2);
+    expect(scan.timeCodes).toEqual(['2022', '2023', '2024']);
+  });
+
+  it('agrees with an uncapped decode over the same response', () => {
+    const data = buildJsonStat(
+      [
+        { code: 'DE', label: 'Germany' },
+        { code: 'FR', label: 'France' },
+      ],
+      [
+        { code: '2023', label: '2023' },
+        { code: '2024', label: '2024' },
+      ],
+      { 0: 1, 1: null, 3: 4 },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const scan = (svc as any).scanCells(data);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const obs = (svc as any).decodeObservations(data, Number.POSITIVE_INFINITY);
+    expect(scan.obsCount).toBe(obs.length);
+    expect(scan.missingObsCount).toBe(
+      obs.filter((o: { value: number | null }) => o.value === null).length,
+    );
   });
 });
 
@@ -416,6 +489,31 @@ describe('EurostatDataService — extractMetadata', () => {
     // Every other dimension still comes from the one-period slice, which carries the full codelist.
     const geo = meta.dimensions.find((d: { code: string }) => d.code === 'geo');
     expect(geo.valuesCount).toBe(2);
+  });
+
+  it('omits the time value count when no full-range slice was supplied (#34)', () => {
+    // The one-period slice reports a single period for `time` whatever the dataset covers.
+    // With no slice to read the real range from, the count is omitted — not taken from here.
+    const onePeriod: JsonStatResponse = {
+      label: 'Dataset',
+      id: ['geo', 'time'],
+      size: [2, 1],
+      dimension: {
+        geo: { label: 'Geo', category: { index: { EU27_2020: 0, DE: 1 }, label: {} } },
+        time: { label: 'Time', category: { index: { '2025': 0 }, label: { '2025': '2025' } } },
+      },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const meta = (svc as any).extractMetadata(onePeriod, 'xyz');
+    const time = meta.dimensions.find((d: { code: string }) => d.code === 'time');
+    expect(time.valuesCount).toBeUndefined();
+    expect(time.sampleValues).toBeUndefined();
+    expect('valuesCount' in time).toBe(false);
+    // The pre-#21 defect this omission exists to avoid.
+    expect(time.valuesCount).not.toBe(1);
+    // The dimension is still listed, with its label, and every other dimension is intact.
+    expect(time.label).toBe('Time');
+    expect(meta.dimensions.find((d: { code: string }) => d.code === 'geo').valuesCount).toBe(2);
   });
 
   it('samples at most 10 values per dimension', () => {
@@ -703,6 +801,57 @@ describe('EurostatDataService — getDatasetInfo time coverage', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(meta.dimensions.map((d) => d.code)).toEqual(['geo']);
   });
+
+  it('keeps the metadata it retrieved when the time enumeration fails (#34)', async () => {
+    const onePeriod = {
+      ...jsonStat({ freq: ['A'], geo: ['EU27_2020', 'DE'], time: ['2025'] }),
+      label: 'GDP and main components',
+      extension: {
+        annotation: [
+          { type: 'OBS_COUNT', title: '1100000' },
+          { type: 'OBS_PERIOD_OVERALL_OLDEST', title: '1975' },
+          { type: 'OBS_PERIOD_OVERALL_LATEST', title: '2025' },
+          { type: 'UPDATE_DATA', date: '2026-05-01T00:00:00Z' },
+          { type: 'ESMS_HTML', href: 'https://example.org/nama_10_gdp_esms.htm' },
+        ],
+      },
+    };
+    // The primary slice succeeds; the pinned follow-up comes back as Eurostat's async warning.
+    fetchMock.mockImplementation(async (input: string | URL) =>
+      okResponse(
+        new URL(String(input)).searchParams.get('lastTimePeriod') === '1'
+          ? onePeriod
+          : { warning: { status: 413, label: 'ASYNCHRONOUS_RESPONSE' } },
+      ),
+    );
+
+    const meta = await svc().getDatasetInfo('nama_10_gdp', createMockContext());
+
+    // Everything the first response carried survives — previously the whole call threw.
+    expect(meta.label).toBe('GDP and main components');
+    expect(meta.obsCount).toBe(1_100_000);
+    expect(meta.timeRange).toEqual({ start: '1975', end: '2025' });
+    expect(meta.lastUpdated).toBe('2026-05-01T00:00:00Z');
+    expect(meta.metadataUrl).toBe('https://example.org/nama_10_gdp_esms.htm');
+    expect(meta.dimensions.map((d) => d.code)).toEqual(['freq', 'geo', 'time']);
+    expect(meta.dimensions.find((d) => d.code === 'geo')?.valuesCount).toBe(2);
+
+    // Only the unmeasured dimension loses its count — and it is omitted, not reported as 1.
+    const time = meta.dimensions.find((d) => d.code === 'time');
+    expect(time?.valuesCount).toBeUndefined();
+    expect(time?.sampleValues).toBeUndefined();
+  });
+
+  it('still fails when the primary metadata request fails (#34)', async () => {
+    // The graceful path covers the secondary request only — a dataset that does not exist
+    // must stay an error rather than resolve to a shell of a payload.
+    fetchMock.mockResolvedValue(
+      okResponse({ error: [{ status: 404, id: 100, label: 'ERR_NOT_FOUND_4' }] }),
+    );
+    await expect(
+      svc().getDatasetInfo('nonexistent_xyz', createMockContext()),
+    ).rejects.toMatchObject({ data: { reason: 'not_found' } });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -840,6 +989,104 @@ describe('EurostatDataService — queryDataset time coverage', () => {
     );
     const res = await query();
     expect(res.timeRange).toEqual({ start: '2023', end: '2024' });
+  });
+
+  it('bounds the period by code, not by the order the time dimension declares its values', async () => {
+    // The time category lists 2024 at position 0 and 2010 at the last position. Reading the
+    // first and last position occupied would report 2024 – 2010: a start after its own end.
+    fetchMock.mockResolvedValue(
+      okResponse({
+        ...jsonStat({ geo: ['DE'], time: ['2024', '1999', '2010'] }),
+        value: { '0': 1, '1': 2, '2': 3 },
+        extension: periodAnnotations,
+      }),
+    );
+    const res = await query();
+    expect(res.timeRange).toEqual({ start: '1999', end: '2024' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// queryDataset — row cap applied while decoding (#27)
+// ---------------------------------------------------------------------------
+
+describe('EurostatDataService — queryDataset row cap (#27)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const PERIODS = Array.from({ length: 60 }, (_, i) => String(2000 + i));
+  const GEOS = Array.from({ length: 100 }, (_, i) => `G${i}`);
+
+  /**
+   * 6,000 populated cells — 1,000 past the cap. Dimension order is time-major, so the
+   * linear index the decoder walks reaches the last 10 periods only after the cap: any
+   * total derived from the decoded rows loses them.
+   */
+  const oversized = () => {
+    const value: Record<string, number | null> = {};
+    for (let i = 0; i < PERIODS.length * GEOS.length; i++) value[String(i)] = i;
+    value['10'] = null; // inside the cap
+    value['5500'] = null; // past it, in period 2055
+    return { ...jsonStat({ time: PERIODS, geo: GEOS }), value };
+  };
+
+  const query = () =>
+    new EurostatDataService(mockConfig, mockStorage).queryDataset(
+      'nama_10_gdp',
+      {},
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'EN',
+      createMockContext(),
+    );
+
+  it('returns at most the cap in observations', async () => {
+    fetchMock.mockResolvedValue(okResponse(oversized()));
+    const res = await query();
+    expect(res.observations).toHaveLength(OBS_CAP);
+    expect(OBS_CAP).toBeLessThan(6000);
+  });
+
+  it('reports the full match in obsCount, not the number of rows it returned', async () => {
+    fetchMock.mockResolvedValue(okResponse(oversized()));
+    const res = await query();
+    expect(res.obsCount).toBe(6000);
+    expect(res.obsCount).not.toBe(res.observations.length);
+  });
+
+  it('counts missing observations past the cap', async () => {
+    fetchMock.mockResolvedValue(okResponse(oversized()));
+    const res = await query();
+    // One null inside the cap, one past it — a count taken from the returned rows sees one.
+    expect(res.missingObsCount).toBe(2);
+  });
+
+  it('reports the period span of the whole match, not of the rows it returned', async () => {
+    fetchMock.mockResolvedValue(okResponse(oversized()));
+    const res = await query();
+    expect(res.timeRange).toEqual({ start: '2000', end: '2059' });
+    // The returned rows stop well short of that end — the span is not derived from them.
+    const lastRow = res.observations.at(-1);
+    expect(lastRow?.dimensions.time?.code).toBe('2049');
+  });
+
+  it('leaves a result under the cap whole', async () => {
+    const small = {
+      ...jsonStat({ time: ['2023', '2024'], geo: ['DE'] }),
+      value: { '0': 1, '1': 2 },
+    };
+    fetchMock.mockResolvedValue(okResponse(small));
+    const res = await query();
+    expect(res.observations).toHaveLength(2);
+    expect(res.obsCount).toBe(2);
   });
 });
 

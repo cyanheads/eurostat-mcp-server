@@ -25,8 +25,9 @@ export const eurostatDatasetResource = resource('eurostat://dataset/{dataset_cod
             label: z.string().describe('Dimension name.'),
             valuesCount: z
               .number()
+              .optional()
               .describe(
-                'Number of distinct values — the dataset\'s full period count for "time", the most recent period\'s codelist otherwise.',
+                'Number of distinct values — the dataset\'s full period count for "time", the most recent period\'s codelist otherwise. Omitted when the value set could not be measured — only "time" can be, and an omitted count is unknown, not one.',
               ),
             sampleValues: z
               .array(
@@ -37,7 +38,10 @@ export const eurostatDatasetResource = resource('eurostat://dataset/{dataset_cod
                   })
                   .describe('A dimension value code and label pair.'),
               )
-              .describe('First 10 values for orientation.'),
+              .optional()
+              .describe(
+                'First 10 values for orientation. Omitted alongside valuesCount when the value set could not be measured.',
+              ),
           })
           .describe('A dataset dimension with its valid values.'),
       )

@@ -15,14 +15,15 @@ import {
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
-import type {
-  DatasetMeta,
-  DimensionInfo,
-  DimensionValuesResult,
-  GeoLevel,
-  JsonStatResponse,
-  Observation,
-  QueryResult,
+import {
+  type DatasetMeta,
+  type DimensionInfo,
+  type DimensionValuesResult,
+  type GeoLevel,
+  type JsonStatResponse,
+  OBS_CAP,
+  type Observation,
+  type QueryResult,
 } from './types.js';
 
 // Context satisfies the runtime contract of RequestContext but lacks the index signature
@@ -147,10 +148,82 @@ export class EurostatDataService {
     }
   }
 
+  /** Strides for a JSON-stat linear index: stride[i] = product of sizes[i+1..n-1]. */
+  private computeStrides(sizes: number[]): number[] {
+    const strides: number[] = new Array(sizes.length).fill(1) as number[];
+    for (let i = sizes.length - 2; i >= 0; i--) {
+      // noUncheckedIndexedAccess: bounds are [0..sizes.length-2], so i+1 is safe
+      strides[i] = (strides[i + 1] ?? 1) * (sizes[i + 1] ?? 1);
+    }
+    return strides;
+  }
+
+  /**
+   * Count the response's populated cells without decoding them.
+   *
+   * `decodeObservations` stops at its row cap, so the totals reported alongside a capped
+   * result cannot be derived from the decoded array. This walks the `value`/`status` key
+   * maps instead — one pass, no per-observation object — so the caller is told how large
+   * the whole match is, how much of it is missing, and which periods it spans, whatever
+   * the cap. Cell membership matches the decoder exactly: a cell counts when it appears in
+   * either map at an in-range linear index, and counts as missing when no numeric value
+   * accompanies it.
+   */
+  private scanCells(data: JsonStatResponse): {
+    obsCount: number;
+    missingObsCount: number;
+    timeCodes: string[];
+  } {
+    const dims = data.id ?? [];
+    const sizes = data.size ?? [];
+    const value = data.value ?? {};
+    const status = data.status ?? {};
+    const totalCells = sizes.reduce((a, b) => a * b, 1);
+
+    const timeDim = dims.indexOf('time');
+    const timeStride = timeDim >= 0 ? (this.computeStrides(sizes)[timeDim] ?? 1) : 1;
+    const timeSize = timeDim >= 0 ? (sizes[timeDim] ?? 0) : 0;
+    const timeSeen = new Uint8Array(timeSize);
+
+    let obsCount = 0;
+    let missingObsCount = 0;
+
+    const count = (key: string, missing: boolean): void => {
+      const idx = Number(key);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= totalCells) return;
+      obsCount++;
+      if (missing) missingObsCount++;
+      if (timeSize > 0) timeSeen[Math.floor(idx / timeStride) % timeSize] = 1;
+    };
+
+    for (const key in value) count(key, value[key] == null);
+    // A cell flagged in `status` but absent from `value` decodes to a null value.
+    for (const key in status) {
+      if (!(key in value)) count(key, true);
+    }
+
+    const timeIndex = data.dimension?.time?.category?.index ?? {};
+    const timeCodeAt: string[] = new Array(timeSize) as string[];
+    for (const [code, pos] of Object.entries(timeIndex)) {
+      if (pos >= 0 && pos < timeSize) timeCodeAt[pos] = code;
+    }
+    const timeCodes: string[] = [];
+    for (let pos = 0; pos < timeSize; pos++) {
+      if (timeSeen[pos]) timeCodes.push(timeCodeAt[pos] ?? String(pos));
+    }
+    return { obsCount, missingObsCount, timeCodes: timeCodes.sort() };
+  }
+
   /**
    * Decode a JSON-stat 2.0 response into labeled observations using stride-based indexing.
+   *
+   * Stops once `limit` observations have been built, in ascending linear-index order — an
+   * order the decoder sets itself rather than reading from the upstream key order, so the
+   * rows returned for a given response are the same every time. Bounding here keeps an
+   * oversized match from ever materializing as observation objects; the counts that
+   * describe the whole match come from `scanCells`.
    */
-  private decodeObservations(data: JsonStatResponse): Observation[] {
+  private decodeObservations(data: JsonStatResponse, limit: number): Observation[] {
     if (!data.id || !data.size || !data.dimension) return [];
 
     const dims = data.id;
@@ -159,12 +232,7 @@ export class EurostatDataService {
     const status = data.status ?? {};
     const statusLabels = data.extension?.status?.label ?? {};
 
-    // Compute strides: stride[i] = product of sizes[i+1..n-1]
-    const strides: number[] = new Array(dims.length).fill(1) as number[];
-    for (let i = dims.length - 2; i >= 0; i--) {
-      // noUncheckedIndexedAccess: bounds are [0..dims.length-2], so i+1 and sizes[i+1] are safe
-      strides[i] = (strides[i + 1] ?? 1) * (sizes[i + 1] ?? 1);
-    }
+    const strides = this.computeStrides(sizes);
 
     // Build dimension value arrays: index position → {code, label}
     const dimValues: Array<Array<{ code: string; label: string }>> = dims.map((dim) => {
@@ -181,7 +249,7 @@ export class EurostatDataService {
     const observations: Observation[] = [];
     const totalCells = sizes.reduce((a, b) => a * b, 1);
 
-    for (let linearIdx = 0; linearIdx < totalCells; linearIdx++) {
+    for (let linearIdx = 0; linearIdx < totalCells && observations.length < limit; linearIdx++) {
       const keyStr = String(linearIdx);
       if (!(keyStr in value) && !(keyStr in status)) continue;
 
@@ -227,8 +295,10 @@ export class EurostatDataService {
    * Build dataset metadata from a `lastTimePeriod=1` slice.
    *
    * `timeSlice`, when supplied, is a second response covering the dataset's full period
-   * range (see `getDatasetInfo`); the `time` dimension is read from it, since the
-   * one-period slice would otherwise report a single value for it.
+   * range (see `getDatasetInfo`); the `time` dimension is read from it and from nowhere
+   * else. The one-period slice reports a single value for `time` whatever the dataset's
+   * real range, so with no usable `timeSlice` that dimension's `valuesCount`/`sampleValues`
+   * are omitted rather than taken from it — an unmeasured period count is not a count of 1.
    *
    * Annotation-derived fields are omitted when Eurostat does not report them — a missing
    * observation count is not a zero, and a missing period bound is not an empty string.
@@ -242,13 +312,14 @@ export class EurostatDataService {
     const dimension = data.dimension ?? {};
 
     const dimensions: DimensionInfo[] = dims.map((dimCode) => {
-      const cat =
-        (dimCode === 'time' ? timeSlice?.dimension?.[dimCode]?.category : undefined) ??
-        dimension[dimCode]?.category;
+      const isTime = dimCode === 'time';
+      const cat = isTime ? timeSlice?.dimension?.[dimCode]?.category : dimension[dimCode]?.category;
+      const label = dimension[dimCode]?.label ?? dimCode;
+      if (isTime && !cat) return { code: dimCode, label };
       const allValues = cat?.index ? Object.entries(cat.index).sort(([, a], [, b]) => a - b) : [];
       return {
         code: dimCode,
-        label: dimension[dimCode]?.label ?? dimCode,
+        label,
         valuesCount: allValues.length,
         sampleValues: allValues.slice(0, 10).map(([code]) => ({
           code,
@@ -284,13 +355,29 @@ export class EurostatDataService {
    * `getDimensionValues` uses, with the first response serving as the probe — enumerates the
    * real period set, so `time` reports its actual count instead of the filter's artifact.
    * Cost: one extra round trip, bounded to |time| observations.
+   *
+   * That second request answers one dimension's value count; every other field comes from
+   * the first response. A failure on it therefore returns the metadata already in hand with
+   * `time`'s `valuesCount`/`sampleValues` omitted, rather than discarding the dataset label,
+   * dimension list, period range, observation count and metadata URL along with it.
    */
   async getDatasetInfo(datasetCode: string, ctx: Context): Promise<DatasetMeta> {
     ctx.log.info('Fetching dataset info', { datasetCode });
     const data = await this.fetchJson(this.buildUrl(datasetCode, { lastTimePeriod: '1' }), ctx);
-    const timeSlice = (data.id ?? []).includes('time')
-      ? await this.fetchJson(this.buildUrl(datasetCode, this.pinDimensions(data, 'time')), ctx)
-      : undefined;
+    let timeSlice: JsonStatResponse | undefined;
+    if ((data.id ?? []).includes('time')) {
+      try {
+        timeSlice = await this.fetchJson(
+          this.buildUrl(datasetCode, this.pinDimensions(data, 'time')),
+          ctx,
+        );
+      } catch (error) {
+        ctx.log.warning('Time period enumeration failed — reporting metadata without it', {
+          datasetCode,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
     return this.extractMetadata(data, datasetCode, timeSlice);
   }
 
@@ -450,16 +537,14 @@ export class EurostatDataService {
       );
     }
 
-    const observations = this.decodeObservations(data);
-    const missingObsCount = observations.filter((o) => o.value === null).length;
+    // Totals describe the whole match and are counted from the response's cell keys, so the
+    // decode cap below cannot shrink them.
+    const { obsCount, missingObsCount, timeCodes } = this.scanCells(data);
+    const observations = this.decodeObservations(data, OBS_CAP);
 
     // Compute timeRange from the actual time dimension values in the response.
     // Fall back to dataset-wide annotations only when no time dimension is present, and omit
     // a bound neither source reports — an unknown period is not an empty one.
-    const timeCodes = observations
-      .map((o) => (o.dimensions as Record<string, { code: string } | undefined>).time?.code)
-      .filter((c): c is string => c !== undefined)
-      .sort();
     const start =
       timeCodes[0] ?? this.extractAnnotation(data, 'OBS_PERIOD_OVERALL_OLDEST', 'title');
     const end =
@@ -471,7 +556,7 @@ export class EurostatDataService {
       datasetLabel: data.label ?? datasetCode,
       dimensionsUsed: data.id ?? [],
       observations,
-      obsCount: observations.length,
+      obsCount,
       timeRange,
       missingObsCount,
       appliedFilters,

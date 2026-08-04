@@ -212,6 +212,8 @@ Enrichment (both surfaces): `total_matches` (full count across all pages), `trun
 
 Navigation tool for the TOC tree. Without `theme_code` returns the second-level theme folders. The TOC may contain more than one depth-0 root folder — historically a single "Database by themes" wrapper, but the live TOC also carries a separate "Cross cutting topics" root — so this tool skips every depth-0 wrapper and unions their depth-1 children, in root order, ensuring all top-level themes are reachable from a root-level browse. With `theme_code` returns its immediate children (subthemes and datasets in that branch).
 
+Eurostat files some folder codes under more than one branch — the "Cross cutting topics" tree re-files part of the primary catalogue under different groupings, and a few survey folders are relisted per wave inside the primary tree itself. Of the ~1,900 folder codes in the live TOC (12,235 entries in total, most of them datasets), 43 carry more than one placement and 10 of those have differing child sets. A code lookup resolves to its **first** placement in TOC order, the same canonical-placement rule `eurostat_search_datasets` applies to duplicate dataset codes. In all 10 differing cases the first placement lists at least as many children as the ones it shadows — a superset in nine; the tenth is the root code `data`, whose two branches list entirely different children, both of which a root-level browse already unions. The breadcrumbs of the branches not taken are returned as `other_placements` so an ambiguous code is visible as such rather than silently resolved.
+
 **Input:**
 - `theme_code: string?` — folder code to expand; omit for root
 
@@ -228,6 +230,7 @@ items: [{
   obs_count?: number
 }]
 parent_path: string[]   // breadcrumb from root to current
+other_placements: string[][]?  // breadcrumbs of the other branches filing this code; omitted when the code has a single placement
 next_step: string?      // suggested follow-up (drill into folders or inspect a dataset); omitted for empty results
 ```
 
@@ -238,7 +241,7 @@ next_step: string?      // suggested follow-up (drill into folders or inspect a 
 
 Fetches dataset metadata from the Statistics API — a minimal `lastTimePeriod=1` call, plus one bounded follow-up when the dataset has a `time` dimension — then extracts dimension structure and annotation metadata from the responses.
 
-**Implementation note:** The Statistics API returns dimension metadata only for values present in the queried result slice. For `get_dataset_info`, the service issues an unfiltered `lastTimePeriod=1` request (no dimension filters), which returns dimension codes and labels for all values present in the most recent period — all `unit`, `na_item`, and other categorical dimension values present in recent data, and all recent `geo` values (typically 40–50 country-level codes). That slice truncates `time` to the single period it selects, so when the dataset has a `time` dimension the service issues one more bounded query — every other dimension pinned to its first value (the same pin-and-probe `get_dimension_values` uses, with the first response as the probe), `time` unfiltered — and reads `time`'s values from it. Cost: one extra round trip when `time` is present, bounded to |time| observations; a dataset without a `time` dimension stays at one request. Dataset-level metadata (`OBS_COUNT`, periods, `last_updated`) is extracted from `extension.annotation`: note that `OBS_COUNT` is in the annotation's `title` field as a string and must be parsed to integer; `UPDATE_DATA` is in the `date` field. Each of these is omitted from the output when its annotation is absent, rather than defaulted to `0` or `""` — an absent value is unknown, not zero. The dataset's human label comes from the top-level `label` field in the response.
+**Implementation note:** The Statistics API returns dimension metadata only for values present in the queried result slice. For `get_dataset_info`, the service issues an unfiltered `lastTimePeriod=1` request (no dimension filters), which returns dimension codes and labels for all values present in the most recent period — all `unit`, `na_item`, and other categorical dimension values present in recent data, and all recent `geo` values (typically 40–50 country-level codes). That slice truncates `time` to the single period it selects, so when the dataset has a `time` dimension the service issues one more bounded query — every other dimension pinned to its first value (the same pin-and-probe `get_dimension_values` uses, with the first response as the probe), `time` unfiltered — and reads `time`'s values from it. Cost: one extra round trip when `time` is present, bounded to |time| observations; a dataset without a `time` dimension stays at one request. That second request answers one dimension's value count and nothing else, so a failure on it is caught: the call returns the metadata the first response already produced, with `time`'s `values_count`/`sample_values` omitted. They are not filled from the one-period slice — that slice reports a single period for every dataset, which is the defect the second request exists to fix. A failure on the *first* request still fails the call. Dataset-level metadata (`OBS_COUNT`, periods, `last_updated`) is extracted from `extension.annotation`: note that `OBS_COUNT` is in the annotation's `title` field as a string and must be parsed to integer; `UPDATE_DATA` is in the `date` field. Each of these is omitted from the output when its annotation is absent, rather than defaulted to `0` or `""` — an absent value is unknown, not zero. The dataset's human label comes from the top-level `label` field in the response.
 
 **Input:**
 - `dataset_code: string` — e.g., `nama_10_gdp`
@@ -248,10 +251,10 @@ Fetches dataset metadata from the Statistics API — a minimal `lastTimePeriod=1
 code: string
 label: string
 dimensions: [{
-  code: string           // e.g., "unit"
-  label: string          // e.g., "Unit of measure"
-  values_count: number   // full period count for `time`; recent-period codelist size otherwise
-  sample_values: [{code, label}]  // first 10 values as orientation
+  code: string            // e.g., "unit"
+  label: string           // e.g., "Unit of measure"
+  values_count: number?   // full period count for `time`; recent-period codelist size otherwise. Omitted when the value set could not be measured — only `time` can be, and an omitted count is unknown, not 1
+  sample_values: [{code, label}]?  // first 10 values as orientation; omitted alongside values_count
 }]
 time_range: { start: string?, end: string? }  // each bound omitted when not reported
 obs_count: number?       // omitted when not reported — an absent count is unknown, not zero
@@ -261,7 +264,7 @@ metadata_url: string?    // link to ESMS metadata HTML
 
 **Errors:**
 - `not_found` (NotFound): dataset code does not exist or is not available for dissemination
-- `async_response` (ServiceUnavailable, non-retryable): Eurostat returned async warning. This tool exposes no filters to narrow, so the same call cannot succeed — recovery is catalogue-level coverage from `eurostat_search_datasets`/`eurostat_browse_themes`, or `eurostat_get_dimension_values` one dimension at a time
+- `async_response` (ServiceUnavailable, non-retryable): Eurostat returned async warning on the *first* request. This tool exposes no filters to narrow, so the same call cannot succeed — recovery is catalogue-level coverage from `eurostat_search_datasets`/`eurostat_browse_themes`, or `eurostat_get_dimension_values` one dimension at a time. The same warning on the second (time-enumeration) request is not an error: the call succeeds with `time`'s `values_count`/`sample_values` omitted
 
 ### `eurostat_get_dimension_values`
 
@@ -292,6 +295,8 @@ total_count: number
 
 The primary data-fetching tool. Accepts dimension filters as a map and returns decoded observations.
 
+**Implementation note:** the response carries at most 5,000 observations. That bound is applied inside the JSON-stat decoder, which stops once 5,000 cells have been built, in ascending linear-index order — an order the decoder walks itself rather than reading from the upstream key order, so a given response always yields the same rows. A broad query therefore never materializes its full observation set: `nama_10_gdp` unfiltered matches ~1.1M cells, and only the first 5,000 become objects. The totals that describe the match — `obs_count`, `missing_obs_count`, and the `time_range` bounds — are counted from the response's `value`/`status` cell keys instead of from the decoded array, so they stay whole while the row list is capped, and `obs_count` is what `truncated` is computed from. This bounds the client-side work and allocation, not the request: Eurostat still serves the full body (~18 MB for that query, ~93% of its wall time), so the way to make a broad query fast is to filter it.
+
 **Input:**
 - `dataset_code: string`
 - `filters: Record<string, string[]>` — dimension filters; key = dimension code, value = array of codes. Example: `{"unit": ["CP_MEUR"], "na_item": ["B1GQ"], "geo": ["DE", "FR"]}`. An empty array means "no filter for this dimension", not an error: it is dropped before the request is built, before the `geo`/`geo_level` conflict check, and from the applied filters echoed back — so `{"geo": []}` neither restricts the query nor conflicts with `geo_level`. Do not include `"geo"` here when using `geo_level`. Invalid dimension values silently return no data rather than an error — verify codes with `eurostat_get_dimension_values` first.
@@ -312,10 +317,12 @@ observations: [{
   value: number | null
   status?: { code: string, label: string }  // e.g., {code:"p", label:"provisional"}
 }]
-obs_count: number
-time_range: { start: string?, end: string? }  // bounds of the returned observations; each omitted when neither they nor Eurostat report it
-missing_obs_count: number         // observations with null value
+obs_count: number                 // observations matched, before the 5,000-row cap
+truncated: boolean                // true when obs_count exceeds the cap and rows were dropped
+time_range: { start: string?, end: string? }  // bounds of the whole match, not of the returned rows; each omitted when neither the match nor Eurostat report it
+missing_obs_count: number         // observations with null value, across the whole match
 ```
+`observations` is capped at 5,000 rows; every other field above describes the full match, so `obs_count` and `observations.length` diverge whenever `truncated` is true.
 
 **Errors:**
 - `not_found` (NotFound): dataset code not found (HTTP 404, Eurostat error id 100)
@@ -387,6 +394,8 @@ missing_obs_count: number         // observations with null value
 
 **NUTS version differences:** Eurostat NUTS classifications change periodically (NUTS 2013, 2016, 2021). Codes may refer to different geographies across versions. Dataset metadata notes the NUTS version, but the server does not expose NUTS version comparison tooling.
 
+**Shadowed folder placements are not addressable:** `theme_code` takes a bare code, not a path, so a code filed under several branches always resolves to the first one — including when the caller has just browsed a different placement and drills into a folder code it listed. `other_placements` makes the ambiguity visible, but reaching a shadowed branch would need path-qualified addressing. Affects 43 of the ~1,900 folder codes, 10 with differing child sets.
+
 **No SDMX constraint data:** The Statistics API returns dimension values observed in actual data for a filtered query, not all theoretically valid codes for the dataset. A code may be valid per the codelist but absent from the data for a given time period or geography.
 
 ---
@@ -405,5 +414,8 @@ missing_obs_count: number         // observations with null value
 | 2026-08-04 | Classify `async_response` as non-retryable across all three data tools, superseding the blanket "retryable" entry above | The 413 warning is deterministic — the identical request produces the identical oversized response, so a retry is guidance toward a call that cannot succeed. `get_dimension_values` and `query_dataset` were already tightened; `get_dataset_info` was the last holdout, and its recovery hint now points at catalogue-level coverage metadata and per-dimension inspection instead of a wait-and-retry it cannot narrow. |
 | 2026-08-04 | Omit annotation-derived metadata fields rather than defaulting them | `obs_count: 0`, `time_range: {start:"",end:""}`, and `last_updated: ""` were indistinguishable from a real zero or a genuinely empty value. Omission follows the `metadata_url` precedent already in the extractor and preserves the upstream's own uncertainty. Applies to all three schemas reading those annotations: `get_dataset_info`, the `eurostat://dataset/{dataset_code}` resource, and `query_dataset`'s `time_range`, which falls back to the same two period annotations when the result carries no `time` dimension. |
 | 2026-08-04 | Spend a second bounded request in `get_dataset_info` to count `time` | The `lastTimePeriod=1` slice that makes the call cheap also reduces `time` to one value, and the tool tells callers to size a dimension from `values_count` — so `time` reported `1` for every dataset. The pin-and-probe already built for `get_dimension_values` reuses the first response as its probe, so the real period count costs one extra round trip bounded to \|time\| observations. |
+| 2026-08-04 | Apply `query_dataset`'s 5,000-row cap inside the decoder, and count the totals from the response's cell keys | The cap previously ran after every matched cell had been decoded, so a broad query built ~1.1M observation objects to return 5,000. Stopping the decode at the cap removes that allocation. The totals then cannot come from the decoded array, so `obs_count`, `missing_obs_count` and `time_range` are counted from the `value`/`status` keys instead — one pass, no per-observation object — and keep describing the whole match. End-to-end latency barely moves: the full response body is already in memory before decoding starts, and transferring it is ~93% of a broad query's wall time. |
+| 2026-08-04 | A failed time enumeration omits `time`'s `values_count`/`sample_values` instead of failing the call | The second request in `get_dataset_info` answers one dimension's value count; everything else comes from the first. Aborting the call over it discarded the label, dimension list, period range, observation count and metadata URL already retrieved. Falling back to the one-period slice was rejected — it silently restores `values_count: 1` for every dataset, the exact defect the second request was added to fix. Omission extends the idiom already used for the annotation-derived fields and works identically on the tool and the resource, which has no enrichment surface for a notice. |
+| 2026-08-04 | Resolve a duplicated folder code to its first TOC placement, and disclose the others | `code_index` kept the last placement, so a duplicated code browsed the final branch and the earlier one became unreachable — most visibly the root code `data`, which returned "Cross cutting topics" 2 children instead of the 9 top-level themes. First-wins matches the canonical-placement rule `search()` already applies to duplicate dataset codes, and in all 10 live cases where placements differ the first lists at least as many children as the ones it shadows (a superset in nine; `data` is the exception, its two branches listing different children that a root-level browse already unions). `other_placements` returns the breadcrumbs of the branches not taken, so an ambiguous code is visible rather than silently resolved. |
 | 2026-05-23 | 5 tools, no prompts, 1 resource | Domain is read-only data retrieval with a natural tool workflow (discover → inspect → query). Prompts add no value over well-designed tool descriptions. Resource for `eurostat://dataset/{dataset_code}` provides cache-injectable context without requiring a full query. |
 | 2026-05-23 | Exclude SDMX codelist tool | Global codelists (4,292 geo entries) are unhelpful without dataset scoping. `get_dimension_values` is dataset-scoped and returns actionable values. |

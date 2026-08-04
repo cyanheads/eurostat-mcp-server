@@ -121,6 +121,37 @@ describe('eurostatDatasetResource', () => {
     expect(result.timeRange.end).toBeUndefined();
   });
 
+  it('advertises a dimension value set as optional in the output schema (#34)', () => {
+    // Declared independently of the tool's schema — both must accept the same payload, or
+    // the resource is the surface that cannot represent an unmeasured period count.
+    const parsed = eurostatDatasetResource.output!.parse({
+      code: 'nama_10_gdp',
+      label: 'GDP',
+      dimensions: [{ code: 'time', label: 'Time' }],
+      timeRange: {},
+    });
+    expect(parsed.dimensions[0]?.valuesCount).toBeUndefined();
+    expect(parsed.dimensions[0]?.sampleValues).toBeUndefined();
+  });
+
+  it('carries an unmeasured time period count through as omitted, not as one (#34)', async () => {
+    vi.mocked(getEurostatDataService).mockReturnValue({
+      getDatasetInfo: vi.fn().mockResolvedValue({
+        ...mockMeta,
+        dimensions: [...mockMeta.dimensions, { code: 'time', label: 'Time' }],
+      }),
+    } as never);
+    const ctx = createMockContext({ tenantId: 'test' });
+    const params = eurostatDatasetResource.params.parse({ dataset_code: 'nama_10_gdp' });
+    const result = await eurostatDatasetResource.handler(params, ctx);
+    const time = result.dimensions.find((d) => d.code === 'time');
+    expect(time?.valuesCount).toBeUndefined();
+    expect(time?.valuesCount).not.toBe(1);
+    // Everything the first metadata request carried is still here.
+    expect(result.obsCount).toBe(1_100_000);
+    expect(result.dimensions.find((d) => d.code === 'unit')?.valuesCount).toBe(12);
+  });
+
   it('handles sparse metadata without metadataUrl', async () => {
     const sparseMeta = { ...mockMeta, metadataUrl: undefined };
     vi.mocked(getEurostatDataService).mockReturnValue({

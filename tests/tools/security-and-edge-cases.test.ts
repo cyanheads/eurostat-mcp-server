@@ -75,6 +75,23 @@ const sparseMeta = {
   timeRange: {},
 };
 
+/** Metadata whose `time` value set could not be measured — the enumeration request failed. */
+const unmeasuredTimeMeta = {
+  code: 'nama_10_gdp',
+  label: 'GDP and main components',
+  dimensions: [
+    {
+      code: 'geo',
+      label: 'Geography',
+      valuesCount: 1,
+      sampleValues: [{ code: 'DE', label: 'Germany' }],
+    },
+    { code: 'time', label: 'Time' },
+  ],
+  timeRange: { start: '2020', end: '2024' },
+  obsCount: 100,
+};
+
 const minimalDimResult = {
   dimensionCode: 'unit',
   dimensionLabel: 'Unit',
@@ -487,6 +504,31 @@ describe('Edge cases', () => {
     });
   });
 
+  describe('eurostatGetDatasetInfo — dimension whose value set was not measured (#34)', () => {
+    it('returns the rest of the metadata with the unmeasured fields omitted', async () => {
+      vi.mocked(getEurostatDataService).mockReturnValue({
+        getDatasetInfo: vi.fn().mockResolvedValue(unmeasuredTimeMeta),
+      } as never);
+      const ctx = createMockContext({ errors: eurostatGetDatasetInfo.errors });
+      const input = eurostatGetDatasetInfo.input.parse({ dataset_code: 'nama_10_gdp' });
+      const result = await eurostatGetDatasetInfo.handler(input, ctx);
+      expect(result.label).toBe('GDP and main components');
+      expect(result.obsCount).toBe(100);
+      const time = result.dimensions.find((d) => d.code === 'time');
+      expect(time?.valuesCount).toBeUndefined();
+      expect(time?.sampleValues).toBeUndefined();
+    });
+
+    it('format names the missing count instead of rendering "undefined"', () => {
+      const blocks = eurostatGetDatasetInfo.format!(unmeasuredTimeMeta);
+      const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+      expect(text).toContain('(`time`) — value count not reported by Eurostat');
+      expect(text).not.toContain('undefined');
+      // The measured dimension alongside it still renders its count.
+      expect(text).toContain('(`geo`) — 1 value');
+    });
+  });
+
   describe('eurostatGetDimensionValues — geo_level with a non-geo dimension', () => {
     it('surfaces the rejection instead of returning a silently unfiltered result', async () => {
       vi.mocked(getEurostatDataService).mockReturnValue({
@@ -548,32 +590,50 @@ describe('Edge cases', () => {
   });
 
   describe('eurostatQueryDataset — truncation at 5000 observations', () => {
-    it('sets truncated:true and applies 5000 cap', async () => {
-      const manyObs = Array.from({ length: 5100 }, (_, i) => ({
+    /**
+     * A capped service result: the decoder stops at 5,000 rows, and `obsCount` reports the
+     * whole match. The two therefore diverge — a fixture where they match cannot occur, and
+     * would let truncation detection read either field and still look correct.
+     */
+    const cappedResult = {
+      datasetCode: 'nama_10_gdp',
+      datasetLabel: 'GDP',
+      dimensionsUsed: ['geo', 'time'],
+      observations: Array.from({ length: 5000 }, (_, i) => ({
         dimensions: {
           geo: { code: `G${i}`, label: `Country ${i}` },
           time: { code: '2024', label: '2024' },
         },
         value: i * 10,
-      }));
+      })),
+      obsCount: 5100,
+      timeRange: { start: '2024', end: '2024' },
+      missingObsCount: 0,
+      appliedFilters: {},
+    };
+
+    it('sets truncated:true from the honest total when the returned rows are already capped', async () => {
       vi.mocked(getEurostatDataService).mockReturnValue({
-        queryDataset: vi.fn().mockResolvedValue({
-          datasetCode: 'nama_10_gdp',
-          datasetLabel: 'GDP',
-          dimensionsUsed: ['geo', 'time'],
-          observations: manyObs,
-          obsCount: 5100,
-          timeRange: { start: '2024', end: '2024' },
-          missingObsCount: 0,
-          appliedFilters: {},
-        }),
+        queryDataset: vi.fn().mockResolvedValue(cappedResult),
       } as never);
       const ctx = createMockContext({ errors: eurostatQueryDataset.errors });
       const input = eurostatQueryDataset.input.parse({ dataset_code: 'nama_10_gdp' });
       const result = await eurostatQueryDataset.handler(input, ctx);
+      // observations.length is 5,000 — exactly the cap — so a check against it would say
+      // "not truncated" and the caller would never learn rows were dropped.
       expect(result.truncated).toBe(true);
       expect(result.observations).toHaveLength(5000);
       expect(result.obsCount).toBe(5100);
+    });
+
+    it('tells a truncated caller how to narrow the query', async () => {
+      vi.mocked(getEurostatDataService).mockReturnValue({
+        queryDataset: vi.fn().mockResolvedValue(cappedResult),
+      } as never);
+      const ctx = createMockContext({ errors: eurostatQueryDataset.errors });
+      const input = eurostatQueryDataset.input.parse({ dataset_code: 'nama_10_gdp' });
+      await eurostatQueryDataset.handler(input, ctx);
+      expect(getEnrichment(ctx).notice).toContain('5,000');
     });
 
     it('sets truncated:false when observations <= 5000', async () => {

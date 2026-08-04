@@ -9,7 +9,7 @@
 
 
 
-[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/eurostat-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/eurostat-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/eurostat-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.3.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/eurostat-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/eurostat-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/eurostat-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -63,6 +63,7 @@ Navigate the Eurostat theme tree.
 - With `theme_code`: returns immediate children — subtheme folders and datasets in that branch
 - Each entry includes code, label, type (folder/dataset/table), data period, and observation count where available
 - Returns a breadcrumb path from root to the current node, plus a `nextStep` hint suited to the level (drill into folders or inspect a dataset)
+- One branch per folder code — Eurostat files a few folder codes under several branches; a code resolves to the first one the catalogue lists, which never has fewer children than the branches it shadows, and `otherPlacements` names those so the ambiguity is visible
 - Use for structured discovery when you know the domain but not the exact dataset code
 
 ---
@@ -73,7 +74,7 @@ Fetch metadata for a Eurostat dataset before querying it.
 
 - Returns all dimensions with their codes, labels, and up to 10 sample values each
 - Reports overall time range and total observation count across all periods, each omitted when Eurostat does not report it
-- Uses a minimal Statistics API call (most recent period only), plus one bounded follow-up to count the dataset's periods when it has a `time` dimension
+- Uses a minimal Statistics API call (most recent period only), plus one bounded follow-up to count the dataset's periods when it has a `time` dimension. If that follow-up fails, the call still returns everything the first request produced, with the `time` dimension's value count omitted rather than reported as 1
 - For dimensions with more than 10 values, use `eurostat_get_dimension_values` for the full list
 - Provides a link to the ESMS metadata page when available
 
@@ -98,6 +99,7 @@ Fetch statistical data from a Eurostat dataset.
 - Time range via `since_period`/`until_period` (e.g., `"2020"`, `"2023-Q1"`) or `last_n_periods` for the N most recent
 - Returns decoded observations with dimension codes and labels, numeric values, and status flags (`p` = provisional, `e` = estimated, etc.)
 - Reports total observation count, missing value count, and the effective time range of the result, each period bound omitted when neither the observations nor Eurostat report it
+- Returned rows are capped at 5,000, applied while decoding so a broad query never builds the rest; `obsCount`, `missingObsCount` and `timeRange` still describe the whole match, and `truncated` flags when rows were dropped. Filter the query to shrink what Eurostat sends — the cap bounds the decode, not the transfer
 - Async-response detection — large unfiltered queries return an actionable, non-retryable error with filter guidance rather than silently timing out
 
 ## Resource

@@ -35,8 +35,9 @@ export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
             label: z.string().describe('Human-readable dimension name (e.g., "Unit of measure").'),
             valuesCount: z
               .number()
+              .optional()
               .describe(
-                'Number of distinct values in this dimension. For "time" this is the dataset\'s full period count; every other dimension is counted from the most recent period.',
+                'Number of distinct values in this dimension. For "time" this is the dataset\'s full period count; every other dimension is counted from the most recent period. Omitted when the value set could not be measured — only "time" can be, and an omitted count is unknown, not one. Call eurostat_get_dimension_values for that dimension to obtain it.',
               ),
             sampleValues: z
               .array(
@@ -47,8 +48,9 @@ export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
                   })
                   .describe('A dimension value code and label pair.'),
               )
+              .optional()
               .describe(
-                'First 10 dimension values for orientation. Use eurostat_get_dimension_values for the full list.',
+                'First 10 dimension values for orientation. Use eurostat_get_dimension_values for the full list. Omitted alongside valuesCount when the value set could not be measured.',
               ),
           })
           .describe('A dataset dimension with its valid values.'),
@@ -155,17 +157,21 @@ export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
     if (result.metadataUrl) lines.push(`**Metadata:** ${result.metadataUrl}`);
     lines.push(`\n## Dimensions (${result.dimensions.length})`);
     for (const dim of result.dimensions) {
-      lines.push(
-        `\n### ${dim.label} (\`${dim.code}\`) — ${dim.valuesCount} value${dim.valuesCount !== 1 ? 's' : ''}`,
-      );
-      if (dim.sampleValues.length > 0) {
-        const samples = dim.sampleValues.map((v) => `\`${v.code}\` ${v.label}`).join(', ');
-        lines.push(`Sample: ${samples}`);
-        if (dim.valuesCount > dim.sampleValues.length) {
+      const count =
+        dim.valuesCount === undefined
+          ? `value count ${UNREPORTED}`
+          : `${dim.valuesCount} value${dim.valuesCount !== 1 ? 's' : ''}`;
+      lines.push(`\n### ${dim.label} (\`${dim.code}\`) — ${count}`);
+      const samples = dim.sampleValues ?? [];
+      if (samples.length > 0) {
+        lines.push(`Sample: ${samples.map((v) => `\`${v.code}\` ${v.label}`).join(', ')}`);
+        if (dim.valuesCount !== undefined && dim.valuesCount > samples.length) {
           lines.push(
-            `_(${dim.valuesCount - dim.sampleValues.length} more — use eurostat_get_dimension_values for the full list)_`,
+            `_(${dim.valuesCount - samples.length} more — use eurostat_get_dimension_values for the full list)_`,
           );
         }
+      } else if (dim.valuesCount === undefined) {
+        lines.push(`_(use eurostat_get_dimension_values to list this dimension's values)_`);
       }
     }
     return [{ type: 'text', text: lines.join('\n') }];

@@ -118,9 +118,27 @@ export class EurostatCatalogueService {
     );
 
     const entries = this.parseToc(text);
-    const codeIndex = new Map(entries.map((e, i) => [e.code, i] as const));
+    const codeIndex = this.buildCodeIndex(entries);
     ctx.log.info('TOC loaded', { entryCount: entries.length });
     return { entries, codeIndex, loadedAt: new Date() };
+  }
+
+  /**
+   * Index code → entry position, keeping the FIRST placement of a code filed more than once.
+   *
+   * Eurostat files some folder codes under several TOC branches — a "Cross cutting topics"
+   * tree re-files part of the primary "Database by themes" tree under other groupings, and
+   * a few survey folders are relisted per wave within the primary tree itself. Keeping the
+   * last placement made the earlier branch unreachable by code, and the earlier branch never
+   * lists fewer children than the ones it shadows. First-wins is the same
+   * canonical-placement rule `search()` applies to duplicate dataset codes.
+   */
+  private buildCodeIndex(entries: TocEntry[]): Map<string, number> {
+    const codeIndex = new Map<string, number>();
+    entries.forEach((e, i) => {
+      if (!codeIndex.has(e.code)) codeIndex.set(e.code, i);
+    });
+    return codeIndex;
   }
 
   /**
@@ -267,11 +285,18 @@ export class EurostatCatalogueService {
     );
   }
 
-  /** Get immediate children of a folder code, or root theme folders if code is undefined. */
+  /**
+   * Get immediate children of a folder code, or root theme folders if code is undefined.
+   *
+   * A code filed under more than one branch resolves to its first placement (see
+   * `buildCodeIndex`); the breadcrumbs of the branches not taken are returned as
+   * `otherPlacements` so the caller can see that the code was ambiguous and which
+   * alternatives exist.
+   */
   async browse(
     themeCode: string | undefined,
     ctx: Context,
-  ): Promise<{ items: BrowseItem[]; parentPath: string[] }> {
+  ): Promise<{ items: BrowseItem[]; parentPath: string[]; otherPlacements?: string[][] }> {
     const toc = await this.ensureLoaded(ctx);
 
     if (!themeCode) {
@@ -304,7 +329,18 @@ export class EurostatCatalogueService {
     const parentPath = this.buildPath(toc.entries, folderIdxMaybe);
     parentPath.push(folderEntry.label);
 
-    return { items, parentPath };
+    const otherPlacements = this.indexesWhere(
+      toc.entries,
+      (e) => e.code === themeCode && e.type === 'folder',
+    )
+      .filter((i) => i !== folderIdxMaybe)
+      .map((i) => {
+        const path = this.buildPath(toc.entries, i);
+        path.push(toc.entries[i]?.label ?? themeCode);
+        return path;
+      });
+
+    return { items, parentPath, ...(otherPlacements.length > 0 && { otherPlacements }) };
   }
 
   private toBrowseItem(entries: TocEntry[], index: number): BrowseItem | undefined {

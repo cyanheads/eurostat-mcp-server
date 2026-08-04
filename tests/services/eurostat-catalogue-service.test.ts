@@ -50,14 +50,21 @@ function buildTsv(entries: string[]): string {
   return [header, ...entries].join('\n');
 }
 
-/** Parse TSV entries into the in-memory cache shape the service holds. */
+/**
+ * Parse TSV entries into the in-memory cache shape the service holds.
+ *
+ * Both the parse and the code index come from the service's own methods — a hand-rolled
+ * index here would be a second implementation of the tie-break rule, and the seeded cache
+ * would stop reflecting what a real TOC load produces.
+ */
 function makeCache(svc: EurostatCatalogueService, entries: string[], loadedAt = new Date()) {
-  // Access private method via any cast — this is a unit test reaching into pure logic
+  // Access private methods via any cast — this is a unit test reaching into pure logic
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const parsed = (svc as any).parseToc(buildTsv(entries));
   return {
     entries: parsed,
-    codeIndex: new Map(parsed.map((e: { code: string }, i: number) => [e.code, i])),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    codeIndex: (svc as any).buildCodeIndex(parsed),
     loadedAt,
   };
 }
@@ -461,6 +468,102 @@ describe('EurostatCatalogueService — search', () => {
     const { datasets, totalMatches } = await svc.search('\t\n  ', 10, undefined, ctx);
     expect(totalMatches).toBe(0);
     expect(datasets).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Browse — duplicate folder codes across theme branches (#32)
+// ---------------------------------------------------------------------------
+
+describe('EurostatCatalogueService — duplicate folder codes (#32)', () => {
+  /**
+   * The live TOC's shape: a primary tree and a cross-cutting tree that re-files a subset of
+   * the same folders. Both roots carry the code `data`, and `hsw_ac` appears under each with
+   * the cross-cutting copy missing one child.
+   */
+  const shadowedPlacements = [
+    tocLine('Database by themes', 'data', 'folder'),
+    tocLine('    Health and safety', 'hsw_ac', 'folder'),
+    tocLine('        Accidents by activity', 'hsw_n2_01', 'dataset'),
+    tocLine('        Accidents by severity', 'hsw_n2_02', 'dataset'),
+    tocLine('        Accidents by age', 'hsw_n2_03', 'dataset'),
+    tocLine('Cross cutting topics', 'data', 'folder'),
+    tocLine('    Health and safety', 'hsw_ac', 'folder'),
+    tocLine('        Accidents by activity', 'hsw_n2_01', 'dataset'),
+  ];
+
+  it('resolves a duplicated code to its first placement, not its last', async () => {
+    const svc = await makeLoadedService(shadowedPlacements);
+    const ctx = createMockContext();
+    const result = await svc.browse('data', ctx);
+    // Last-wins resolved this to "Cross cutting topics" and its single child; the primary
+    // tree's branch was then unreachable by any theme_code.
+    expect(result.parentPath).toEqual(['Database by themes']);
+    expect(result.items.map((i) => i.code)).toEqual(['hsw_ac']);
+    expect(result.otherPlacements).toEqual([['Cross cutting topics']]);
+  });
+
+  it('returns the fuller child set when placements differ', async () => {
+    const svc = await makeLoadedService(shadowedPlacements);
+    const ctx = createMockContext();
+    const result = await svc.browse('hsw_ac', ctx);
+    expect(result.items.map((i) => i.code)).toEqual(['hsw_n2_01', 'hsw_n2_02', 'hsw_n2_03']);
+    expect(result.parentPath).toEqual(['Database by themes', 'Health and safety']);
+  });
+
+  it('discloses the branches it did not take', async () => {
+    const svc = await makeLoadedService(shadowedPlacements);
+    const ctx = createMockContext();
+    const result = await svc.browse('hsw_ac', ctx);
+    expect(result.otherPlacements).toEqual([['Cross cutting topics', 'Health and safety']]);
+  });
+
+  it('omits otherPlacements for a code with a single placement', async () => {
+    const svc = await makeLoadedService([
+      tocLine('Database by themes', 'data', 'folder'),
+      tocLine('    Economy', 'econ', 'folder'),
+      tocLine('        GDP', 'nama_10_gdp', 'dataset'),
+    ]);
+    const ctx = createMockContext();
+    const result = await svc.browse('econ', ctx);
+    expect(result.items.map((i) => i.code)).toEqual(['nama_10_gdp']);
+    expect(result.otherPlacements).toBeUndefined();
+    expect('otherPlacements' in result).toBe(false);
+  });
+
+  it('lists every extra placement when a code is filed more than twice', async () => {
+    const svc = await makeLoadedService([
+      tocLine('Primary', 'p', 'folder'),
+      tocLine('    Shared', 'dup', 'folder'),
+      tocLine('        Leaf', 'leaf_a', 'dataset'),
+      tocLine('Secondary', 's', 'folder'),
+      tocLine('    Shared', 'dup', 'folder'),
+      tocLine('Tertiary', 't', 'folder'),
+      tocLine('    Shared', 'dup', 'folder'),
+    ]);
+    const ctx = createMockContext();
+    const result = await svc.browse('dup', ctx);
+    expect(result.items.map((i) => i.code)).toEqual(['leaf_a']);
+    expect(result.otherPlacements).toEqual([
+      ['Secondary', 'Shared'],
+      ['Tertiary', 'Shared'],
+    ]);
+  });
+
+  it('ignores a dataset that happens to share the folder code', async () => {
+    const svc = await makeLoadedService([
+      tocLine('Primary', 'p', 'folder'),
+      tocLine('    Shared', 'dup', 'folder'),
+      tocLine('        Leaf', 'leaf_a', 'dataset'),
+      tocLine('Secondary', 's', 'folder'),
+      tocLine('    Shared', 'dup', 'dataset'),
+    ]);
+    const ctx = createMockContext();
+    const result = await svc.browse('dup', ctx);
+    expect(result.items.map((i) => i.code)).toEqual(['leaf_a']);
+    // A dataset is not a branch — naming it as a placement would point the caller at a code
+    // that browse cannot expand.
+    expect(result.otherPlacements).toBeUndefined();
   });
 });
 
