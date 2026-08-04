@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-08-04 · ⚠️ Breaking
+
+`get_dataset_info` output and the dataset resource narrow `dimensions[].valuesCount`/`sampleValues` to optional — a failed time-enumeration request now returns partial metadata instead of failing (#34); `query_dataset`'s row cap moves into the decoder (#27); duplicate `browse_themes` folder codes resolve to their first placement (#32).
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-08-04 · ⚠️ Breaking
 
 Ten output fields become optional across three schemas — absent annotations are omitted, not fabricated as 0/\"\" (#30, #33); dataset_info's time valuesCount reflects real coverage (#21); its async_response is non-retryable (#31); dimension_values rejects geo_level on a non-geo dimension (#25); query_dataset normalizes empty filter arrays (#22).
