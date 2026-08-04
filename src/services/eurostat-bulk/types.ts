@@ -1,6 +1,7 @@
 /**
- * @fileoverview Domain types and the static flag dictionaries for the Eurostat
- * SDMX 2.1 bulk (TSV) service.
+ * @fileoverview Domain types for the Eurostat SDMX 2.1 bulk (TSV) service. The
+ * flag dictionaries and measure column names live in `services/eurostat-codelists`,
+ * shared with the JSON-stat service.
  * @module services/eurostat-bulk/types
  */
 
@@ -16,82 +17,6 @@ export type BulkRow = Record<string, string | number | null>;
 
 /** Period column name. `time` matches the dimension name JSON-stat uses. */
 export const TIME_COLUMN = 'time';
-/** Measure column names — the non-dimension columns of a {@link BulkRow}. */
-export const OBS_VALUE_COLUMN = 'obs_value';
-export const OBS_FLAG_COLUMN = 'obs_flag';
-export const OBS_FLAG_LABEL_COLUMN = 'obs_flag_label';
-export const CONF_STATUS_COLUMN = 'conf_status';
-export const CONF_STATUS_LABEL_COLUMN = 'conf_status_label';
-
-/**
- * Eurostat's `OBS_FLAG` codelist, verbatim from
- * `sdmx/2.1/codelist/ESTAT/OBS_FLAG` — all 42 codes.
- *
- * Codes are composite: a cell flagged `bdep` is one code meaning "break in time
- * series, definition differs, estimated, provisional", not four codes to be
- * decomposed. Lookups that miss return `undefined` and the row's label column is
- * `null` — Eurostat can ship a code in data that its published codelist omits,
- * and an invented label is worse than an absent one.
- */
-export const OBS_FLAG_LABELS: Readonly<Record<string, string>> = {
-  b: 'break in time series',
-  bd: 'break in time series, definition differs (see metadata)',
-  bde: 'break in time series, definition differs (see metadata), estimated',
-  bdep: 'break in time series, definition differs (see metadata), estimated, provisional',
-  bdf: 'break in time series, definition differs (see metadata), forecast',
-  bdi: 'break in time series, definition differs (see metadata), value imputed by Eurostat or other receiving agencies',
-  bdip: 'break in time series, definition differs (see metadata), value imputed by Eurostat or other receiving agencies, provisional',
-  bdm: 'break in time series, definition differs (see metadata), missing value; data cannot exist',
-  bdn: 'break in time series, definition differs (see metadata), not significant',
-  bdp: 'break in time series, definition differs (see metadata), provisional',
-  bdu: 'break in time series, definition differs (see metadata), low reliability',
-  be: 'break in time series, estimated',
-  bep: 'break in time series, estimated, provisional',
-  bf: 'break in time series, forecast',
-  bi: 'break in time series, value imputed by Eurostat or other receiving agencies',
-  bip: 'break in time series, value imputed by Eurostat or other receiving agencies, provisional',
-  bm: 'break in time series, missing value; data cannot exist',
-  bn: 'break in time series, not significant',
-  bp: 'break in time series, provisional',
-  bpu: 'break in time series, provisional, low reliability',
-  bu: 'break in time series, low reliability',
-  d: 'definition differs (see metadata)',
-  de: 'definition differs (see metadata), estimated',
-  dep: 'definition differs (see metadata), estimated, provisional',
-  df: 'definition differs (see metadata), forecast',
-  di: 'definition differs (see metadata), value imputed by Eurostat or other receiving agencies',
-  dip: 'definition differs (see metadata), value imputed by Eurostat or other receiving agencies, provisional',
-  dm: 'definition differs (see metadata), missing value; data cannot exist',
-  dn: 'definition differs (see metadata), not significant',
-  dp: 'definition differs (see metadata), provisional',
-  dpu: 'definition differs (see metadata), provisional, low reliability',
-  du: 'definition differs (see metadata), low reliability',
-  e: 'estimated',
-  ep: 'estimated, provisional',
-  f: 'forecast',
-  i: 'value imputed by Eurostat or other receiving agencies',
-  ip: 'value imputed by Eurostat or other receiving agencies, provisional',
-  m: 'missing value; data cannot exist',
-  n: 'not significant',
-  p: 'provisional',
-  pu: 'provisional, low reliability',
-  u: 'low reliability',
-};
-
-/**
- * Eurostat's `CONF_STATUS` codelist, verbatim from
- * `sdmx/2.1/codelist/ESTAT/CONF_STATUS` — all three codes.
- *
- * `C` is what appears in TSV data, behind the `@` of a cell like `: @C`. The
- * same cells surface in JSON-stat folded into the observation status instead,
- * as `|C` labelled `|confidential`, which is why a bulk-staged table and a
- * query-staged one disagree about where a confidentiality marker lives.
- */
-export const CONF_STATUS_LABELS: Readonly<Record<string, string>> = {
-  C: 'confidential',
-  N: 'not for publication',
-  P: 'information under non-statistical secrecy arrangements',
-};
 
 /**
  * The header of a wide TSV body, parsed.

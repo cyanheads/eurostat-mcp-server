@@ -17,15 +17,21 @@ import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import {
+  CONF_STATUS_COLUMN,
+  CONF_STATUS_LABEL_COLUMN,
+  CONF_STATUS_LABELS,
+  OBS_FLAG_COLUMN,
+  OBS_FLAG_LABEL_COLUMN,
+  OBS_FLAG_LABELS,
+  OBS_VALUE_COLUMN,
+} from '@/services/eurostat-codelists.js';
+import {
   type DatasetMeta,
   type DimensionInfo,
   type DimensionValuesResult,
   type GeoLevel,
   type JsonStatResponse,
   OBS_CAP,
-  OBS_FLAG_COLUMN,
-  OBS_FLAG_LABEL_COLUMN,
-  OBS_VALUE_COLUMN,
   type Observation,
   type ObservationRow,
   type QueryExecution,
@@ -34,6 +40,53 @@ import {
 // Context satisfies the runtime contract of RequestContext but lacks the index signature
 // required by fetchWithTimeout/withRetry.
 const asReqCtx = (ctx: Context) => ctx as unknown as Record<string, unknown> & typeof ctx;
+
+/** Separator between the observation flag and the confidentiality status inside a JSON-stat status. */
+const CONF_SEPARATOR = '|';
+
+/**
+ * Split a JSON-stat status into its observation flag and its confidentiality status.
+ *
+ * JSON-stat publishes no `CONF_STATUS` field, so Eurostat folds that code into the
+ * observation status behind a `|`: a confidential cell arrives as `|C` labelled
+ * `|confidential`, a provisional one as `p` labelled `provisional`. The `|` is a
+ * separator, not part of a code — `sdmx/2.1/codelist/ESTAT/OBS_FLAG` has 42 codes
+ * and none contains one — so the left side is the `OBS_FLAG` code and the right the
+ * `CONF_STATUS` code, and either side may be empty. The SDMX TSV endpoint carries
+ * the same pair around an `@` and the SDMX-CSV rendering publishes them as separate
+ * columns; splitting here is what puts a given observation in the same columns
+ * whichever endpoint staged it.
+ *
+ * The response's own label map is split the same way and consulted first, so a
+ * localized `OBS_FLAG` label survives (`vorläufig` under `lang=DE`). Eurostat leaves
+ * the confidentiality half untranslated, and a half it labels with nothing falls
+ * back to the published codelist, then to the bare code.
+ */
+export function splitStatus(
+  code: string,
+  labels: Record<string, string>,
+): { confStatus?: { code: string; label: string }; flag?: { code: string; label: string } } {
+  const rawLabel = labels[code] ?? '';
+  const codeSep = code.indexOf(CONF_SEPARATOR);
+  const labelSep = rawLabel.indexOf(CONF_SEPARATOR);
+
+  const flagCode = codeSep === -1 ? code : code.slice(0, codeSep);
+  const confCode = codeSep === -1 ? '' : code.slice(codeSep + 1);
+  const flagLabel = labelSep === -1 ? rawLabel : rawLabel.slice(0, labelSep);
+  const confLabel = labelSep === -1 ? '' : rawLabel.slice(labelSep + 1);
+
+  return {
+    ...(flagCode && {
+      flag: { code: flagCode, label: flagLabel || OBS_FLAG_LABELS[flagCode] || flagCode },
+    }),
+    ...(confCode && {
+      confStatus: {
+        code: confCode,
+        label: confLabel || CONF_STATUS_LABELS[confCode] || confCode,
+      },
+    }),
+  };
+}
 
 export class EurostatDataService {
   // config and storage accepted to match the standard service init pattern;
@@ -172,7 +225,9 @@ export class EurostatDataService {
    * the whole match is, how much of it is missing, and which periods it spans, whatever
    * the cap. Cell membership matches the decoder exactly: a cell counts when it appears in
    * either map at an in-range linear index, and counts as missing when no numeric value
-   * accompanies it.
+   * accompanies it. `queryDataset` also reads `obsCount` reaching zero as the no-results
+   * condition, so one count decides both what the response reports and whether there is a
+   * response at all.
    */
   private scanCells(data: JsonStatResponse): {
     obsCount: number;
@@ -282,10 +337,9 @@ export class EurostatDataService {
 
       const obs: Observation = { dimensions, value: rawValue };
       if (statusCode) {
-        obs.status = {
-          code: statusCode,
-          label: statusLabels[statusCode] ?? statusCode,
-        };
+        const { flag, confStatus } = splitStatus(statusCode, statusLabels);
+        if (flag) obs.status = flag;
+        if (confStatus) obs.confStatus = confStatus;
       }
       yield obs;
     }
@@ -578,17 +632,23 @@ export class EurostatDataService {
     const url = this.buildUrl(datasetCode, params);
     const data = await this.fetchJson(url, ctx);
 
-    // Detect no-results case (empty value object, no error)
-    if (data.id && data.value !== undefined && Object.keys(data.value).length === 0) {
+    // Totals describe the whole match and are counted from the response's cell keys, so the
+    // decode cap below cannot shrink them.
+    const { obsCount, missingObsCount, timeCodes } = this.scanCells(data);
+
+    // Emptiness is the cell count reaching zero — the same count reported below and the same
+    // membership the decoder walks. Reading `value` alone instead would reject a slice whose
+    // every cell is confidential: JSON-stat carries such a cell in `status` with no `value`
+    // entry, so the whole slice arrives as `"value": {}` while still being data the decoder
+    // yields. Deriving both the guard and the reported total from one count is what keeps a
+    // rejected query and a returned one from disagreeing about what an observation is.
+    if (obsCount === 0) {
       throw notFound(
-        `Query returned no observations for dataset "${datasetCode}". The dimension filter combination may not exist in the data. Verify dimension values with eurostat_get_dimension_values first.`,
+        `Query returned no observations for dataset "${datasetCode}". The dimension filter combination may not exist in the data, or the period range may fall outside the dataset's coverage. Verify dimension values with eurostat_get_dimension_values first.`,
         { reason: 'no_results', datasetCode, filters: appliedFilters },
       );
     }
 
-    // Totals describe the whole match and are counted from the response's cell keys, so the
-    // decode cap below cannot shrink them.
-    const { obsCount, missingObsCount, timeCodes } = this.scanCells(data);
     const observations = this.decodeObservations(data, OBS_CAP);
 
     // Compute timeRange from the actual time dimension values in the response.
@@ -630,10 +690,11 @@ export class EurostatDataService {
  * Flatten one observation into a dataframe row.
  *
  * The inverse of the nested shape `Observation` carries: each dimension
- * contributes `<dim>` (code) and `<dim>_label`, and the status flag contributes
- * `obs_flag` / `obs_flag_label`. A dimension the observation does not carry
- * yields `null` in both of its columns rather than an absent key, so every row
- * has the same column set the table is declared with.
+ * contributes `<dim>` (code) and `<dim>_label`, the observation flag contributes
+ * `obs_flag` / `obs_flag_label`, and the confidentiality status contributes
+ * `conf_status` / `conf_status_label`. Anything the observation does not carry —
+ * a dimension, either flag — yields `null` in its columns rather than an absent
+ * key, so every row has the same column set the table is declared with.
  */
 export function toObservationRow(obs: Observation, dimensionsUsed: string[]): ObservationRow {
   const row: ObservationRow = {};
@@ -645,6 +706,8 @@ export function toObservationRow(obs: Observation, dimensionsUsed: string[]): Ob
   row[OBS_VALUE_COLUMN] = obs.value;
   row[OBS_FLAG_COLUMN] = obs.status?.code ?? null;
   row[OBS_FLAG_LABEL_COLUMN] = obs.status?.label ?? null;
+  row[CONF_STATUS_COLUMN] = obs.confStatus?.code ?? null;
+  row[CONF_STATUS_LABEL_COLUMN] = obs.confStatus?.label ?? null;
   return row;
 }
 
@@ -670,6 +733,8 @@ export function observationRowSchema(dimensionsUsed: string[]): ColumnSchema[] {
     { name: OBS_VALUE_COLUMN, type: 'DOUBLE', nullable: true },
     { name: OBS_FLAG_COLUMN, type: 'VARCHAR', nullable: true },
     { name: OBS_FLAG_LABEL_COLUMN, type: 'VARCHAR', nullable: true },
+    { name: CONF_STATUS_COLUMN, type: 'VARCHAR', nullable: true },
+    { name: CONF_STATUS_LABEL_COLUMN, type: 'VARCHAR', nullable: true },
   ];
 }
 

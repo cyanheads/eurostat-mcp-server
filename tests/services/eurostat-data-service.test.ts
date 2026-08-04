@@ -4,14 +4,17 @@
  * @module tests/services/eurostat-data-service.test
  */
 
+import { readFileSync } from 'node:fs';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { parseCell } from '@/services/eurostat-bulk/eurostat-bulk-service.js';
 import {
   EurostatDataService,
   getEurostatDataService,
   initEurostatDataService,
   observationRowSchema,
+  splitStatus,
   toObservationRow,
 } from '@/services/eurostat-data/eurostat-data-service.js';
 import {
@@ -159,6 +162,50 @@ describe('EurostatDataService — decodeObservations', () => {
     expect(obs).toHaveLength(0);
   });
 
+  it('splits a confidentiality marker out of the status instead of leaving it in the flag (#35)', () => {
+    // Live `sts_inpr_m` shape: JSON-stat has no CONF_STATUS field and folds the code into
+    // the observation status behind a `|`. `|C` is not an OBS_FLAG — the published codelist
+    // has 42 codes and none starts with a pipe.
+    const data = buildJsonStat(
+      [{ code: 'IE', label: 'Ireland' }],
+      [{ code: '2023-01', label: '2023-01' }],
+      {},
+      { '0': '|C' },
+      { '|C': '|confidential' },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const obs = (svc as any).decodeObservations(data, OBS_CAP);
+    expect(obs[0].status).toBeUndefined();
+    expect(obs[0].confStatus).toEqual({ code: 'C', label: 'confidential' });
+    expect(obs[0].value).toBeNull();
+  });
+
+  it('carries an observation flag and a confidentiality marker side by side (#35)', () => {
+    const data = buildJsonStat(
+      [{ code: 'IE', label: 'Ireland' }],
+      [{ code: '2023-01', label: '2023-01' }],
+      { 0: 88.1 },
+      { '0': 'p|C' },
+      { 'p|C': 'provisional|confidential' },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const obs = (svc as any).decodeObservations(data, OBS_CAP);
+    expect(obs[0].status).toEqual({ code: 'p', label: 'provisional' });
+    expect(obs[0].confStatus).toEqual({ code: 'C', label: 'confidential' });
+  });
+
+  it('leaves both markers absent for an unflagged observation (#35)', () => {
+    const data = buildJsonStat(
+      [{ code: 'DE', label: 'Germany' }],
+      [{ code: '2023', label: '2023' }],
+      { 0: 4_000_000 },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const obs = (svc as any).decodeObservations(data, OBS_CAP);
+    expect(obs[0]).not.toHaveProperty('status');
+    expect(obs[0]).not.toHaveProperty('confStatus');
+  });
+
   it('stops at the limit instead of building every cell first (#27)', () => {
     const data = buildJsonStat(
       [{ code: 'DE', label: 'Germany' }],
@@ -173,6 +220,93 @@ describe('EurostatDataService — decodeObservations', () => {
     expect(
       obs.map((o: { dimensions: { time: { code: string } } }) => o.dimensions.time.code),
     ).toEqual(['2000', '2001', '2002']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// splitStatus — OBS_FLAG vs CONF_STATUS (#35)
+// ---------------------------------------------------------------------------
+
+describe('splitStatus', () => {
+  it('reads a bare status as an observation flag and nothing else', () => {
+    expect(splitStatus('p', { p: 'provisional' })).toEqual({
+      flag: { code: 'p', label: 'provisional' },
+    });
+  });
+
+  it('reads a pipe-prefixed status as a confidentiality code and nothing else', () => {
+    expect(splitStatus('|C', { '|C': '|confidential' })).toEqual({
+      confStatus: { code: 'C', label: 'confidential' },
+    });
+  });
+
+  it('splits a status carrying both halves', () => {
+    expect(splitStatus('p|C', { 'p|C': 'provisional|confidential' })).toEqual({
+      flag: { code: 'p', label: 'provisional' },
+      confStatus: { code: 'C', label: 'confidential' },
+    });
+  });
+
+  it('keeps the localized label Eurostat sends for the observation flag', () => {
+    // Under lang=DE Eurostat translates the OBS_FLAG half and leaves the other in English.
+    expect(splitStatus('p|C', { 'p|C': 'vorläufig|confidential' })).toEqual({
+      flag: { code: 'p', label: 'vorläufig' },
+      confStatus: { code: 'C', label: 'confidential' },
+    });
+  });
+
+  it('falls back to the published codelists when the response labels neither half', () => {
+    expect(splitStatus('p|C', {})).toEqual({
+      flag: { code: 'p', label: 'provisional' },
+      confStatus: { code: 'C', label: 'confidential' },
+    });
+    expect(splitStatus('|N', {})).toEqual({
+      confStatus: { code: 'N', label: 'not for publication' },
+    });
+  });
+
+  it('falls back to the bare code for a half neither the response nor the codelist knows', () => {
+    expect(splitStatus('zz|Q', {})).toEqual({
+      flag: { code: 'zz', label: 'zz' },
+      confStatus: { code: 'Q', label: 'Q' },
+    });
+  });
+
+  it('yields neither half for an empty status', () => {
+    expect(splitStatus('', {})).toEqual({});
+  });
+});
+
+describe('query and bulk stagers agree on a confidential observation (#35)', () => {
+  /**
+   * `sts_inpr_m` IE 2023-01 reaches the two services in different wire formats — `: @C` in
+   * SDMX TSV, status `|C` labelled `|confidential` in JSON-stat — and SDMX-CSV renders the
+   * same observation as `,,C` across `OBS_VALUE,OBS_FLAG,CONF_STATUS`. Both stagers are
+   * asserted against those literal expectations rather than against each other, so this
+   * fails if either drifts.
+   */
+  it('writes the same measure columns for the same cell', () => {
+    const svc = new EurostatDataService(mockConfig, mockStorage);
+    const data = buildJsonStat(
+      [{ code: 'IE', label: 'Ireland' }],
+      [{ code: '2023-01', label: '2023-01' }],
+      {},
+      { '0': '|C' },
+      { '|C': '|confidential' },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const [obs] = (svc as any).decodeObservations(data, OBS_CAP);
+    const queryRow = toObservationRow(obs, ['geo', 'time']);
+    expect(queryRow).toMatchObject({
+      obs_value: null,
+      obs_flag: null,
+      obs_flag_label: null,
+      conf_status: 'C',
+      conf_status_label: 'confidential',
+    });
+
+    const cell = parseCell(': @C');
+    expect(cell).toEqual({ value: null, flag: null, conf: 'C' });
   });
 });
 
@@ -1159,6 +1293,8 @@ describe('EurostatDataService — dataframe row source (#8)', () => {
         obs_value: 4_000_000,
         obs_flag: 'p',
         obs_flag_label: 'provisional',
+        conf_status: null,
+        conf_status_label: null,
       },
     ]);
     // Every column is a scalar — a nested {code,label} object cannot be a dataframe column.
@@ -1194,6 +1330,8 @@ describe('EurostatDataService — dataframe row source (#8)', () => {
       obs_value: 7,
       obs_flag: null,
       obs_flag_label: null,
+      conf_status: null,
+      conf_status_label: null,
     });
   });
 
@@ -1260,6 +1398,106 @@ describe('EurostatDataService — dataframe row source (#8)', () => {
     iter.next();
     expect(yielded - before).toBe(3);
     iter.return(undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// queryDataset — the no-results guard (#36)
+// ---------------------------------------------------------------------------
+
+/**
+ * Verbatim Statistics API responses for `sts_inpr_m` filtered to indic_bt=PRD, nace_r2=B,
+ * s_adj=CA, unit=I21, geo=IE: one over 2023-01…2023-06, where Eurostat withholds every
+ * cell, and one over 1975-01…1975-06, which predates this series (it starts 1980-01).
+ * They differ in exactly the way the guard has to tell apart — the confidential slice
+ * sends six `status` entries against an empty `value`, the empty one carries no `status`
+ * key at all — and both are captured rather than written by hand, because the `value: {}`
+ * that makes this bug possible is the detail a hand-built body would not think to include.
+ */
+const fixture = (name: string): JsonStatResponse =>
+  JSON.parse(
+    readFileSync(new URL(`../fixtures/${name}.json`, import.meta.url), 'utf8'),
+  ) as JsonStatResponse;
+
+describe('EurostatDataService — no-results guard (#36)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const query = () =>
+    new EurostatDataService(mockConfig, mockStorage).queryDataset(
+      'sts_inpr_m',
+      { indic_bt: ['PRD'], nace_r2: ['B'], s_adj: ['CA'], unit: ['I21'], geo: ['IE'] },
+      undefined,
+      '2023-01',
+      '2023-06',
+      undefined,
+      'EN',
+      createMockContext(),
+    );
+
+  it('returns the observations of a slice whose every cell is confidential', async () => {
+    fetchMock.mockResolvedValue(okResponse(fixture('sts-inpr-m-ie-confidential')));
+    const res = await query();
+
+    expect(res.obsCount).toBe(6);
+    expect(res.missingObsCount).toBe(6);
+    expect(res.observations).toHaveLength(6);
+    expect(res.timeRange).toEqual({ start: '2023-01', end: '2023-06' });
+    for (const obs of res.observations) {
+      expect(obs.value).toBeNull();
+      expect(obs.confStatus).toEqual({ code: 'C', label: 'confidential' });
+      expect(obs.status).toBeUndefined();
+      expect(obs.dimensions.geo).toEqual({ code: 'IE', label: 'Ireland' });
+    }
+    expect(res.observations.map((o) => o.dimensions.time?.code)).toEqual([
+      '2023-01',
+      '2023-02',
+      '2023-03',
+      '2023-04',
+      '2023-05',
+      '2023-06',
+    ]);
+  });
+
+  it('stages the same six cells as dataframe rows', async () => {
+    fetchMock.mockResolvedValue(okResponse(fixture('sts-inpr-m-ie-confidential')));
+    const rows = [...(await query()).rows()];
+    expect(rows).toHaveLength(6);
+    expect(rows[0]).toMatchObject({
+      geo: 'IE',
+      time: '2023-01',
+      obs_value: null,
+      obs_flag: null,
+      conf_status: 'C',
+      conf_status_label: 'confidential',
+    });
+  });
+
+  it('still rejects a slice that matched no cell at all', async () => {
+    // The 1975 range predates this series: Eurostat answers 200 with no error, an empty
+    // `value` and no `status` map. Nothing was withheld here — there is nothing to return.
+    fetchMock.mockResolvedValue(okResponse(fixture('sts-inpr-m-ie-empty')));
+    await expect(
+      new EurostatDataService(mockConfig, mockStorage).queryDataset(
+        'sts_inpr_m',
+        { indic_bt: ['PRD'], nace_r2: ['B'], s_adj: ['CA'], unit: ['I21'], geo: ['IE'] },
+        undefined,
+        '1975-01',
+        '1975-06',
+        undefined,
+        'EN',
+        createMockContext(),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'no_results', datasetCode: 'sts_inpr_m' },
+    });
   });
 });
 

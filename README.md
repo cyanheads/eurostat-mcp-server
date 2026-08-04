@@ -9,7 +9,7 @@
 
 
 
-[![Version](https://img.shields.io/badge/Version-0.5.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/eurostat-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/eurostat-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/eurostat-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.6.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/eurostat-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/eurostat-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/eurostat-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -100,7 +100,7 @@ Fetch statistical data from a Eurostat dataset.
 - Accepts dimension filters as a map of `{dimension_code: [value1, value2, ...]}`
 - NUTS geo-level filter (`aggregate`, `country`, `nuts1`, `nuts2`, `nuts3`) — mutually exclusive with a non-empty `geo` entry in filters; an empty array is treated as no filter and dropped
 - Time range via `since_period`/`until_period` (e.g., `"2020"`, `"2023-Q1"`) or `last_n_periods` for the N most recent
-- Returns decoded observations with dimension codes and labels, numeric values, and status flags (`p` = provisional, `e` = estimated, etc.)
+- Returns decoded observations with dimension codes and labels, numeric values, an `OBS_FLAG` status (`p` = provisional, `e` = estimated, etc.) and a separate `CONF_STATUS` confidentiality marker (`C` = confidential, usually the reason a value is null)
 - Reports total observation count, missing value count, and the effective time range of the result, each period bound omitted when neither the observations nor Eurostat report it
 - Inline rows are capped at 5,000, applied while decoding so a broad query never builds the rest; `obsCount`, `missingObsCount` and `timeRange` still describe the whole match, and `truncated` flags when the cap bit. Filter the query to shrink what Eurostat sends — the cap bounds the decode, not the transfer
 - With the dataframe canvas enabled, a match past the cap is also staged whole as a SQL table and the response returns `canvasId` / `tableName` / `stagedRowCount`; the rows are streamed into the table one at a time from the response body already in memory, so nothing extra is fetched and the match is never materialized as an array. Without a canvas those fields are absent and narrowing the query is the way to the rest
@@ -132,8 +132,8 @@ SQL over the results `eurostat_query_dataset` and `eurostat_download_dataset` st
 
 - `eurostat_dataframe_describe` lists the staged tables with row counts and column names and types — call it before writing SQL
 - `eurostat_dataframe_query` runs a single read-only `SELECT`. Statement chaining, non-`SELECT` verbs, and functions that read files or external data are rejected with a typed error
-- Staged columns are flat, and the two stagers write different sets — call `eurostat_dataframe_describe` rather than assuming. `eurostat_query_dataset` gives each dimension a code column named after the dimension (`geo`) plus a label companion (`geo_label`), followed by `obs_value`, `obs_flag`, `obs_flag_label`. `eurostat_download_dataset` gives code columns only, since the bulk endpoint carries no labels, plus a `time` column and `obs_value`, `obs_flag`, `obs_flag_label`, `conf_status`, `conf_status_label`
-- Tables from the two stagers join on their dimension code columns and `time` — same names, same `VARCHAR` type, with `obs_value` `DOUBLE` on both. `obs_flag` is the one column that shares a name without sharing a meaning: JSON-stat folds confidentiality into the observation status, so a confidential cell reads `obs_flag = '|C'` on a query-staged table and `obs_flag = NULL` with `conf_status = 'C'` on a bulk-staged one. Join on the codes, not on the flag
+- Staged columns are flat, and the two stagers write different dimension columns — call `eurostat_dataframe_describe` rather than assuming. `eurostat_query_dataset` gives each dimension a code column named after the dimension (`geo`) plus a label companion (`geo_label`); `eurostat_download_dataset` gives code columns only, since the bulk endpoint carries no labels, plus a `time` column. Both write the same five measure columns: `obs_value`, `obs_flag`, `obs_flag_label`, `conf_status`, `conf_status_label`
+- Tables from the two stagers join on their dimension code columns and `time` — same names, same `VARCHAR` type, `obs_value` `DOUBLE` on both — and their measure columns carry the same codes for the same observation. JSON-stat has no `CONF_STATUS` field and folds the marker into the observation status as `|C`; `eurostat_query_dataset` splits it back out before staging, so a confidential cell reads `obs_flag = NULL` with `conf_status = 'C'` on either table
 - The DuckDB binding ships with the server, so `CANVAS_PROVIDER_TYPE=duckdb` is the only switch. The exception is the one-click `.mcpb` bundle, which strips platform-specific native bindings to stay portable — a bundle install cannot run the canvas, so reach for the npm, Docker, or from-source install for SQL analytics
 
 ## Resource
@@ -159,7 +159,7 @@ Eurostat-specific:
 - JSON-stat 2.0 stride-based decoder for the Statistics API response format
 - Async-response detection — Eurostat returns a warning object rather than an error for over-limit queries; the server intercepts it and returns an actionable error with filter guidance
 - NUTS hierarchy geo-level filtering across query and dimension-value tools
-- Status flag decoding (provisional, estimated, definition differs, etc.)
+- Status decoding against both published codelists — the `OBS_FLAG` observation flag (provisional, estimated, definition differs) and the `CONF_STATUS` confidentiality marker, each in its own field. JSON-stat folds the two into one string and SDMX TSV into one cell; both are split on their separator, so a given observation reads the same whichever endpoint served it
 - Optional DuckDB dataframe canvas — a query matching more than the inline cap is streamed row by row into a SQL table, reaching the observations the cap drops without a second request to Eurostat
 - SDMX 2.1 TSV bulk downloads with streaming gzip detection, a mid-transfer byte budget, wide-to-long expansion, and SOAP fault classification — the whole-dataset counterpart to the per-query path
 

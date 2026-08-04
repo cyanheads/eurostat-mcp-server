@@ -279,6 +279,48 @@ describe('eurostatQueryDataset', () => {
     expect(text).toContain('**Period:** 2023 – not reported by Eurostat');
   });
 
+  it('renders a confidentiality marker apart from the observation flag (#35)', () => {
+    const confidential = {
+      ...mockQueryResult,
+      observations: [
+        {
+          dimensions: {
+            geo: { code: 'IE', label: 'Ireland' },
+            time: { code: '2023-01', label: '2023-01' },
+          },
+          value: null,
+          confStatus: { code: 'C', label: 'confidential' },
+        },
+      ],
+      dimensionsUsed: ['geo', 'time'],
+      obsCount: 1,
+      missingObsCount: 1,
+    };
+    const blocks = eurostatQueryDataset.format!(confidential);
+    const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+    expect(text).toContain('[CONF_STATUS C: confidential]');
+    // The pre-fix rendering put the confidentiality code in the OBS_FLAG slot.
+    expect(text).not.toContain('|C');
+    expect(text).not.toContain('|confidential');
+  });
+
+  it('accepts an observation carrying both markers on the wire (#35)', () => {
+    const parsed = eurostatQueryDataset.output.parse({
+      ...mockQueryResult,
+      truncated: false,
+      observations: [
+        {
+          dimensions: { geo: { code: 'IE', label: 'Ireland' } },
+          value: 88.1,
+          status: { code: 'p', label: 'provisional' },
+          confStatus: { code: 'C', label: 'confidential' },
+        },
+      ],
+    });
+    expect(parsed.observations[0]?.confStatus).toEqual({ code: 'C', label: 'confidential' });
+    expect(parsed.observations[0]?.status).toEqual({ code: 'p', label: 'provisional' });
+  });
+
   it('formats sparse observations where value is null', () => {
     const sparseResult = {
       ...mockQueryResult,
@@ -442,6 +484,8 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
           obs_value: obs.value,
           obs_flag: null,
           obs_flag_label: null,
+          conf_status: null,
+          conf_status_label: null,
         };
       });
       expect(staged.rows).toEqual(inline);

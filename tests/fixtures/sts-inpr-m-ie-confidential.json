@@ -1,0 +1,208 @@
+{
+  "version": "2.0",
+  "class": "dataset",
+  "label": "Production in industry - monthly data",
+  "source": "ESTAT",
+  "updated": "2026-08-01T11:00:00+0200",
+  "value": {},
+  "status": {
+    "0": "|C",
+    "1": "|C",
+    "2": "|C",
+    "3": "|C",
+    "4": "|C",
+    "5": "|C"
+  },
+  "id": ["freq", "indic_bt", "nace_r2", "s_adj", "unit", "geo", "time"],
+  "size": [1, 1, 1, 1, 1, 1, 6],
+  "dimension": {
+    "freq": {
+      "label": "Time frequency",
+      "category": {
+        "index": {
+          "M": 0
+        },
+        "label": {
+          "M": "Monthly"
+        }
+      }
+    },
+    "indic_bt": {
+      "label": "Business trend indicator",
+      "category": {
+        "index": {
+          "PRD": 0
+        },
+        "label": {
+          "PRD": "Production (volume)"
+        }
+      }
+    },
+    "nace_r2": {
+      "label": "Statistical classification of economic activities in the European Community (NACE Rev. 2)",
+      "category": {
+        "index": {
+          "B": 0
+        },
+        "label": {
+          "B": "Mining and quarrying"
+        }
+      }
+    },
+    "s_adj": {
+      "label": "Seasonal adjustment",
+      "category": {
+        "index": {
+          "CA": 0
+        },
+        "label": {
+          "CA": "Calendar adjusted data, not seasonally adjusted data"
+        }
+      }
+    },
+    "unit": {
+      "label": "Unit of measure",
+      "category": {
+        "index": {
+          "I21": 0
+        },
+        "label": {
+          "I21": "Index, 2021=100"
+        }
+      }
+    },
+    "geo": {
+      "label": "Geopolitical entity (reporting)",
+      "category": {
+        "index": {
+          "IE": 0
+        },
+        "label": {
+          "IE": "Ireland"
+        }
+      }
+    },
+    "time": {
+      "label": "Time",
+      "category": {
+        "index": {
+          "2023-01": 0,
+          "2023-02": 1,
+          "2023-03": 2,
+          "2023-04": 3,
+          "2023-05": 4,
+          "2023-06": 5
+        },
+        "label": {
+          "2023-01": "2023-01",
+          "2023-02": "2023-02",
+          "2023-03": "2023-03",
+          "2023-04": "2023-04",
+          "2023-05": "2023-05",
+          "2023-06": "2023-06"
+        }
+      }
+    }
+  },
+  "extension": {
+    "lang": "EN",
+    "id": "STS_INPR_M",
+    "agencyId": "ESTAT",
+    "version": "1.0",
+    "datastructure": {
+      "id": "STS_INPR_M",
+      "agencyId": "ESTAT",
+      "version": "171.0"
+    },
+    "annotation": [
+      {
+        "type": "CREATED",
+        "date": "2010-03-17T21:43:19+0100"
+      },
+      {
+        "type": "DISSEMINATION_DOI_XML",
+        "title": "<adms:identifier xmlns:adms=\"http://www.w3.org/ns/adms#\" xmlns:skos=\"http://www.w3.org/2004/02/skos/core.html\" xmlns:dct=\"http://purl.org/dc/terms/\" xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><adms:Identifier rdf:about=\"https://doi.org/10.2908/STS_INPR_M\"><skos:notation rdf:datatype=\"http://purl.org/spar/datacite/doi\">10.2908/STS_INPR_M</skos:notation><dct:creator rdf:resource=\"http://publications.europa.eu/resource/authority/corporate-body/ESTAT\"/><dct:issued rdf:datatype=\"http://www.w3.org/2001/XMLSchema#date\">2023-01-23</dct:issued></adms:Identifier></adms:identifier>"
+      },
+      {
+        "type": "DISSEMINATION_EXPLANATORY_LINK",
+        "title": "text-category",
+        "href": "https://ec.europa.eu/eurostat/databrowser-backend/api/public/explanatory-notes/get/Info_note_STS_main_20240223.pdf",
+        "text": "Information note: base year"
+      },
+      {
+        "type": "DISSEMINATION_EXPLANATORY_LINK",
+        "title": "text-category",
+        "href": "https://ec.europa.eu/eurostat/databrowser-backend/api/public/explanatory-notes/get/Info_note_STS_main_20240223.pdf"
+      },
+      {
+        "type": "DISSEMINATION_EXPLANATORY_LINK",
+        "title": "text-category",
+        "href": "https://ec.europa.eu/eurostat/databrowser-backend/api/public/explanatory-notes/get/Info_note_STS_main_20240223.pdf"
+      },
+      {
+        "type": "DISSEMINATION_OBJECT_TYPE",
+        "title": "DATASET"
+      },
+      {
+        "type": "DISSEMINATION_TIMESTAMP_DATA",
+        "date": "2026-08-01T11:00:00+0200"
+      },
+      {
+        "type": "DISSEMINATION_TIMESTAMP_GLOBAL",
+        "date": "2026-08-01T11:00:00+0200"
+      },
+      {
+        "type": "DISSEMINATION_TIMESTAMP_PLANNED",
+        "date": "2026-08-01T11:00:00+0200"
+      },
+      {
+        "type": "ESMS_HTML",
+        "title": "Explanatory texts (metadata)",
+        "href": "https://ec.europa.eu/eurostat/cache/metadata/en/sts_esms.htm"
+      },
+      {
+        "type": "ESMS_SDMX",
+        "title": "Explanatory texts (metadata)",
+        "href": "https://ec.europa.eu/eurostat/api/dissemination/files?file=metadata/sts_esms.sdmx.zip"
+      },
+      {
+        "type": "OBS_COUNT",
+        "title": "12828053"
+      },
+      {
+        "type": "OBS_PERIOD_OVERALL_LATEST",
+        "title": "2026-06"
+      },
+      {
+        "type": "OBS_PERIOD_OVERALL_OLDEST",
+        "title": "1953-01"
+      },
+      {
+        "type": "SOURCE_INSTITUTIONS",
+        "text": "Eurostat"
+      },
+      {
+        "type": "UPDATE_DATA",
+        "date": "2026-08-01T11:00:00+0200"
+      },
+      {
+        "type": "UPDATE_STRUCTURE",
+        "date": "2026-07-29T11:00:00+0200"
+      }
+    ],
+    "status": {
+      "label": {
+        "|C": "|confidential"
+      }
+    },
+    "positions-with-no-data": {
+      "freq": [],
+      "indic_bt": [],
+      "nace_r2": [],
+      "s_adj": [],
+      "unit": [],
+      "geo": [],
+      "time": []
+    }
+  }
+}

@@ -20,9 +20,6 @@ import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import {
-  type BulkDownload,
-  type BulkRow,
-  type BulkStats,
   CONF_STATUS_COLUMN,
   CONF_STATUS_LABEL_COLUMN,
   CONF_STATUS_LABELS,
@@ -30,6 +27,11 @@ import {
   OBS_FLAG_LABEL_COLUMN,
   OBS_FLAG_LABELS,
   OBS_VALUE_COLUMN,
+} from '@/services/eurostat-codelists.js';
+import {
+  type BulkDownload,
+  type BulkRow,
+  type BulkStats,
   TIME_COLUMN,
   type TsvHeader,
 } from './types.js';

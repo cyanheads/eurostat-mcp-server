@@ -15,7 +15,7 @@ import { GEO_LEVEL_VALUES, OBS_CAP } from '@/services/eurostat-data/types.js';
 export const eurostatQueryDataset = tool('eurostat_query_dataset', {
   title: 'Query Eurostat Dataset',
   description:
-    'Fetch statistical data from a Eurostat dataset with dimension filters. Returns decoded observations with dimension codes and labels, numeric values, and status flags (e.g., "p" = provisional, "e" = estimated), capped at 5,000 inline rows. Call eurostat_get_dataset_info first to discover valid dimension codes and values. Apply filters to keep the result set manageable — large unfiltered queries may trigger an async response error. Use filters.geo for specific country/region codes, or geo_level for NUTS hierarchy filtering (mutually exclusive). Use last_n_periods for the N most recent periods without knowing the end date. This tool fetches a slice: past the inline cap, either narrow the filters, or — on a deployment that runs a dataframe canvas — read the staged SQL table this response names in tableName with eurostat_dataframe_query rather than re-querying Eurostat. When the target is a whole dataset rather than a slice, eurostat_download_dataset reads the SDMX bulk endpoint instead and is the cheaper route.',
+    'Fetch statistical data from a Eurostat dataset with dimension filters. Returns decoded observations with dimension codes and labels, numeric values, an OBS_FLAG status (e.g., "p" = provisional, "e" = estimated) and a separate CONF_STATUS confidentiality marker (e.g., "C" = confidential, which is usually why a value is null), capped at 5,000 inline rows. Call eurostat_get_dataset_info first to discover valid dimension codes and values. Apply filters to keep the result set manageable — large unfiltered queries may trigger an async response error. Use filters.geo for specific country/region codes, or geo_level for NUTS hierarchy filtering (mutually exclusive). Use last_n_periods for the N most recent periods without knowing the end date. This tool fetches a slice: past the inline cap, either narrow the filters, or — on a deployment that runs a dataframe canvas — read the staged SQL table this response names in tableName with eurostat_dataframe_query rather than re-querying Eurostat. When the target is a whole dataset rather than a slice, eurostat_download_dataset reads the SDMX bulk endpoint instead and is the cheaper route.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     dataset_code: z.string().min(1).describe('Dataset code (e.g., "nama_10_gdp"). Required.'),
@@ -87,11 +87,11 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
               .number()
               .nullable()
               .describe(
-                'Numeric observation value, or null when missing (flagged as unavailable in the source data).',
+                'Numeric observation value, or null when Eurostat reports none — either unavailable in the source data or withheld, in which case confStatus says so.',
               ),
             status: z
               .object({
-                code: z.string().describe('Status flag code (e.g., "p", "e", "d").'),
+                code: z.string().describe('OBS_FLAG code (e.g., "p", "e", "d").'),
                 label: z
                   .string()
                   .describe(
@@ -99,10 +99,25 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
                   ),
               })
               .optional()
-              .describe('Status flag for this observation. Omitted for normal observations.'),
+              .describe(
+                'Eurostat OBS_FLAG for this observation. Omitted for unflagged observations, and never carries a confidentiality code — that arrives in confStatus.',
+              ),
+            confStatus: z
+              .object({
+                code: z.string().describe('CONF_STATUS code: "C", "N", or "P".'),
+                label: z
+                  .string()
+                  .describe(
+                    'Confidentiality description (e.g., "confidential", "not for publication").',
+                  ),
+              })
+              .optional()
+              .describe(
+                'Eurostat CONF_STATUS for this observation — a different codelist from status. Present when Eurostat restricts the cell, which is usually why value is null. Omitted otherwise.',
+              ),
           })
           .describe(
-            'A single decoded observation with dimension values, numeric value, and optional status.',
+            'A single decoded observation with dimension values, numeric value, and the optional OBS_FLAG and CONF_STATUS markers.',
           ),
       )
       .describe(
@@ -124,7 +139,7 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       .string()
       .optional()
       .describe(
-        'Canvas table holding every matched observation in flat form — one code column per dimension plus a "_label" companion, then obs_value, obs_flag, obs_flag_label. Omitted when nothing was staged: either the result fit under the cap, or this deployment runs without a dataframe canvas.',
+        'Canvas table holding every matched observation in flat form — one code column per dimension plus a "_label" companion, then obs_value, obs_flag, obs_flag_label, conf_status, conf_status_label. The five measure columns match the ones eurostat_download_dataset stages, so the two tables join on dimension codes and time and compare like with like. Omitted when nothing was staged: either the result fit under the cap, or this deployment runs without a dataframe canvas.',
       ),
     stagedRowCount: z
       .number()
@@ -153,7 +168,7 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
     missingObsCount: z
       .number()
       .describe(
-        'Number of matched observations with null value (missing data points in the source), counted across everything matched rather than only the returned rows.',
+        'Number of matched observations carrying no numeric value, counted across everything matched rather than only the returned rows. Covers both unavailable and withheld cells — a slice can be wholly confidential, so this equalling obsCount does not mean the data is absent.',
       ),
   }),
   enrichment: {
@@ -211,9 +226,9 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
     {
       reason: 'no_results',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The query returned no observations — valid dataset but the filter combination matched no data.',
+      when: 'The query matched no observation cells — valid dataset, but no cell carries a value or a status flag for that filter combination and period range.',
       recovery:
-        'Verify dimension values with eurostat_get_dimension_values; invalid dimension values silently return no data.',
+        'Verify dimension values with eurostat_get_dimension_values and keep the period range inside the dataset coverage; both an unmatched value and an out-of-coverage range return no data rather than an error.',
     },
     {
       reason: 'async_response',
@@ -266,7 +281,7 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       if (reason === 'no_results') {
         throw ctx.fail('no_results', (err as Error).message, {
           recovery: {
-            hint: `No observations matched. Verify dimension values for "${input.dataset_code}" using eurostat_get_dimension_values — invalid values silently return no data.`,
+            hint: `No observation cells matched. Verify dimension values for "${input.dataset_code}" using eurostat_get_dimension_values, and check the period range is inside the dataset's coverage — an unmatched value and an out-of-coverage range both return no data rather than an error.`,
           },
         });
       }
@@ -388,7 +403,10 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       );
       const val = obs.value != null ? String(obs.value) : 'N/A';
       const statusPart = obs.status ? ` [${obs.status.code}: ${obs.status.label}]` : '';
-      lines.push(`${dimParts.join(' | ')} → ${val}${statusPart}`);
+      const confPart = obs.confStatus
+        ? ` [CONF_STATUS ${obs.confStatus.code}: ${obs.confStatus.label}]`
+        : '';
+      lines.push(`${dimParts.join(' | ')} → ${val}${statusPart}${confPart}`);
     }
 
     return [{ type: 'text', text: lines.join('\n') }];

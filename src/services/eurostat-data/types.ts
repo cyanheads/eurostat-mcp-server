@@ -42,10 +42,19 @@ export interface JsonStatExtension {
   };
 }
 
-/** A decoded observation from JSON-stat. */
+/**
+ * A decoded observation from JSON-stat.
+ *
+ * `status` and `confStatus` come from two different Eurostat codelists and are
+ * carried apart because JSON-stat does not: it folds a `CONF_STATUS` code into
+ * the observation status behind a `|`, which the decoder splits back out.
+ */
 export interface Observation {
+  /** `CONF_STATUS` code + label. Absent unless Eurostat restricts this cell. */
+  confStatus?: { code: string; label: string };
   /** One entry per dimension: code + label. */
   dimensions: Record<string, { code: string; label: string }>;
+  /** `OBS_FLAG` code + label. Absent for an unflagged observation. */
   status?: { code: string; label: string };
   value: number | null;
 }
@@ -55,16 +64,11 @@ export interface Observation {
  *
  * A dataframe column holds a scalar, so `Observation`'s nested `{code, label}`
  * pair per dimension is split across two columns — `<dim>` for the code and
- * `<dim>_label` for the label — and the status flag likewise. The measure
- * columns carry the `obs_` prefix Eurostat's own SDMX-CSV output uses, which
- * also keeps them clear of any dimension code.
+ * `<dim>_label` for the label — and each of the two flags likewise. The measure
+ * columns are the shared set both stagers write, so a table from this service and
+ * one from the bulk service carry the same flag columns under the same names.
  */
 export type ObservationRow = Record<string, string | number | null>;
-
-/** Measure column names — the non-dimension columns of an {@link ObservationRow}. */
-export const OBS_VALUE_COLUMN = 'obs_value';
-export const OBS_FLAG_COLUMN = 'obs_flag';
-export const OBS_FLAG_LABEL_COLUMN = 'obs_flag_label';
 
 /**
  * Metadata about a dataset extracted from a JSON-stat response.
