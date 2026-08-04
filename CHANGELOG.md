@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-08-04 · ⚠️ Breaking
+
+Ten output fields become optional across three schemas — absent annotations are omitted, not fabricated as 0/\"\" (#30, #33); dataset_info's time valuesCount reflects real coverage (#21); its async_response is non-retryable (#31); dimension_values rejects geo_level on a non-geo dimension (#25); query_dataset normalizes empty filter arrays (#22).
+
 ## [0.1.16](changelog/0.1.x/0.1.16.md) — 2026-08-03
 
 Catalogue TOC now refreshes on a 12h TTL instead of the process lifetime; search results deduplicated by dataset code; search cursors bound to their query and catalogue snapshot; whitespace-only queries and openWorldHint fixed; mcp-ts-core ^0.10.14 → ^0.11.1.
