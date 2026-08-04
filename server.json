@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.cyanheads/eurostat-mcp-server",
-  "description": "Search and query the Eurostat catalogue \u2014 EU economy, demography, trade, and NUTS regional data.",
+  "description": "Search and query the Eurostat catalogue — EU economy, demography, trade, and NUTS regional data.",
   "repository": {
     "url": "https://github.com/cyanheads/eurostat-mcp-server",
     "source": "github"
@@ -12,14 +12,14 @@
       "url": "https://eurostat.caseyjhand.com/mcp"
     }
   ],
-  "version": "0.4.0",
+  "version": "0.5.0",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/eurostat-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "packageArguments": [
         {
           "type": "positional",
@@ -60,8 +60,22 @@
           "default": "43200000"
         },
         {
+          "name": "EUROSTAT_BULK_TIMEOUT_MS",
+          "description": "HTTP timeout for one eurostat_download_dataset transfer, in milliseconds. Held separate from EUROSTAT_REQUEST_TIMEOUT_MS because a bulk body streams for minutes where a metadata call answers in seconds. Defaults to 2 minutes.",
+          "format": "string",
+          "isRequired": false,
+          "default": "120000"
+        },
+        {
+          "name": "EUROSTAT_BULK_MAX_BYTES",
+          "description": "Byte budget for one eurostat_download_dataset transfer, counted on the decoded TSV rather than on the wire. Eurostat sends the body chunked with no Content-Length, so the budget is enforced while streaming and the transfer is aborted when it is reached. Defaults to 50 MiB.",
+          "format": "string",
+          "isRequired": false,
+          "default": "52428800"
+        },
+        {
           "name": "CANVAS_PROVIDER_TYPE",
-          "description": "Set to 'duckdb' to enable the dataframe canvas, which lists the eurostat_dataframe_describe and eurostat_dataframe_query tools and lets eurostat_query_dataset stage a match larger than its 5,000-row inline cap as a SQL table. The DuckDB binding ships with the server, so this variable is the only switch.",
+          "description": "Set to 'duckdb' to enable the dataframe canvas, which lists the eurostat_dataframe_describe and eurostat_dataframe_query tools, lets eurostat_query_dataset stage a match larger than its 5,000-row inline cap as a SQL table, and lets eurostat_download_dataset retain a whole bulk download instead of only its inline preview. The DuckDB binding ships with the server, so this variable is the only switch.",
           "format": "string",
           "isRequired": false,
           "default": "none"
@@ -96,7 +110,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/eurostat-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "packageArguments": [
         {
           "type": "positional",
@@ -171,8 +185,22 @@
           "default": "43200000"
         },
         {
+          "name": "EUROSTAT_BULK_TIMEOUT_MS",
+          "description": "HTTP timeout for one eurostat_download_dataset transfer, in milliseconds. Held separate from EUROSTAT_REQUEST_TIMEOUT_MS because a bulk body streams for minutes where a metadata call answers in seconds. Defaults to 2 minutes.",
+          "format": "string",
+          "isRequired": false,
+          "default": "120000"
+        },
+        {
+          "name": "EUROSTAT_BULK_MAX_BYTES",
+          "description": "Byte budget for one eurostat_download_dataset transfer, counted on the decoded TSV rather than on the wire. Eurostat sends the body chunked with no Content-Length, so the budget is enforced while streaming and the transfer is aborted when it is reached. Defaults to 50 MiB.",
+          "format": "string",
+          "isRequired": false,
+          "default": "52428800"
+        },
+        {
           "name": "CANVAS_PROVIDER_TYPE",
-          "description": "Set to 'duckdb' to enable the dataframe canvas, which lists the eurostat_dataframe_describe and eurostat_dataframe_query tools and lets eurostat_query_dataset stage a match larger than its 5,000-row inline cap as a SQL table. The DuckDB binding ships with the server, so this variable is the only switch.",
+          "description": "Set to 'duckdb' to enable the dataframe canvas, which lists the eurostat_dataframe_describe and eurostat_dataframe_query tools, lets eurostat_query_dataset stage a match larger than its 5,000-row inline cap as a SQL table, and lets eurostat_download_dataset retain a whole bulk download instead of only its inline preview. The DuckDB binding ships with the server, so this variable is the only switch.",
           "format": "string",
           "isRequired": false,
           "default": "none"

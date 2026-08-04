@@ -1,7 +1,7 @@
 <div align="center">
   <h1>@cyanheads/eurostat-mcp-server</h1>
   <p><b>Search and query the Eurostat catalogue — EU economy, demography, trade, health, and NUTS regional data via MCP. STDIO or Streamable HTTP.</b>
-  <div>5 Tools (7 with the dataframe canvas) • 1 Resource</div>
+  <div>6 Tools (8 with the dataframe canvas) • 1 Resource</div>
   </p>
 </div>
 
@@ -9,7 +9,7 @@
 
 
 
-[![Version](https://img.shields.io/badge/Version-0.4.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/eurostat-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/eurostat-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/eurostat-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.5.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/eurostat-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/eurostat-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/eurostat-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -31,7 +31,7 @@
 
 ## Tools
 
-5 tools for discovering and querying Eurostat statistical datasets, plus 2 more when the optional dataframe canvas is enabled:
+6 tools for discovering and querying Eurostat statistical datasets, plus 2 more when the optional dataframe canvas is enabled:
 
 | Tool | Description |
 |:---|:---|
@@ -40,6 +40,7 @@
 | `eurostat_get_dataset_info` | Fetch metadata for a dataset: dimensions with sample values, time range, observation count, and last-update date |
 | `eurostat_get_dimension_values` | List all valid codes for a specific dimension (e.g., all geo codes, all unit codes); supports NUTS hierarchy filtering |
 | `eurostat_query_dataset` | Fetch decoded statistical observations with dimension filters, NUTS geo-level, and time-range controls |
+| `eurostat_download_dataset` | Download a whole dataset through the SDMX 2.1 TSV bulk endpoint and stage every observation on the dataframe canvas |
 | `eurostat_dataframe_describe` | List the tables staged on a dataframe canvas with their row counts and column types — canvas only |
 | `eurostat_dataframe_query` | Run a read-only SQL SELECT across staged tables — canvas only |
 
@@ -105,16 +106,34 @@ Fetch statistical data from a Eurostat dataset.
 - With the dataframe canvas enabled, a match past the cap is also staged whole as a SQL table and the response returns `canvasId` / `tableName` / `stagedRowCount`; the rows are streamed into the table one at a time from the response body already in memory, so nothing extra is fetched and the match is never materialized as an array. Without a canvas those fields are absent and narrowing the query is the way to the rest
 - Pass `canvas_id` from an earlier response to stage several results side by side and join across them
 - Async-response detection — large unfiltered queries return an actionable, non-retryable error with filter guidance rather than silently timing out
+- Fetches a *slice*. When the target is a whole dataset, `eurostat_download_dataset` reads the SDMX bulk endpoint instead, at roughly half the bytes
+
+---
+
+### `eurostat_download_dataset`
+
+Download a whole dataset through the SDMX 2.1 TSV bulk endpoint (`/sdmx/2.1/data/{dataset}?format=TSV`).
+
+- The TSV wire format runs 48–63% of the JSON-stat body `eurostat_query_dataset` reads for the same data, because the wide layout writes each dimension key once per row instead of once per observation. Measured across four datasets from 1.1M to 12.8M observations
+- Filters take the same `{dimension_code: [value, ...]}` map as `eurostat_query_dataset` and are applied by Eurostat before the body is sent. They become a positional key on the request path, which must carry one position per dimension — the server builds it from the dataset's own dimension order, so a filter naming a dimension the dataset does not have is rejected with the real list rather than sent as a malformed key
+- Narrow periods with `since_period` / `until_period`. There is deliberately no "last N periods": the TSV layout keeps a column for every period whichever selector is used, and `lastNObservations` merely blanks the unselected cells — measured at ~3× the equivalent JSON-stat body. `startPeriod` removes the columns
+- **Byte budget enforced while streaming.** Eurostat sends the body chunked with no `Content-Length`, so the limit is applied as bytes arrive and the transfer is aborted the moment it is spent — not measured after the fact. A truncated download returns its rows with `budgetExceeded: true` rather than an error, so the work already paid for is not discarded. `EUROSTAT_BULK_MAX_BYTES` sets the ceiling
+- **gzip is sniffed off the stream, not read from headers.** Eurostat compresses large bodies with no `Content-Encoding` header; the only header-level tell is a `.tsv.gz` filename on `Content-Disposition`, and the switch does not track dataset size, so the magic bytes are what decide
+- **The asynchronous queue envelope is detected explicitly.** When an extraction is too costly to serve inline Eurostat answers HTTP 200 with a SOAP `syncResponse` ticket instead of data; read as TSV that yields a header row of XML and no observations, so it is classified up front as a non-retryable error naming what to narrow
+- Errors arrive as XML SOAP faults, not JSON: faultcode 100 → `not_found`, 140 → `filter_arity`, 150 → `invalid_dimension` (which also covers a period range outside the dataset's coverage). Each maps to a typed reason with a recovery hint naming the tool to call next
+- With the dataframe canvas enabled, every observation is staged as a SQL table and the response returns `canvasId` / `tableName` / `stagedRowCount`; rows stream into the table one at a time, so a multi-million-row download never materializes as an array. Only `preview_limit` rows (default 50, max 500) come back inline, and they are the leading rows of the staged table
+- Without a canvas the download still runs so `rowCount`, `missingCount` and `periodRange` describe it, but only the preview is retained — the response says so plainly instead of implying the rest is reachable
 
 ---
 
 ### `eurostat_dataframe_describe` / `eurostat_dataframe_query`
 
-SQL over the results `eurostat_query_dataset` stages. **Listed only when the dataframe canvas is enabled** (`CANVAS_PROVIDER_TYPE=duckdb`); the server is fully functional without it, and clients never see tools they cannot call.
+SQL over the results `eurostat_query_dataset` and `eurostat_download_dataset` stage. **Listed only when the dataframe canvas is enabled** (`CANVAS_PROVIDER_TYPE=duckdb`); the server is fully functional without it, and clients never see tools they cannot call.
 
 - `eurostat_dataframe_describe` lists the staged tables with row counts and column names and types — call it before writing SQL
 - `eurostat_dataframe_query` runs a single read-only `SELECT`. Statement chaining, non-`SELECT` verbs, and functions that read files or external data are rejected with a typed error
-- Staged columns are flat: each dimension contributes a code column named after the dimension (`geo`) and a label column beside it (`geo_label`), followed by `obs_value`, `obs_flag`, and `obs_flag_label`
+- Staged columns are flat, and the two stagers write different sets — call `eurostat_dataframe_describe` rather than assuming. `eurostat_query_dataset` gives each dimension a code column named after the dimension (`geo`) plus a label companion (`geo_label`), followed by `obs_value`, `obs_flag`, `obs_flag_label`. `eurostat_download_dataset` gives code columns only, since the bulk endpoint carries no labels, plus a `time` column and `obs_value`, `obs_flag`, `obs_flag_label`, `conf_status`, `conf_status_label`
+- Tables from the two stagers join on their dimension code columns and `time` — same names, same `VARCHAR` type, with `obs_value` `DOUBLE` on both. `obs_flag` is the one column that shares a name without sharing a meaning: JSON-stat folds confidentiality into the observation status, so a confidential cell reads `obs_flag = '|C'` on a query-staged table and `obs_flag = NULL` with `conf_status = 'C'` on a bulk-staged one. Join on the codes, not on the flag
 - The DuckDB binding ships with the server, so `CANVAS_PROVIDER_TYPE=duckdb` is the only switch. The exception is the one-click `.mcpb` bundle, which strips platform-specific native bindings to stay portable — a bundle install cannot run the canvas, so reach for the npm, Docker, or from-source install for SQL analytics
 
 ## Resource
@@ -142,10 +161,11 @@ Eurostat-specific:
 - NUTS hierarchy geo-level filtering across query and dimension-value tools
 - Status flag decoding (provisional, estimated, definition differs, etc.)
 - Optional DuckDB dataframe canvas — a query matching more than the inline cap is streamed row by row into a SQL table, reaching the observations the cap drops without a second request to Eurostat
+- SDMX 2.1 TSV bulk downloads with streaming gzip detection, a mid-transfer byte budget, wide-to-long expansion, and SOAP fault classification — the whole-dataset counterpart to the per-query path
 
 Agent-friendly output:
 
-- Discovery workflow: `eurostat_search_datasets` / `eurostat_browse_themes` → `eurostat_get_dataset_info` → `eurostat_get_dimension_values` → `eurostat_query_dataset`
+- Discovery workflow: `eurostat_search_datasets` / `eurostat_browse_themes` → `eurostat_get_dataset_info` → `eurostat_get_dimension_values` → `eurostat_query_dataset` for a slice, or `eurostat_download_dataset` for the whole dataset
 - Invalid dimension codes in query filters silently return no data from Eurostat — the `eurostat_get_dimension_values` tool prevents this by letting agents verify codes first
 - Structured error contracts with typed reasons and recovery hints on all tools
 
@@ -267,7 +287,9 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `EUROSTAT_BASE_URL` | Eurostat API base URL | `https://ec.europa.eu/eurostat/api/dissemination` |
 | `EUROSTAT_REQUEST_TIMEOUT_MS` | HTTP request timeout in ms | `30000` |
 | `EUROSTAT_TOC_CACHE_TTL_MS` | Catalogue TOC cache lifetime in ms — the first search or browse call past this age refreshes it | `43200000` (12 hours) |
-| `CANVAS_PROVIDER_TYPE` | `duckdb` enables the dataframe canvas: lists the two dataframe tools and lets `eurostat_query_dataset` stage a match past its inline cap | `none` |
+| `EUROSTAT_BULK_TIMEOUT_MS` | HTTP timeout for one `eurostat_download_dataset` transfer in ms — held separate because a bulk body streams for minutes | `120000` (2 minutes) |
+| `EUROSTAT_BULK_MAX_BYTES` | Byte budget for one bulk download, counted on the decoded TSV and enforced while streaming | `52428800` (50 MiB) |
+| `CANVAS_PROVIDER_TYPE` | `duckdb` enables the dataframe canvas: lists the two dataframe tools, lets `eurostat_query_dataset` stage a match past its inline cap, and lets `eurostat_download_dataset` retain a bulk download | `none` |
 | `CANVAS_TEMP_PATH` | Directory DuckDB writes canvas spill files to. Must be writable by the server process | `<os tmpdir>/mcp-canvas` |
 | `CANVAS_TTL_MS` | Sliding lifetime of a staged canvas in ms; every call against it extends the window | `86400000` (24 hours) |
 | `CANVAS_DEFAULT_ROW_LIMIT` | Max rows one `eurostat_dataframe_query` returns before reporting `truncated` | `10000` |

@@ -11,6 +11,7 @@
 | `eurostat_get_dataset_info` | Fetch metadata for a dataset: dimensions, their codes and descriptions, time range, obs count, and last-updated date. The prerequisite call before querying data — reveals what `unit`, `na_item`, and other dimension values are valid. | `dataset_code` | `readOnlyHint: true` |
 | `eurostat_get_dimension_values` | List valid values for a specific dimension in a dataset (e.g., all `unit` codes for `nama_10_gdp`). Useful when the full dimension list from `get_dataset_info` is large and needs exploring. | `dataset_code`, `dimension` | `readOnlyHint: true` |
 | `eurostat_query_dataset` | Fetch statistical data from a dataset with dimension filters. Returns decoded observations (code, label, value, status flag) plus metadata about the query. Supports `geoLevel` for NUTS hierarchy filtering. Stages a match past the inline cap on the dataframe canvas when one is configured. | `dataset_code`, `filters{}`, `geo_level?`, `since_period?`, `until_period?`, `last_n_periods?`, `lang?`, `canvas_id?` | `readOnlyHint: true` |
+| `eurostat_download_dataset` | Download a whole dataset through the SDMX 2.1 TSV bulk endpoint, expand the wide layout into one row per observation, and stage them on the dataframe canvas when one is configured. Server-side filtering via the positional dimension key; a streaming byte budget bounds the transfer. | `dataset_code`, `filters{}`, `since_period?`, `until_period?`, `preview_limit?`, `canvas_id?` | `readOnlyHint: true` |
 | `eurostat_dataframe_describe` | List the tables staged on a dataframe canvas with their row counts and column names and types. Registered only when the canvas is enabled. | `canvas_id` | `readOnlyHint: true` |
 | `eurostat_dataframe_query` | Run a single read-only SQL `SELECT` across the staged tables. Registered only when the canvas is enabled. | `canvas_id`, `sql` | `readOnlyHint: true` |
 
@@ -28,7 +29,7 @@ None. The domain is data retrieval; the workflow is well-served by the tools the
 
 ## Overview
 
-eurostat-mcp-server exposes Eurostat — the European Union's central statistical office — as an MCP server. It covers EU-wide and member-state-level statistics across economy, demography, trade, labour, environment, and science, plus NUTS sub-national regional data at levels 1–3 (major regions down to local areas). The server wraps two Eurostat APIs: the Statistics API (JSON-stat 2.0) for data queries and the Catalogue API (TOC TXT) for dataset discovery. No authentication is required.
+eurostat-mcp-server exposes Eurostat — the European Union's central statistical office — as an MCP server. It covers EU-wide and member-state-level statistics across economy, demography, trade, labour, environment, and science, plus NUTS sub-national regional data at levels 1–3 (major regions down to local areas). The server wraps three Eurostat APIs: the Statistics API (JSON-stat 2.0) for data queries, the SDMX 2.1 dissemination API (wide TSV) for whole-dataset bulk downloads, and the Catalogue API (TOC TXT) for dataset discovery. No authentication is required.
 
 Target users: economic researchers comparing EU countries or regions, journalists covering EU policy and economics, business analysts evaluating European markets, and policy researchers — particularly those pairing this server with BLS (US) or World Bank (global) for multi-region analysis.
 
@@ -55,11 +56,14 @@ Target users: economic researchers comparing EU countries or regions, journalist
 | Service | Wraps | Used By |
 |:--------|:------|:--------|
 | `EurostatCatalogueService` | Catalogue API: TOC TXT (`/catalogue/toc/txt`) | `search_datasets`, `browse_themes` |
-| `EurostatDataService` | Statistics API (`/statistics/1.0/data/{code}`) | `get_dataset_info`, `get_dimension_values`, `query_dataset` |
+| `EurostatDataService` | Statistics API (`/statistics/1.0/data/{code}`) | `get_dataset_info`, `get_dimension_values`, `query_dataset`, and `download_dataset` for the dimension order its positional key needs |
+| `EurostatBulkService` | SDMX 2.1 dissemination API (`/sdmx/2.1/data/{code}[/{key}]?format=TSV`) | `download_dataset` |
 
 `EurostatCatalogueService` fetches and parses the full TOC on first use — a ~2 MB TSV file, updated twice daily at 11:00 and 23:00 Europe/Brussels time. The parsed index is held in memory for `EUROSTAT_TOC_CACHE_TTL_MS` (default 12 hours) and reused by every search and browse call in that window, so neither tool pays per-query network overhead. The first call past the TTL refreshes it; concurrent callers share that one refresh, and a failed refresh keeps serving the last loaded TOC.
 
 `EurostatDataService` makes per-query HTTP calls against the Statistics API. JSON-stat 2.0 responses are parsed in the service layer: flat `value` dict decoded via stride-based indexing into labeled `{dimCode, dimLabel, value, status?}` observations.
+
+`EurostatBulkService` streams the SDMX endpoint rather than buffering it: the response body is sniffed for gzip, bounded by a byte budget applied to decoded bytes as they arrive, classified as data or as an XML fault/queue envelope, and then expanded from the wide TSV layout into one row per populated cell by a generator the caller hands straight to the canvas.
 
 ---
 
@@ -70,7 +74,9 @@ Target users: economic researchers comparing EU countries or regions, journalist
 | `EUROSTAT_BASE_URL` | No | Override API base URL (default: `https://ec.europa.eu/eurostat/api/dissemination`) |
 | `EUROSTAT_REQUEST_TIMEOUT_MS` | No | HTTP request timeout in ms (default: `30000`) |
 | `EUROSTAT_TOC_CACHE_TTL_MS` | No | How long a fetched catalogue TOC stays usable before the next catalogue call refreshes it, in ms (default: `43200000` — 12 hours) |
-| `CANVAS_PROVIDER_TYPE` | No | `duckdb` enables the dataframe canvas — the two dataframe tools become callable and `query_dataset` stages a match past its inline cap (default: `none`) |
+| `EUROSTAT_BULK_TIMEOUT_MS` | No | HTTP timeout for one `download_dataset` transfer in ms, held separate because a bulk body streams for minutes (default: `120000` — 2 minutes) |
+| `EUROSTAT_BULK_MAX_BYTES` | No | Byte budget for one `download_dataset` transfer, counted on the decoded TSV and enforced while streaming (default: `52428800` — 50 MiB) |
+| `CANVAS_PROVIDER_TYPE` | No | `duckdb` enables the dataframe canvas — the two dataframe tools become callable, `query_dataset` stages a match past its inline cap, and `download_dataset` retains a whole bulk download rather than only its preview (default: `none`) |
 | `CANVAS_TEMP_PATH` | No | DuckDB spill directory; must be writable by the server process (default: `<os tmpdir>/mcp-canvas`) |
 | `CANVAS_TTL_MS` | No | Sliding lifetime of a staged canvas in ms (default: `86400000` — 24 hours) |
 | `CANVAS_DEFAULT_ROW_LIMIT` | No | Max rows one `dataframe_query` response carries before reporting `truncated` (default: `10000`) |
@@ -165,6 +171,38 @@ Base: `https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/{data
 **Async responses** (very large queries): HTTP 200, body `{"warning":{"status":413,"label":"ASYNCHRONOUS_RESPONSE. Your request will be treated asynchronously. Please try again later."}}`. Add more dimension filters to reduce result size.
 
 **Error format:** `{"error":[{"status":404,"id":100,"label":"ERR_NOT_FOUND_4: ..."}]}`
+
+### SDMX 2.1 Bulk Data API (TSV)
+
+Base: `https://ec.europa.eu/eurostat/api/dissemination/sdmx/2.1/data/{datasetCode}[/{key}]`
+
+| Parameter | Type | Description |
+|:----------|:-----|:------------|
+| `format` | string | `TSV` for the wide tab-separated layout. Omitted, the endpoint returns SDMX-ML. |
+| `{key}` (path) | string | Positional dimension filter, dot-separated, **one position per dimension in dataset order excluding `time`**. Empty means wildcard, `+` means OR: `A..B1G.AT+DE`. The count must match exactly — one position too few or too many is faultcode 140, and an all-wildcard key of the right arity (`...`) is accepted. |
+| `startPeriod` / `endPeriod` | string | Period range. These remove period **columns** from the response. |
+| `lastNObservations` / `firstNObservations` | integer | Accepted, but they keep the full period header and blank the unselected cells — measured at ~3× the equivalent JSON-stat body. Not used by this server. |
+| `geoLevel`, `detail` | — | Silently ignored; there is no SDMX equivalent of the NUTS-level filter. |
+
+**Dimension order** for the key comes from the JSON-stat `id` array minus `time` — the same metadata call `eurostat_get_dataset_info` makes. Verified against live TSV headers on 4-, 6- and 7-dimension datasets (`nama_10_gdp`, `sts_inpr_m`, `migr_asyrescra`): the header's comma-joined key field is exactly that array.
+
+**Response body** — wide TSV, CRLF line endings:
+
+```text
+freq,unit,na_item,geo\TIME_PERIOD⇥2022 ⇥2023 ⇥2024 ␍␊
+A,CP_MEUR,B1G,AT⇥402767.1 ⇥429634.3 ⇥443546.0 ␍␊
+A,CP_MEUR,B1G,DE⇥3591874.0 p⇥3853937.0 p⇥3921311.0 p␍␊
+```
+
+- The header's first field is the comma-joined dimension list with `\TIME_PERIOD` appended; the remaining tab-separated fields are period codes, each padded with a trailing space.
+- A cell is `<value>` `SPACE` `<obs_flag>[@<conf_status>]`, with either flag part possibly empty. `:` is a value Eurostat reports as unavailable; a wholly empty cell is not an observation at all. `: @C` is a missing value carrying `CONF_STATUS=C` and no observation flag — confirmed by requesting the same slice as SDMX-CSV, where those rows come back as `,,C` in `OBS_VALUE,OBS_FLAG,CONF_STATUS`.
+- `OBS_FLAG` codes are composite, not decomposable: `bdep` is one code meaning "break in time series, definition differs, estimated, provisional". The static dictionary is `sdmx/2.1/codelist/ESTAT/OBS_FLAG`, all 42 codes, labels verbatim. `CONF_STATUS` is `sdmx/2.1/codelist/ESTAT/CONF_STATUS` — `C` (confidential), `N`, `P`. JSON-stat does not carry `CONF_STATUS` as its own field: it folds the same marker into the observation status as `|C`, labelled `|confidential`, which is why `query_dataset` and `download_dataset` put it in different columns.
+
+**Transport behaviour:**
+- Large bodies arrive **gzip-compressed with no `Content-Encoding` header**; `Content-Type` stays `text/tab-separated-values` and the only header-level tell is a `.tsv.gz` filename on `Content-Disposition`. Confirmed on `migr_asyrescra` and `hlth_cd_yro`; absent on `sts_inpr_m`. The switch does not track observation count, so detection sniffs the gzip magic bytes off the stream.
+- Bodies are `Transfer-Encoding: chunked` with no `Content-Length`, so a size bound must be applied while streaming.
+- **Errors are XML SOAP faults, not JSON:** `<S:Fault><faultcode>N</faultcode><faultstring>…</faultstring></S:Fault>`. `100` / HTTP 404 unknown dataset, `140` / HTTP 400 wrong key arity, `150` / HTTP 400 rejected filter value **or a period range outside the dataset's coverage**. Bodies run under 400 bytes, so they survive the framework's 500-byte error-body excerpt intact.
+- **Asynchronous queue envelope**, on HTTP 200: `<env:Envelope>…<ns0:syncResponse>…<queued><id>UUID</id><status>SUBMITTED</status></queued>…`, with `Content-Type: application/xml` and `Content-Disposition: attachment;filename=<uuid>.xml`. Triggered by server-side cost rather than response size, and not deterministic per dataset.
 
 ### Catalogue API
 
@@ -347,14 +385,47 @@ Without a canvas the three fields are absent — not null, not empty — the not
 - `conflicting_params` (ValidationError): mutually exclusive parameters combined — a non-empty `geo` filter with `geo_level`, or `since_period`/`until_period` with `last_n_periods`. Both are rejected locally, before the request reaches Eurostat.
 - `canvas_not_found` (NotFound): a `canvas_id` was supplied for staging but is unknown or expired. Only reachable on a deployment with a canvas; without one the parameter is ignored rather than validated.
 
+### `eurostat_download_dataset`
+
+The whole-dataset counterpart to `query_dataset`'s slice. It reads the SDMX 2.1 TSV endpoint, which is 48–63% of the JSON-stat bytes for the same data, and streams the body into canvas rows rather than parsing it into memory first.
+
+**Filters are a dimension map, not a raw key.** The endpoint takes a positional path segment that must carry one position per dimension in dataset order — a count mismatch is faultcode 140, not a partial match. Asking a caller to build that string would make arity the caller's problem; taking the same `{dimension_code: [value, ...]}` map `query_dataset` takes and emitting a position for every dimension makes correct arity structural. A filter naming a dimension the dataset does not have is rejected locally, before the request, with the real dimension list — that is the failure the map form can still produce, and it is the one worth a good message.
+
+The dimension order costs one `lastTimePeriod=1` JSON-stat request, and only when a filter is actually present: an unfiltered download needs no key, and the TSV header names the dimensions anyway. An all-wildcard key of the right arity is accepted upstream, but omitting the segment asks the same question without staking the request on this server's copy of the dimension order being current.
+
+**No `last_n_periods`.** `lastNObservations` keeps every period column in the TSV header and blanks the unselected cells, producing a body measured at ~3× the JSON-stat equivalent for the same selection — slower and larger than the endpoint it is meant to beat. `startPeriod` removes the columns, so `since_period` / `until_period` are the only period controls offered and the description says why.
+
+**Three response shapes have to be told apart before any row is parsed:**
+
+1. A **SOAP fault** on 4xx. `fetchWithTimeout` throws before the caller sees a body, so the fault is read from the truncated excerpt on `err.data.body`; faults run under 400 bytes and survive the framework's 500-byte cap whole.
+2. The **queue envelope** on HTTP 200. A `syncResponse` ticket parsed as TSV yields a header row of XML and no observations — a successful-looking empty download. The body is classified as XML before the header parse rather than after.
+3. **Data**, possibly gzipped with no `Content-Encoding`.
+
+**Byte budget, enforced mid-transfer.** The body is chunked with no `Content-Length`, so a limit checked after the fact would already have paid for the whole transfer. The budget counts decoded bytes as they arrive and cancels the stream the moment it is spent. Counting *decoded* rather than wire bytes is the uniform measure across both encodings, and since a gzip body is never larger than what it expands to, bounding the decoded size bounds the transfer too.
+
+Overspend truncates rather than throws. The caller has already paid for everything downloaded; discarding it to raise an error trades a usable prefix for nothing. The response carries `budgetExceeded: true`, `bytesRead`, and a notice naming `EUROSTAT_BULK_MAX_BYTES` and the filters that would fit the dataset inside it. The line the budget cut in half is dropped — only complete lines are parsed — so a truncated download never emits a row with silently missing fields.
+
+**Input:**
+- `dataset_code: string`
+- `filters: Record<string, string[]>` (default `{}`)
+- `since_period?` / `until_period?: string` → `startPeriod` / `endPeriod`
+- `preview_limit: number` (1–500, default 50) — inline rows
+- `canvas_id?: string`
+
+**Output:** `datasetCode`, `dimensionsUsed` (read from the TSV header), `rowCount`, `missingCount`, `periodRange`, `bytesRead`, `compressed`, `budgetExceeded`, `observations[]` (the preview), and `canvasId` / `tableName` / `stagedRowCount` when something was staged.
+
+**Errors:** `not_found` (fault 100), `invalid_dimension` (fault 150, or a local unknown-dimension rejection), `filter_arity` (fault 140), `async_queued` (queue envelope, non-retryable), `no_results` (a table with no populated cells), `upstream_fault` (an unmodelled fault or a non-TSV body), `canvas_not_found`.
+
+---
+
 ### `eurostat_dataframe_describe` / `eurostat_dataframe_query`
 
-The SQL surface over what `query_dataset` stages. Both are wrapped in `disabledTool()` when `CANVAS_PROVIDER_TYPE` is `none`: they stay visible on the landing page and the server card — with the variable that turns them on — but are skipped at MCP registration, so clients never see a tool they cannot call, and an operator reading the README does not have to guess why it is missing.
+The SQL surface over what `query_dataset` and `download_dataset` stage. Both are wrapped in `disabledTool()` when `CANVAS_PROVIDER_TYPE` is `none`: they stay visible on the landing page and the server card — with the variable that turns them on — but are skipped at MCP registration, so clients never see a tool they cannot call, and an operator reading the README does not have to guess why it is missing.
 
 `dataframe_query` passes caller SQL straight to the canvas. It is not pre-filtered here: the framework's gate rejects anything that is not a single `SELECT` (statement count, statement type, an EXPLAIN-plan operator allowlist, and a table-function deny-list covering file and external-data readers), and each rejection carries a typed reason. A second, weaker string filter in front of that would only shadow those reasons with a vaguer message. `denySystemCatalogs` is left off because `dataframe_describe` already exposes the catalog deliberately.
 
 **Input:**
-- `canvas_id: string` — the `canvasId` from a `query_dataset` response
+- `canvas_id: string` — the `canvasId` from a `query_dataset` or `download_dataset` response
 - `sql: string` (query only) — a single read-only `SELECT`
 
 **Output:** `describe` returns `canvas_id`, `expires_at`, and `tables[]` (`name`, `kind`, `row_count`, `expires_at?`, `columns[]`). `query` returns `canvas_id`, `columns[]`, `rows[]`, `row_count`, `truncated`. 64-bit integer results come back as strings — the framework's JSON-safe row shape — so `COUNT(*)` is a string unless cast.
@@ -395,6 +466,16 @@ The SQL surface over what `query_dataset` stages. Both are wrapped in `disabledT
 | 2 | Confirm the staged table and column names | `eurostat_dataframe_describe` |
 | 3 | Aggregate or filter across the whole match — `SELECT geo, AVG(obs_value) … GROUP BY geo` | `eurostat_dataframe_query` |
 | 4 | Stage a second dataset onto the same canvas by passing `canvas_id`, then join across both | `eurostat_query_dataset` → `eurostat_dataframe_query` |
+
+### Common workflow: pull a whole dataset for analysis (canvas enabled)
+
+| # | Action | Tool |
+|:--|:-------|:-----|
+| 1 | Confirm the dimension codes to filter on | `eurostat_get_dataset_info` |
+| 2 | Download the dataset; the response returns a 50-row preview plus `canvasId` + `tableName`, and reports `bytesRead` / `compressed` / `budgetExceeded` | `eurostat_download_dataset` |
+| 3 | If `budgetExceeded` is true, re-run with `since_period` or tighter filters | `eurostat_download_dataset` |
+| 4 | Read the staged column names — the bulk table carries codes and no `_label` companions | `eurostat_dataframe_describe` |
+| 5 | Aggregate across every observation | `eurostat_dataframe_query` |
 
 ### Common workflow: explore unknown topic domain
 
@@ -445,7 +526,17 @@ The SQL surface over what `query_dataset` stages. Both are wrapped in `disabledT
 
 **No SDMX constraint data:** The Statistics API returns dimension values observed in actual data for a filtered query, not all theoretically valid codes for the dataset. A code may be valid per the codelist but absent from the data for a given time period or geography.
 
-**The canvas does not raise the transfer ceiling:** staging reaches the rows past the inline cap of a response the server already received; it does nothing for a dataset too large to download inside `EUROSTAT_REQUEST_TIMEOUT_MS`. That bound stays where it was — measured, an unfiltered `nama_10_gdp` is ~18.7 MB over ~23 s and `hlth_cd_asdr2` ~73 MB over ~87 s, past the 30 s default. Filtering remains the only route to a dataset larger than one response.
+**The canvas does not raise the transfer ceiling for `query_dataset`:** staging reaches the rows past the inline cap of a response the server already received; it does nothing for a dataset too large to download inside `EUROSTAT_REQUEST_TIMEOUT_MS`. That bound stays where it was — measured, an unfiltered `nama_10_gdp` is ~18.7 MB over ~23 s and `hlth_cd_asdr2` ~73 MB over ~87 s, past the 30 s default. `eurostat_download_dataset` is the route past it: a cheaper wire format, its own longer timeout, and a byte budget that truncates loudly instead of timing out.
+
+**A bulk download is bounded by bytes, not by completeness:** `EUROSTAT_BULK_MAX_BYTES` (50 MiB decoded by default) will truncate a dataset that exceeds it, and the truncation point is wherever the budget lands — the leading rows in Eurostat's own key order, not a sample and not the most recent periods. `budgetExceeded` says so, but the only way to a complete large dataset is filters or a period range that fit it inside the budget. Raising the budget trades against `EUROSTAT_BULK_TIMEOUT_MS`: measured throughput on the TSV endpoint is roughly 0.86 MB/s, so 50 MiB is about a minute of the 2-minute default.
+
+**The bulk endpoint carries codes, not labels:** the TSV layout has no room for them, so a staged bulk table has no `<dim>_label` columns and its `obs_flag_label` / `conf_status_label` come from a static dictionary rather than from the response. A code absent from that dictionary stages with a null label rather than an invented one. Labels for dimension values need `eurostat_get_dimension_values`.
+
+**`obs_flag` is not comparable across the two staged shapes:** a table from `query_dataset` and a table from `download_dataset` join cleanly on their dimension code columns and `time` — same names, same `VARCHAR` type, `obs_value` `DOUBLE` on both — so the column-set divergence is additive in both directions and costs a caller nothing. `obs_flag` is the exception: JSON-stat folds confidentiality into the observation status, so the same cell reads `obs_flag = '|C'` / `obs_flag_label = '|confidential'` on a query table and `obs_flag = NULL` with `conf_status = 'C'` on a bulk table. `dataframe_describe` reports names and types, so it cannot surface this; both dataframe tool descriptions say it instead.
+
+**The bulk queue envelope is not collectable:** when Eurostat answers with a `SUBMITTED` ticket the extraction is genuinely queued upstream, but there is no supported way to poll for it here — same reasoning as the Statistics API's async response. The server detects it and names what to narrow.
+
+**A bulk download without a canvas is counted and discarded:** the transfer still runs so `rowCount`, `missingCount` and `periodRange` describe the dataset, but only `preview_limit` rows survive the call. That is deliberate — reporting 50 rows as the row count of a 6-million-row dataset would be worse — but it means the tool spends bandwidth for numbers on a deployment that cannot keep the data.
 
 **Canvas tables are in-memory and per-process:** a restart drops every staged table, and a `canvas_id` issued by one process is meaningless to another. Behind a load balancer, a follow-up `dataframe_query` must reach the same instance that staged the table. Both are properties of the framework's canvas, not of this server; a `canvas_id` that no longer resolves fails as `canvas_not_found` with a recovery hint to re-run the query.
 
@@ -479,5 +570,18 @@ The SQL surface over what `query_dataset` stages. Both are wrapped in `disabledT
 | 2026-08-04 | Fail rather than degrade when staging errors | A canvas that quietly stops working looks identical to one that was never enabled, and the difference only surfaces as a capability silently missing. Acquire failures caused by an unwritable scratch directory are re-thrown naming `CANVAS_TEMP_PATH`, so the actionable case is actionable rather than a bare `EACCES`. |
 | 2026-08-04 | `dataframe_describe` omits the canvas's `approxSizeBytes` | The framework populates that field from DuckDB's `duckdb_tables().estimated_size`, which is an estimated row *cardinality*, not a byte size — measured, it comes back equal to `rowCount` (6,607 and 7,882 on two staged tables). Surfacing it would report a row count under a byte-shaped name, and `row_count` already carries that number exactly. |
 | 2026-08-04 | `@duckdb/node-api` as a runtime dependency, with no build-time gate on it | The canvas is already gated at runtime by `CANVAS_PROVIDER_TYPE` (`none` by default), so the ~110 MB binding sits inert until an operator turns the feature on. Gating the install on top of that — a dev dependency plus a Docker build arg — would mean the published image, which is built with no custom build args, could never list the dataframe tools at all. Shipping the binding in every install and image leaves one switch to reason about. The `.mcpb` bundle is the one surface that cannot run the canvas: it strips platform-specific native bindings to stay portable and inside the registry size cap. |
+| 2026-08-04 | Add `eurostat_download_dataset` over the SDMX 2.1 TSV endpoint rather than widening `query_dataset` | The two answer different questions and have different failure modes. `query_dataset` fetches a filtered slice as JSON-stat and decodes it in memory; the bulk path streams a whole dataset in a format with different error encoding (XML SOAP), different transport behaviour (undeclared gzip, chunked), and a size bound this server has to impose itself. Folding that into one tool would mean one description covering two shapes and one error contract covering both fault vocabularies. |
+| 2026-08-04 | Take filters as a dimension map and build the positional key server-side | The SDMX key must carry one position per dimension in dataset order; a count mismatch is faultcode 140, not a partial match. Emitting a position for every dimension of the resolved order makes correct arity structural rather than the caller's problem. The residual failure — a filter naming a dimension the dataset does not have — is caught locally, before the request, and answered with the real dimension list. |
+| 2026-08-04 | Resolve the dimension order only when a filter is present, and omit the key segment otherwise | An unfiltered download needs no key, and the TSV header names the dimensions anyway, so the metadata request is skipped. An all-wildcard key of the right arity is accepted upstream, but omitting it asks the same question without staking the request on this server's copy of the dimension order still being current. |
+| 2026-08-04 | Offer no `last_n_periods` on the bulk tool | Mapping it to `lastNObservations` keeps every period column in the TSV header and blanks the unselected cells — measured at ~3× the equivalent JSON-stat body, so the bulk path would be slower and larger than the tool it exists to beat. `startPeriod` removes the columns, so `since_period`/`until_period` are the only period controls and the description says why rather than leaving the omission to look like an oversight. |
+| 2026-08-04 | Sniff gzip off the stream instead of reading headers or predicting from size | Eurostat compresses large bodies with no `Content-Encoding`; `Content-Type` stays `text/tab-separated-values` and the only header-level tell is a `.tsv.gz` filename on `Content-Disposition`. The switch is not monotonic in observation count — `migr_asyappctzm` (103M observations) arrives plain while `proj_19rp3` (91M) arrives gzipped — so neither headers nor a size heuristic decide it. The magic bytes do. |
+| 2026-08-04 | Enforce the byte budget on decoded bytes, while streaming, and cancel the transfer | The body is chunked with no `Content-Length`, so a limit applied after the fact has already paid for the whole download. Counting decoded rather than wire bytes is the one measure that means the same thing for both encodings, and since a gzip body is never larger than what it expands to, bounding the decoded size bounds the transfer too. |
+| 2026-08-04 | Truncate on overspend rather than throwing | The caller has already paid for everything downloaded when the budget runs out; raising an error trades a usable prefix of the dataset for nothing. `budgetExceeded`, `bytesRead` and a notice naming `EUROSTAT_BULK_MAX_BYTES` make the partial result loud, and the half-line the budget cut is dropped rather than parsed, so a truncated download never emits a row with silently missing fields. |
+| 2026-08-04 | Classify the `SUBMITTED` queue envelope explicitly, on the success path | It arrives as HTTP 200 with `Content-Type: application/xml`; read as TSV it yields a header row of XML and no rows, which presents as a successful empty download. Detecting it before the header parse turns a silent wrong answer into a non-retryable error naming what to narrow. It is triggered by server-side cost rather than response size and is not deterministic per dataset, so it cannot be predicted from the request. |
+| 2026-08-04 | Stage bulk rows as code columns only, with no `<dim>_label` companions | The TSV endpoint carries no labels, so label columns would stage as all-null and claim a lookup that never happened. The divergence from `query_dataset`'s staged shape is real, so both dataframe tool descriptions now tell callers to read the columns from `dataframe_describe` rather than assume one layout. |
+| 2026-08-04 | Buffer the TSV header to its line break with no length cap, while still capping the XML classification peek | The header carries one field per period, so its length tracks the dataset's period count rather than any fixed shape — `ert_bil_eur_d` is 13,852 fields and 166 KB. A fixed peek window would parse a prefix of it as the whole header, drop every period past the cap, and hand the header's own tail to the row parser as data; measured, that reported 95,722 observations for a dataset holding 512,524, with `budgetExceeded` false. The byte budget is the bound that belongs here. The peek window stays on the XML branch, where both non-data shapes are under 400 bytes. |
+| 2026-08-04 | Ship a static OBS_FLAG / CONF_STATUS dictionary, and leave unknown codes unlabelled | The bulk format carries flag codes with no labels. Both dictionaries are the published codelists copied verbatim — 42 `OBS_FLAG` codes from `sdmx/2.1/codelist/ESTAT/OBS_FLAG`, composite rather than decomposable (`bdep` is one code, and the bare `b` it builds on is 1,907 of `nama_10_gdp`'s observations), and `C` / `N` / `P` from `sdmx/2.1/codelist/ESTAT/CONF_STATUS`. A static copy can fall behind, so a code the dictionary does not hold stages with a null label rather than an invented one. |
+| 2026-08-04 | Drain the download even when no canvas is configured | Stopping at `preview_limit` would report a row count of 50 for a dataset of millions. Draining keeps `rowCount`, `missingCount` and `periodRange` describing the download, keeps one code path under both configurations, and leaves the byte budget bounding what is transferred. The response says plainly that only the preview is retained rather than implying the rest is reachable. |
+| 2026-08-04 | Give the bulk path its own timeout, and no retry | A bulk body streams for minutes where a metadata call answers in seconds, so sharing `EUROSTAT_REQUEST_TIMEOUT_MS` would either time out every download or loosen every metadata call. Retry is omitted for the same reason inverted: re-running the most expensive request this server makes, on a transient failure, costs the caller another full transfer. |
 | 2026-05-23 | 5 tools, no prompts, 1 resource | Domain is read-only data retrieval with a natural tool workflow (discover → inspect → query). Prompts add no value over well-designed tool descriptions. Resource for `eurostat://dataset/{dataset_code}` provides cache-injectable context without requiring a full query. |
 | 2026-05-23 | Exclude SDMX codelist tool | Global codelists (4,292 geo entries) are unhelpful without dataset scoping. `get_dimension_values` is dataset-scoped and returns actionable values. |

@@ -1,6 +1,6 @@
 {
   "name": "eurostat-mcp-server",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Search and query the Eurostat catalogue — EU economy, demography, trade, health, and NUTS regional data via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads",
@@ -15,7 +15,7 @@
   "interface": {
     "displayName": "eurostat-mcp-server",
     "shortDescription": "Search and query the Eurostat catalogue — EU economy, demography, trade, health, and NUTS regional data via MCP.",
-    "longDescription": "Eurostat MCP server providing access to the EU's statistical catalogue covering economy, demography, trade, health, environment, and NUTS regional data. Supports dataset discovery, dimension browsing, and filtered data queries.",
+    "longDescription": "Eurostat MCP server providing access to the EU's statistical catalogue covering economy, demography, trade, health, environment, and NUTS regional data. Supports dataset discovery, dimension browsing, filtered data queries, and whole-dataset bulk downloads over the SDMX 2.1 TSV endpoint, with optional SQL analytics over staged results.",
     "developerName": "cyanheads",
     "category": "data",
     "capabilities": ["Read"],
