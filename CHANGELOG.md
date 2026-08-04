@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.16](changelog/0.1.x/0.1.16.md) — 2026-08-03
+
+Catalogue TOC now refreshes on a 12h TTL instead of the process lifetime; search results deduplicated by dataset code; search cursors bound to their query and catalogue snapshot; whitespace-only queries and openWorldHint fixed; mcp-ts-core ^0.10.14 → ^0.11.1.
+
 ## [0.1.15](changelog/0.1.x/0.1.15.md) — 2026-07-10
 
 content[]/structuredContent parity for query_dataset and browse_themes; get_dimension_values returns the full time range and defaults geo to country; invalid dimension values now surface the declared error contract.

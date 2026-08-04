@@ -1,6 +1,6 @@
 # eurostat-mcp-server - Directory Structure
 
-Generated on: 2026-07-10 19:30:55
+Generated on: 2026-08-04 06:07:18
 
 ```text
 eurostat-mcp-server/
@@ -16,6 +16,7 @@ eurostat-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── FUNDING.yml
 │   └── SECURITY.md
 ├── .vscode/
 │   ├── extensions.json
