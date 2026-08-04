@@ -51,6 +51,13 @@
           "format": "string",
           "isRequired": false,
           "default": "30000"
+        },
+        {
+          "name": "EUROSTAT_TOC_CACHE_TTL_MS",
+          "description": "How long a fetched catalogue TOC stays usable before the next catalogue call refreshes it, in milliseconds. Defaults to 12 hours.",
+          "format": "string",
+          "isRequired": false,
+          "default": "43200000"
         }
       ],
       "transport": {
@@ -128,6 +135,13 @@
           "format": "string",
           "isRequired": false,
           "default": "30000"
+        },
+        {
+          "name": "EUROSTAT_TOC_CACHE_TTL_MS",
+          "description": "How long a fetched catalogue TOC stays usable before the next catalogue call refreshes it, in milliseconds. Defaults to 12 hours.",
+          "format": "string",
+          "isRequired": false,
+          "default": "43200000"
         }
       ],
       "transport": {

@@ -88,6 +88,35 @@ describe('eurostatSearchDatasets', () => {
     expect(input.limit).toBe(20);
   });
 
+  it('advertises an open-world annotation for its live catalogue dependency (#29)', () => {
+    expect(eurostatSearchDatasets.annotations?.openWorldHint).toBe(true);
+    expect(eurostatSearchDatasets.annotations?.readOnlyHint).toBe(true);
+  });
+
+  it('rejects a whitespace-only query at parse time (#24)', () => {
+    expect(() => eurostatSearchDatasets.input.parse({ query: '   ' })).toThrow();
+    expect(() => eurostatSearchDatasets.input.parse({ query: '\t\n' })).toThrow();
+  });
+
+  it('keeps a query with surrounding whitespace around a real term (#24)', () => {
+    expect(() => eurostatSearchDatasets.input.parse({ query: '  GDP  ' })).not.toThrow();
+  });
+
+  it('surfaces invalid_cursor when the service rejects a mismatched cursor (#28)', async () => {
+    vi.mocked(getEurostatCatalogueService).mockReturnValue({
+      search: vi.fn().mockRejectedValue(
+        Object.assign(new Error('This pagination cursor was issued for a different search'), {
+          data: { reason: 'invalid_cursor' },
+        }),
+      ),
+    } as never);
+    const ctx = createMockContext({ errors: eurostatSearchDatasets.errors });
+    const input = eurostatSearchDatasets.input.parse({ query: 'inflation', cursor: 'STALE' });
+    const err = await eurostatSearchDatasets.handler(input, ctx).catch((e) => e);
+    expect(err).toMatchObject({ data: { reason: 'invalid_cursor' } });
+    expect(err.data.recovery.hint).toContain('without a cursor');
+  });
+
   it('formats output with all relevant fields', () => {
     const result = {
       datasets: mockDatasets,

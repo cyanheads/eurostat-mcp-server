@@ -53,6 +53,11 @@ describe('eurostatBrowseThemes', () => {
     } as never);
   });
 
+  it('advertises an open-world annotation for its live catalogue dependency (#29)', () => {
+    expect(eurostatBrowseThemes.annotations?.openWorldHint).toBe(true);
+    expect(eurostatBrowseThemes.annotations?.readOnlyHint).toBe(true);
+  });
+
   it('returns root themes when no theme_code provided', async () => {
     const ctx = createMockContext({ errors: eurostatBrowseThemes.errors });
     const input = eurostatBrowseThemes.input.parse({});

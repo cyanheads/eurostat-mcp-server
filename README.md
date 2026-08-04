@@ -47,9 +47,10 @@ Search the Eurostat dataset catalogue by keyword.
 
 - Tokenized keyword match — whitespace-separated tokens are ANDed case-insensitively across each dataset's label, theme breadcrumb, and code, so word order and theme-named queries resolve without a verbatim label
 - Returns code, label, type (dataset/table), period coverage, observation count, and theme breadcrumb
-- Cursor pagination: `limit` (1–100, default 20) sets the page size, `totalMatches` reports the full count, and passing the returned `nextCursor` back as `cursor` pages through every match over a stable order
+- One row per dataset code — Eurostat files some datasets under several theme branches; matches are deduplicated so `totalMatches` and page slots count unique query targets
+- Cursor pagination: `limit` (1–100, default 20) sets the page size, `totalMatches` reports the full count, and passing the returned `nextCursor` back as `cursor` pages through every match over a stable order. Cursors are bound to their originating query and catalogue snapshot — reusing one with a different query, or after the catalogue refreshes, returns `invalid_cursor` instead of a silently shifted page
 - `nextStep` hint on each result points at the next tool to call
-- Catalogue loaded once per session from the Eurostat TOC file
+- Catalogue TOC cached in memory for 12 hours (`EUROSTAT_TOC_CACHE_TTL_MS`), then refreshed on the next call
 - Pair with `eurostat_browse_themes` for structured domain exploration when keywords are unclear
 
 ---
@@ -118,7 +119,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core):
 
 Eurostat-specific:
 
-- Session-level in-memory cache for the TOC file — loaded once, reused across all search and browse calls
+- TTL-bounded in-memory cache for the TOC file — reused across all search and browse calls, refreshed on the first call past its 12-hour lifetime, with the last loaded copy served if a refresh fails
 - JSON-stat 2.0 stride-based decoder for the Statistics API response format
 - Async-response detection — Eurostat returns a warning object rather than an error for over-limit queries; the server intercepts it and returns an actionable error with filter guidance
 - NUTS hierarchy geo-level filtering across query and dimension-value tools
@@ -247,6 +248,7 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1` | `in-memory` |
 | `EUROSTAT_BASE_URL` | Eurostat API base URL | `https://ec.europa.eu/eurostat/api/dissemination` |
 | `EUROSTAT_REQUEST_TIMEOUT_MS` | HTTP request timeout in ms | `30000` |
+| `EUROSTAT_TOC_CACHE_TTL_MS` | Catalogue TOC cache lifetime in ms — the first search or browse call past this age refreshes it | `43200000` (12 hours) |
 | `OTEL_ENABLED` | Enable OpenTelemetry | `false` |
 
 ## Running the server
@@ -277,7 +279,7 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 |:---|:---|
 | `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Five tools for discovery and data access. |
 | `src/mcp-server/resources` | Resource definitions. Dataset metadata resource. |
-| `src/services/eurostat-catalogue` | Catalogue service — fetches and parses the Eurostat TOC TXT file; session-level in-memory cache. |
+| `src/services/eurostat-catalogue` | Catalogue service — fetches and parses the Eurostat TOC TXT file; TTL-bounded in-memory cache. |
 | `src/services/eurostat-data` | Data service — Statistics API HTTP client, JSON-stat 2.0 decoder, async-response detection. |
 | `src/config` | Server-specific environment variable parsing and validation with Zod. |
 | `tests/` | Unit and integration tests, mirroring the `src/` structure. |

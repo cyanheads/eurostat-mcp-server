@@ -11,13 +11,13 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
   title: 'Browse Eurostat Theme Hierarchy',
   description:
     'Navigate the Eurostat theme tree. Without theme_code returns the top-level theme folders (Economy, Population, Transport, etc.) — the practical starting points. With a theme_code returns its immediate children: subtheme folders and datasets in that branch. Use this for structured discovery when you know the domain but not the dataset code, or to drill down from a broad topic to a specific dataset. Pair with eurostat_search_datasets for keyword-based discovery.',
-  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     theme_code: z
       .string()
       .optional()
       .describe(
-        'Folder code to expand (e.g., "econ", "reg"). Omit to list the top-level theme folders.',
+        'Folder code to expand (e.g., "economy", "reg"). Omit to list the top-level theme folders.',
       ),
   }),
   output: z.object({
@@ -66,7 +66,7 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
     parentPath: z
       .array(z.string())
       .describe(
-        'Breadcrumb from root to the requested theme (e.g., ["Economy and finance", "National accounts"]). Empty when browsing root.',
+        'Breadcrumb from root to the requested theme (e.g., ["Database by themes", "Economy and finance"]). Empty when browsing root.',
       ),
     nextStep: z
       .string()

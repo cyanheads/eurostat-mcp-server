@@ -3,7 +3,9 @@
  * @module tests/services/eurostat-catalogue-service.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { encodeCursor } from '@cyanheads/mcp-ts-core/utils';
 import { describe, expect, it, vi } from 'vitest';
 import {
   EurostatCatalogueService,
@@ -48,20 +50,30 @@ function buildTsv(entries: string[]): string {
   return [header, ...entries].join('\n');
 }
 
-/** Simulate a loaded service by monkey-patching fetchAndParseToc. */
-async function makeLoadedService(entries: string[]): Promise<EurostatCatalogueService> {
-  const svc = new EurostatCatalogueService(mockConfig, mockStorage);
-  const tsv = buildTsv(entries);
+/** Parse TSV entries into the in-memory cache shape the service holds. */
+function makeCache(svc: EurostatCatalogueService, entries: string[], loadedAt = new Date()) {
   // Access private method via any cast — this is a unit test reaching into pure logic
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const parsed = (svc as any).parseToc(tsv);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (svc as any).cache = {
+  const parsed = (svc as any).parseToc(buildTsv(entries));
+  return {
     entries: parsed,
     codeIndex: new Map(parsed.map((e: { code: string }, i: number) => [e.code, i])),
-    loadedAt: new Date(),
+    loadedAt,
   };
+}
+
+/** Simulate a loaded service by seeding the cache directly, bypassing any fetch. */
+async function makeLoadedService(entries: string[]): Promise<EurostatCatalogueService> {
+  const svc = new EurostatCatalogueService(mockConfig, mockStorage);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (svc as any).cache = makeCache(svc, entries);
   return svc;
+}
+
+/** Age the seeded cache so the next catalogue call sees it as expired (TTL default 12h). */
+function expireCache(svc: EurostatCatalogueService): void {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (svc as any).cache.loadedAt = new Date(Date.now() - 13 * 60 * 60 * 1000);
 }
 
 // ---------------------------------------------------------------------------
@@ -429,6 +441,346 @@ describe('EurostatCatalogueService — search', () => {
     const ctx = createMockContext();
     const { datasets } = await svc.search('données', 10, undefined, ctx);
     expect(datasets[0]?.code).toBe('demo_fr');
+  });
+
+  it('matches nothing for a whitespace-only query (#24)', async () => {
+    const svc = await makeLoadedService([
+      tocLine('GDP and main components', 'nama_10_gdp', 'dataset'),
+      tocLine('Population by age', 'demo_pjanind', 'dataset'),
+    ]);
+    const ctx = createMockContext();
+    const { datasets, totalMatches, nextCursor } = await svc.search('   ', 10, undefined, ctx);
+    expect(totalMatches).toBe(0);
+    expect(datasets).toHaveLength(0);
+    expect(nextCursor).toBeUndefined();
+  });
+
+  it('matches nothing for an all-whitespace query of mixed blank characters (#24)', async () => {
+    const svc = await makeLoadedService([tocLine('GDP', 'nama_10_gdp', 'dataset')]);
+    const ctx = createMockContext();
+    const { datasets, totalMatches } = await svc.search('\t\n  ', 10, undefined, ctx);
+    expect(totalMatches).toBe(0);
+    expect(datasets).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Search — duplicate codes across theme branches (#26)
+// ---------------------------------------------------------------------------
+
+describe('EurostatCatalogueService — search deduplication (#26)', () => {
+  /** Same dataset code filed under two different parent folders, as the live TOC does. */
+  const duplicatePlacements = [
+    tocLine('Root', 'root', 'folder'),
+    tocLine('    Prices', 'prc', 'folder'),
+    tocLine('        HICP inflation contributions', 'prc_hicp_ctr', 'dataset'),
+    tocLine('    Short-term indicators', 'sti', 'folder'),
+    tocLine('        HICP inflation contributions', 'prc_hicp_ctr', 'dataset'),
+    tocLine('        Inflation rate summary', 'tipscp10', 'table'),
+  ];
+
+  it('counts a code once in totalMatches and returns it once per page', async () => {
+    const svc = await makeLoadedService(duplicatePlacements);
+    const ctx = createMockContext();
+    const { datasets, totalMatches } = await svc.search('inflation', 10, undefined, ctx);
+    expect(totalMatches).toBe(2);
+    expect(datasets.map((d) => d.code)).toEqual(['prc_hicp_ctr', 'tipscp10']);
+  });
+
+  it('keeps the first matching placement as the code its only themePath', async () => {
+    const svc = await makeLoadedService(duplicatePlacements);
+    const ctx = createMockContext();
+    const { datasets } = await svc.search('inflation', 10, undefined, ctx);
+    // Exactly one row for the doubly-filed code, carrying the earlier branch —
+    // the later "Short-term indicators" placement must not appear at all.
+    expect(datasets.filter((d) => d.code === 'prc_hicp_ctr').map((d) => d.themePath)).toEqual([
+      ['Root', 'Prices'],
+    ]);
+  });
+
+  it('does not let duplicates consume page slots', async () => {
+    const svc = await makeLoadedService(duplicatePlacements);
+    const ctx = createMockContext();
+    // Two unique codes with a page size of 2 is exactly one full page — a duplicate
+    // occupying a slot would push tipscp10 onto a second page.
+    const page = await svc.search('inflation', 2, undefined, ctx);
+    expect(page.datasets.map((d) => d.code)).toEqual(['prc_hicp_ctr', 'tipscp10']);
+    expect(page.nextCursor).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Search — cursor binding (#28)
+// ---------------------------------------------------------------------------
+
+describe('EurostatCatalogueService — cursor binding (#28)', () => {
+  const twoTopicCatalogue = [
+    tocLine('Population alpha', 'pop_a', 'dataset'),
+    tocLine('Population beta', 'pop_b', 'dataset'),
+    tocLine('Population gamma', 'pop_c', 'dataset'),
+    tocLine('Population delta', 'pop_d', 'dataset'),
+    tocLine('Inflation alpha', 'inf_a', 'dataset'),
+    tocLine('Inflation beta', 'inf_b', 'dataset'),
+    tocLine('Inflation gamma', 'inf_c', 'dataset'),
+    tocLine('Inflation delta', 'inf_d', 'dataset'),
+  ];
+
+  it('rejects a cursor minted for a different query instead of skipping matches', async () => {
+    const svc = await makeLoadedService(twoTopicCatalogue);
+    const ctx = createMockContext();
+    const population = await svc.search('population', 3, undefined, ctx);
+    expect(population.nextCursor).toBeDefined();
+
+    await expect(svc.search('inflation', 3, population.nextCursor, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      data: { reason: 'invalid_cursor' },
+    });
+  });
+
+  it('leaves the new query reachable from its own first page after a rejected cursor', async () => {
+    const svc = await makeLoadedService(twoTopicCatalogue);
+    const ctx = createMockContext();
+    const population = await svc.search('population', 3, undefined, ctx);
+    await svc.search('inflation', 3, population.nextCursor, ctx).catch(() => undefined);
+
+    const inflation = await svc.search('inflation', 3, undefined, ctx);
+    expect(inflation.datasets.map((d) => d.code)).toEqual(['inf_a', 'inf_b', 'inf_c']);
+  });
+
+  it('accepts a cursor whose query differs only in case and spacing', async () => {
+    const svc = await makeLoadedService(twoTopicCatalogue);
+    const ctx = createMockContext();
+    const page1 = await svc.search('population', 2, undefined, ctx);
+    const page2 = await svc.search('  POPULATION ', 2, page1.nextCursor, ctx);
+    expect(page2.datasets.map((d) => d.code)).toEqual(['pop_c', 'pop_d']);
+  });
+
+  it('rejects a cursor issued against a TOC snapshot that has since refreshed (#23)', async () => {
+    const svc = await makeLoadedService(twoTopicCatalogue);
+    const ctx = createMockContext();
+    const page1 = await svc.search('population', 2, undefined, ctx);
+    expect(page1.nextCursor).toBeDefined();
+
+    // A TTL refresh lands between the two pages, reordering the matched set.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (svc as any).cache = makeCache(
+      svc,
+      [tocLine('Population omega', 'pop_z', 'dataset'), ...twoTopicCatalogue],
+      new Date(Date.now() + 1),
+    );
+
+    await expect(svc.search('population', 2, page1.nextCursor, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      data: { reason: 'invalid_cursor' },
+    });
+  });
+
+  it('rejects a structurally valid cursor that carries no query binding', async () => {
+    const svc = await makeLoadedService(twoTopicCatalogue);
+    const ctx = createMockContext();
+    const legacyCursor = encodeCursor({ offset: 3, limit: 3 });
+    await expect(svc.search('inflation', 3, legacyCursor, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      data: { reason: 'invalid_cursor' },
+    });
+  });
+
+  it('rejects a malformed cursor under the same invalid_cursor contract', async () => {
+    const svc = await makeLoadedService(twoTopicCatalogue);
+    const ctx = createMockContext();
+    // Undecodable, structurally invalid, and truncated cursors must all reach the
+    // caller as the declared contract reason, not as a bare InvalidParams.
+    for (const garbage of ['not-a-real-cursor', '!!!!', 'eyJvZmZzZXQiOi0xLCJsaW1pdCI6M30']) {
+      await expect(svc.search('population', 3, garbage, ctx)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.InvalidParams,
+        data: { reason: 'invalid_cursor' },
+      });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TOC cache TTL and refresh (#23)
+// ---------------------------------------------------------------------------
+
+describe('EurostatCatalogueService — TOC cache TTL (#23)', () => {
+  /** Catalogue as first loaded: one theme under the root wrapper. */
+  const loadedToc = [
+    tocLine('Database by themes', 'data', 'folder'),
+    tocLine('    Economy', 'econ', 'folder'),
+  ];
+
+  /** Catalogue as Eurostat publishes it later: a second theme and a dataset appear. */
+  const upstreamToc = [
+    tocLine('Database by themes', 'data', 'folder'),
+    tocLine('    Economy', 'econ', 'folder'),
+    tocLine('    Trade', 'trd', 'folder'),
+    tocLine('        Trade volumes', 'trd_vol', 'dataset'),
+  ];
+
+  /** Replace the network fetch with a counted stub returning a parsed TOC. */
+  function stubFetch(svc: EurostatCatalogueService, entries: string[]) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (
+      vi
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .spyOn(svc as any, 'fetchAndParseToc')
+        .mockImplementation(async () => makeCache(svc, entries))
+    );
+  }
+
+  it('serves a cache younger than the TTL without re-fetching', async () => {
+    const svc = await makeLoadedService(loadedToc);
+    const fetchSpy = stubFetch(svc, upstreamToc);
+    const ctx = createMockContext();
+
+    const result = await svc.browse(undefined, ctx);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(result.items.map((i) => i.code)).toEqual(['econ']);
+  });
+
+  it('refreshes once past the TTL and serves the new catalogue', async () => {
+    const svc = await makeLoadedService(loadedToc);
+    const fetchSpy = stubFetch(svc, upstreamToc);
+    expireCache(svc);
+    const ctx = createMockContext();
+
+    const refreshed = await svc.browse(undefined, ctx);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(refreshed.items.map((i) => i.code)).toEqual(['econ', 'trd']);
+
+    // The refreshed cache resets the clock — a follow-up call re-uses it.
+    const followUp = await svc.browse(undefined, ctx);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(followUp.items.map((i) => i.code)).toEqual(['econ', 'trd']);
+  });
+
+  it('surfaces a dataset added upstream once the TTL has passed', async () => {
+    const svc = await makeLoadedService(loadedToc);
+    stubFetch(svc, upstreamToc);
+    const ctx = createMockContext();
+
+    expect((await svc.search('trade volumes', 10, undefined, ctx)).totalMatches).toBe(0);
+    expireCache(svc);
+    const afterRefresh = await svc.search('trade volumes', 10, undefined, ctx);
+    expect(afterRefresh.datasets.map((d) => d.code)).toEqual(['trd_vol']);
+  });
+
+  it('shares one in-flight refresh across concurrent callers past the TTL', async () => {
+    const svc = await makeLoadedService(loadedToc);
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const fetchSpy = vi.spyOn(svc as any, 'fetchAndParseToc').mockImplementation(async () => {
+      await gate;
+      return makeCache(svc, upstreamToc);
+    });
+    expireCache(svc);
+    const ctx = createMockContext();
+
+    const both = Promise.all([
+      svc.browse(undefined, ctx),
+      svc.search('trade volumes', 10, undefined, ctx),
+    ]);
+    release?.();
+    const [browsed, searched] = await both;
+
+    // One fetch served both callers, and both saw the refreshed snapshot.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(browsed.items.map((i) => i.code)).toEqual(['econ', 'trd']);
+    expect(searched.datasets.map((d) => d.code)).toEqual(['trd_vol']);
+  });
+
+  it('serves the last loaded catalogue when a refresh fails', async () => {
+    const svc = await makeLoadedService(loadedToc);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    vi.spyOn(svc as any, 'fetchAndParseToc').mockRejectedValue(new Error('Eurostat unreachable'));
+    expireCache(svc);
+    const ctx = createMockContext();
+
+    const result = await svc.browse(undefined, ctx);
+    expect(result.items.map((i) => i.code)).toEqual(['econ']);
+  });
+
+  it('surfaces a cold-start fetch failure to the caller', async () => {
+    const svc = new EurostatCatalogueService(mockConfig, mockStorage);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    vi.spyOn(svc as any, 'fetchAndParseToc').mockRejectedValue(new Error('Eurostat unreachable'));
+    const ctx = createMockContext();
+
+    await expect(svc.browse(undefined, ctx)).rejects.toThrow('Eurostat unreachable');
+  });
+
+  it('retries the fetch on the next call after a failure', async () => {
+    const svc = new EurostatCatalogueService(mockConfig, mockStorage);
+    const fetchSpy = vi
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .spyOn(svc as any, 'fetchAndParseToc')
+      .mockRejectedValueOnce(new Error('Eurostat unreachable'))
+      .mockImplementationOnce(async () => makeCache(svc, loadedToc));
+    const ctx = createMockContext();
+
+    await expect(svc.browse(undefined, ctx)).rejects.toThrow('Eurostat unreachable');
+    const result = await svc.browse(undefined, ctx);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(result.items.map((i) => i.code)).toEqual(['econ']);
+  });
+
+  it('holds a failed refresh off upstream for the cooldown, then retries', async () => {
+    vi.useFakeTimers();
+    try {
+      const svc = await makeLoadedService(loadedToc);
+      const fetchSpy = vi
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .spyOn(svc as any, 'fetchAndParseToc')
+        .mockRejectedValueOnce(new Error('Eurostat unreachable'))
+        .mockImplementationOnce(async () => makeCache(svc, upstreamToc));
+      expireCache(svc);
+      const ctx = createMockContext();
+
+      // The first call past the TTL attempts the refresh and falls back to the cache.
+      const duringOutage = await svc.browse(undefined, ctx);
+      expect(duringOutage.items.map((i) => i.code)).toEqual(['econ']);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+      // Callers inside the cooldown are served the same cache without a second
+      // fetch — without the cooldown each of these would pay a full retry cycle.
+      vi.setSystemTime(Date.now() + 30_000);
+      const stillCoolingDown = await svc.browse(undefined, ctx);
+      expect(stillCoolingDown.items.map((i) => i.code)).toEqual(['econ']);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+      // Past the cooldown the next call tries again and picks up the new catalogue.
+      vi.setSystemTime(Date.now() + 31_000);
+      const recovered = await svc.browse(undefined, ctx);
+      expect(recovered.items.map((i) => i.code)).toEqual(['econ', 'trd']);
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears the failure cooldown once a refresh succeeds', async () => {
+    const svc = new EurostatCatalogueService(mockConfig, mockStorage);
+    const fetchSpy = vi
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .spyOn(svc as any, 'fetchAndParseToc')
+      .mockRejectedValueOnce(new Error('Eurostat unreachable'))
+      .mockImplementation(async () => makeCache(svc, loadedToc));
+    const ctx = createMockContext();
+
+    // A cold-start failure arms the cooldown; the immediate retry succeeds.
+    await expect(svc.browse(undefined, ctx)).rejects.toThrow('Eurostat unreachable');
+    await svc.browse(undefined, ctx);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+
+    // An expiry still inside that original cooldown window refreshes rather than
+    // being held off by the failure the successful load superseded.
+    expireCache(svc);
+    await svc.browse(undefined, ctx);
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
   });
 });
 

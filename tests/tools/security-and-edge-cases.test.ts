@@ -87,6 +87,12 @@ describe('Input validation', () => {
       expect(() => eurostatSearchDatasets.input.parse({ query: '' })).toThrow();
     });
 
+    it('rejects whitespace-only query string', () => {
+      for (const blank of ['   ', '\t', '\n', ' \t\n ']) {
+        expect(() => eurostatSearchDatasets.input.parse({ query: blank })).toThrow();
+      }
+    });
+
     it('rejects limit below 1', () => {
       expect(() => eurostatSearchDatasets.input.parse({ query: 'GDP', limit: 0 })).toThrow();
     });

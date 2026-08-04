@@ -6,9 +6,15 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
-import { notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { invalidParams, notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { fetchWithTimeout, paginateArray, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import {
+  decodeCursor,
+  encodeCursor,
+  fetchWithTimeout,
+  type PaginationState,
+  withRetry,
+} from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import type { BrowseItem, DatasetResult, TocEntry } from './types.js';
 
@@ -16,7 +22,17 @@ import type { BrowseItem, DatasetResult, TocEntry } from './types.js';
 // but lacks the [key: string]: unknown index signature required by fetchWithTimeout/withRetry.
 const asReqCtx = (ctx: Context) => ctx as unknown as Record<string, unknown> & typeof ctx;
 
-/** Parsed TOC held in memory for the session lifetime. */
+/** Upper bound on datasets returned per search page, mirroring the tool's `limit` cap. */
+const MAX_PAGE_SIZE = 100;
+
+/**
+ * How long a failed refresh keeps the stale cache in service before upstream is
+ * tried again. `withRetry` bounds one attempt; this bounds the attempt rate, so
+ * an upstream outage costs one fetch per minute rather than one per call.
+ */
+const REFRESH_RETRY_COOLDOWN_MS = 60_000;
+
+/** Parsed TOC held in memory until its TTL expires and the next call refreshes it. */
 interface TocCache {
   /** Map from code → entry index for O(1) lookup. */
   codeIndex: Map<string, number>;
@@ -26,17 +42,58 @@ interface TocCache {
 
 export class EurostatCatalogueService {
   private cache: TocCache | undefined;
+  /** Shared in-flight refresh so concurrent callers past the TTL trigger one fetch. */
+  private refresh: Promise<TocCache> | undefined;
+  /** Epoch ms before which a stale cache is served without re-attempting a failed refresh. */
+  private refreshRetryAt = 0;
 
   // config and storage accepted to match the standard service init pattern;
   // this service uses only the Eurostat public API and per-request config.
   // biome-ignore lint/complexity/noUselessConstructor: standard init pattern
   constructor(_config: AppConfig, _storage: StorageService) {}
 
-  /** Ensure the TOC is loaded, fetching if not yet cached. */
+  /**
+   * Ensure a usable TOC is loaded. A cache younger than the configured TTL is
+   * reused as-is; past the TTL one refresh runs and concurrent callers share it.
+   * A failed refresh keeps serving the last known-good cache and holds off the
+   * next attempt for `REFRESH_RETRY_COOLDOWN_MS`, so an outage does not make
+   * every catalogue call pay a full retry-and-backoff cycle. Only a cold-start
+   * failure surfaces to the caller, and that path retries on the next call.
+   */
   private async ensureLoaded(ctx: Context): Promise<TocCache> {
-    if (this.cache) return this.cache;
-    this.cache = await this.fetchAndParseToc(ctx);
-    return this.cache;
+    const cached = this.cache;
+    const now = Date.now();
+    if (cached) {
+      if (now - cached.loadedAt.getTime() < getServerConfig().tocCacheTtlMs) return cached;
+      if (now < this.refreshRetryAt) return cached;
+    }
+
+    this.refresh ??= this.fetchAndParseToc(ctx)
+      .then((fresh) => {
+        this.cache = fresh;
+        this.refreshRetryAt = 0;
+        return fresh;
+      })
+      .catch((error: unknown) => {
+        this.refreshRetryAt = Date.now() + REFRESH_RETRY_COOLDOWN_MS;
+        throw error;
+      })
+      .finally(() => {
+        this.refresh = undefined;
+      });
+
+    if (!cached) return this.refresh;
+
+    try {
+      return await this.refresh;
+    } catch (error) {
+      ctx.log.warning('Eurostat TOC refresh failed — serving the last loaded catalogue', {
+        error: error instanceof Error ? error.message : String(error),
+        loadedAt: cached.loadedAt.toISOString(),
+        retryAfterMs: REFRESH_RETRY_COOLDOWN_MS,
+      });
+      return cached;
+    }
   }
 
   private async fetchAndParseToc(ctx: Context): Promise<TocCache> {
@@ -266,13 +323,45 @@ export class EurostatCatalogueService {
   }
 
   /**
+   * Decode a search cursor and confirm it belongs to this search. Malformed,
+   * cross-query and superseded-snapshot cursors are rejected identically —
+   * the caller's recovery is the same in all three cases, and the cursor is
+   * opaque, so telling them apart would only describe its internal shape.
+   */
+  private decodeSearchCursor(
+    cursor: string,
+    queryKey: string,
+    generation: number,
+    ctx: Context,
+  ): PaginationState {
+    try {
+      const state = decodeCursor(cursor, asReqCtx(ctx));
+      if (state.query === queryKey && state.generation === generation) return state;
+    } catch {
+      // Undecodable cursor — same rejection as one that decodes but does not match.
+    }
+    throw invalidParams(
+      'Unusable pagination cursor: it is malformed, was issued for a different query, or was issued against a catalogue snapshot that has since refreshed. Repeat the search without a cursor, then page with the nextCursor it returns.',
+      { reason: 'invalid_cursor' },
+    );
+  }
+
+  /**
    * Search datasets by keyword. The query is tokenized on whitespace and every
    * token must match (AND), case-insensitively, somewhere in a combined
    * `label + themePath + code` haystack — so concept-order and theme-named
    * queries resolve even when no single label contains the phrase verbatim.
-   * Returns datasets only (not folders). Results are paginated with an opaque
-   * cursor (`limit` = page size, capped at 100); pass the returned `nextCursor`
-   * back as `cursor` to page through the rest over a stable catalogue order.
+   * A query with no non-whitespace token matches nothing rather than everything.
+   *
+   * Returns datasets only (not folders), one row per code: a dataset filed under
+   * several TOC branches keeps its first matching placement as the canonical
+   * `themePath`, so totals and page slots count unique query targets.
+   *
+   * Results are paginated with an opaque cursor (`limit` = page size, capped at
+   * 100) bound to the normalized query and the catalogue snapshot that produced
+   * it. An unusable cursor — malformed, from another query, or from a catalogue
+   * since refreshed — is rejected as `invalid_cursor` instead of silently paging
+   * a different result set.
    */
   async search(
     query: string,
@@ -282,31 +371,55 @@ export class EurostatCatalogueService {
   ): Promise<{ datasets: DatasetResult[]; totalMatches: number; nextCursor?: string }> {
     const toc = await this.ensureLoaded(ctx);
     const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+    if (tokens.length === 0) return { datasets: [], totalMatches: 0 };
 
+    const seen = new Set<string>();
     const matched = toc.entries.flatMap((e, i) => {
-      if (e.type === 'folder') return [];
+      if (e.type === 'folder' || seen.has(e.code)) return [];
       const themePath = this.buildPath(toc.entries, i);
       const haystack = `${e.label} ${themePath.join(' ')} ${e.code}`.toLowerCase();
-      return tokens.every((t) => haystack.includes(t)) ? [{ e, themePath }] : [];
+      if (!tokens.every((t) => haystack.includes(t))) return [];
+      seen.add(e.code);
+      return [{ e, themePath }];
     });
 
-    const page = paginateArray(matched, cursor, limit, 100, asReqCtx(ctx));
+    /** Cursor identity: the normalized query plus the catalogue snapshot it was paged over. */
+    const queryKey = tokens.join(' ');
+    const generation = toc.loadedAt.getTime();
 
-    const datasets: DatasetResult[] = page.items.map(({ e, themePath }) => ({
-      code: e.code,
-      label: e.label,
-      type: e.type as 'dataset' | 'table',
-      ...(e.dataStart && { dataStart: e.dataStart }),
-      ...(e.dataEnd && { dataEnd: e.dataEnd }),
-      ...(e.lastUpdated && { lastUpdated: e.lastUpdated }),
-      ...(e.obsCount !== undefined && { obsCount: e.obsCount }),
-      themePath,
-    }));
+    let offset = 0;
+    let pageSize = limit;
+    if (cursor) {
+      const state = this.decodeSearchCursor(cursor, queryKey, generation, ctx);
+      offset = state.offset;
+      pageSize = Math.min(state.limit, MAX_PAGE_SIZE);
+    }
 
+    const datasets: DatasetResult[] = matched
+      .slice(offset, offset + pageSize)
+      .map(({ e, themePath }) => ({
+        code: e.code,
+        label: e.label,
+        type: e.type as 'dataset' | 'table',
+        ...(e.dataStart && { dataStart: e.dataStart }),
+        ...(e.dataEnd && { dataEnd: e.dataEnd }),
+        ...(e.lastUpdated && { lastUpdated: e.lastUpdated }),
+        ...(e.obsCount !== undefined && { obsCount: e.obsCount }),
+        themePath,
+      }));
+
+    const nextOffset = offset + pageSize;
     return {
       datasets,
-      totalMatches: page.totalCount ?? matched.length,
-      ...(page.nextCursor !== undefined && { nextCursor: page.nextCursor }),
+      totalMatches: matched.length,
+      ...(nextOffset < matched.length && {
+        nextCursor: encodeCursor({
+          offset: nextOffset,
+          limit: pageSize,
+          query: queryKey,
+          generation,
+        }),
+      }),
     };
   }
 }

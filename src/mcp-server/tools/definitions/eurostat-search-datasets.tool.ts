@@ -4,20 +4,21 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getEurostatCatalogueService } from '@/services/eurostat-catalogue/eurostat-catalogue-service.js';
 
 export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
   title: 'Search Eurostat Datasets',
   description:
     'Search the Eurostat catalogue by keyword. Returns matching datasets with codes, descriptions, period coverage, and theme breadcrumbs. Use this to discover dataset codes before calling eurostat_get_dataset_info or eurostat_query_dataset. Results are limited to datasets and predefined tables — folders are excluded.',
-  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     query: z
       .string()
       .min(1)
+      .regex(/\S/, 'Query must contain at least one non-whitespace search term.')
       .describe(
-        'Search terms. Split on whitespace into tokens; every token must match (AND), case-insensitively, somewhere across the dataset label, theme breadcrumb, or code. Word order does not matter, so "business demography NUTS 3" or "regional economic accounts" resolve without naming a label verbatim.',
+        'Search terms — at least one non-whitespace token is required. Split on whitespace into tokens; every token must match (AND), case-insensitively, somewhere across the dataset label, theme breadcrumb, or code. Word order does not matter, so "business demography NUTS 3" or "regional economic accounts" resolve without naming a label verbatim.',
       ),
     limit: z
       .number()
@@ -32,7 +33,7 @@ export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
       .string()
       .optional()
       .describe(
-        "Opaque pagination cursor from a previous call's nextCursor. Omit for the first page; pass it back to fetch the next page of matches over a stable order.",
+        "Opaque pagination cursor from a previous call's nextCursor. Omit for the first page; pass it back — with the same query — to fetch the next page of matches over a stable order. A cursor is bound to the query that produced it and to the catalogue snapshot in effect at that time, so reusing one with a different query, or after the catalogue refreshes, is rejected rather than silently paging a different result set.",
       ),
   }),
   output: z.object({
@@ -78,7 +79,7 @@ export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
             themePath: z
               .array(z.string())
               .describe(
-                'Breadcrumb path from root theme to this dataset (e.g., ["Economy and finance", "National accounts"]). Empty for top-level entries.',
+                'Breadcrumb path from root theme to this dataset (e.g., ["Database by themes", "Economy and finance"]). Eurostat files some datasets under several branches; this is the first branch that matched the query. Empty for top-level entries.',
               ),
           })
           .describe('A matched dataset entry.'),
@@ -95,7 +96,9 @@ export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
     query: z.string().describe('Search terms as submitted.'),
     totalMatches: z
       .number()
-      .describe('Total datasets matching the query across all pages, before the page limit.'),
+      .describe(
+        'Total distinct dataset codes matching the query across all pages, before the page limit.',
+      ),
     truncated: z
       .boolean()
       .describe(
@@ -105,7 +108,7 @@ export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
       .string()
       .optional()
       .describe(
-        'Opaque cursor for the next page of matches. Pass it back as cursor. Omitted on the last page.',
+        'Opaque cursor for the next page of matches. Pass it back as cursor with the same query; it stops working once the catalogue refreshes. Omitted on the last page.',
       ),
   },
 
@@ -117,16 +120,31 @@ export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
       recovery:
         'Try a broader or different search term. Use eurostat_browse_themes to explore themes without text search.',
     },
+    {
+      reason: 'invalid_cursor',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'The cursor is malformed, came from a different query, or came from a catalogue snapshot that has since refreshed.',
+      recovery:
+        'Repeat the search without a cursor, then page using the nextCursor that call returns.',
+    },
   ],
 
   async handler(input, ctx) {
     const svc = getEurostatCatalogueService();
-    const { datasets, totalMatches, nextCursor } = await svc.search(
-      input.query,
-      input.limit,
-      input.cursor,
-      ctx,
-    );
+    let found: Awaited<ReturnType<typeof svc.search>>;
+    try {
+      found = await svc.search(input.query, input.limit, input.cursor, ctx);
+    } catch (err) {
+      if ((err as McpError).data?.reason === 'invalid_cursor') {
+        throw ctx.fail('invalid_cursor', (err as Error).message, {
+          recovery: {
+            hint: `Repeat the search for "${input.query}" without a cursor, then page using the nextCursor it returns.`,
+          },
+        });
+      }
+      throw err;
+    }
+    const { datasets, totalMatches, nextCursor } = found;
 
     if (datasets.length === 0) {
       throw ctx.fail('no_match', `No datasets matched "${input.query}".`, {

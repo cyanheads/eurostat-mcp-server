@@ -7,7 +7,7 @@
 | Name | Description | Key Inputs | Annotations |
 |:-----|:------------|:-----------|:------------|
 | `eurostat_search_datasets` | Search the Eurostat catalogue by keyword (whitespace tokens ANDed across label, theme breadcrumb, and code). Returns matching datasets with codes, descriptions, and period coverage; cursor-paginated. | `query`, `limit`, `cursor?` | `readOnlyHint: true` |
-| `eurostat_browse_themes` | List the Eurostat theme hierarchy. At root returns the second-level theme folders (Economy, Population, Transport, etc.) — the practical entry points for navigation. With a `theme_code` returns its immediate children (subthemes and datasets). Enables tree-navigation for dataset discovery without text search. | `theme_code?` | `readOnlyHint: true, openWorldHint: false` |
+| `eurostat_browse_themes` | List the Eurostat theme hierarchy. At root returns the second-level theme folders (Economy, Population, Transport, etc.) — the practical entry points for navigation. With a `theme_code` returns its immediate children (subthemes and datasets). Enables tree-navigation for dataset discovery without text search. | `theme_code?` | `readOnlyHint: true, openWorldHint: true` |
 | `eurostat_get_dataset_info` | Fetch metadata for a dataset: dimensions, their codes and descriptions, time range, obs count, and last-updated date. The prerequisite call before querying data — reveals what `unit`, `na_item`, and other dimension values are valid. | `dataset_code` | `readOnlyHint: true` |
 | `eurostat_get_dimension_values` | List valid values for a specific dimension in a dataset (e.g., all `unit` codes for `nama_10_gdp`). Useful when the full dimension list from `get_dataset_info` is large and needs exploring. | `dataset_code`, `dimension` | `readOnlyHint: true` |
 | `eurostat_query_dataset` | Fetch statistical data from a dataset with dimension filters. Returns decoded observations (code, label, value, status flag) plus metadata about the query. Supports `geoLevel` for NUTS hierarchy filtering. | `dataset_code`, `filters{}`, `geo_level?`, `since_period?`, `until_period?`, `last_n_periods?`, `lang?` | `readOnlyHint: true` |
@@ -55,7 +55,7 @@ Target users: economic researchers comparing EU countries or regions, journalist
 | `EurostatCatalogueService` | Catalogue API: TOC TXT (`/catalogue/toc/txt`) | `search_datasets`, `browse_themes` |
 | `EurostatDataService` | Statistics API (`/statistics/1.0/data/{code}`) | `get_dataset_info`, `get_dimension_values`, `query_dataset` |
 
-`EurostatCatalogueService` fetches and parses the full TOC on first use (cached for the session lifetime — it's a ~2 MB TSV file, updated twice daily at 11:00 and 23:00 Europe/Brussels time). In-memory index enables both text search and tree traversal without per-query network overhead.
+`EurostatCatalogueService` fetches and parses the full TOC on first use — a ~2 MB TSV file, updated twice daily at 11:00 and 23:00 Europe/Brussels time. The parsed index is held in memory for `EUROSTAT_TOC_CACHE_TTL_MS` (default 12 hours) and reused by every search and browse call in that window, so neither tool pays per-query network overhead. The first call past the TTL refreshes it; concurrent callers share that one refresh, and a failed refresh keeps serving the last loaded TOC.
 
 `EurostatDataService` makes per-query HTTP calls against the Statistics API. JSON-stat 2.0 responses are parsed in the service layer: flat `value` dict decoded via stride-based indexing into labeled `{dimCode, dimLabel, value, status?}` observations.
 
@@ -67,6 +67,7 @@ Target users: economic researchers comparing EU countries or regions, journalist
 |:--------|:---------|:------------|
 | `EUROSTAT_BASE_URL` | No | Override API base URL (default: `https://ec.europa.eu/eurostat/api/dissemination`) |
 | `EUROSTAT_REQUEST_TIMEOUT_MS` | No | HTTP request timeout in ms (default: `30000`) |
+| `EUROSTAT_TOC_CACHE_TTL_MS` | No | How long a fetched catalogue TOC stays usable before the next catalogue call refreshes it, in ms (default: `43200000` — 12 hours) |
 
 No API keys required.
 
@@ -176,7 +177,11 @@ Returns all valid values for a named codelist (e.g., `GEO`, `FREQ`, `UNIT`, `NA_
 
 ### `eurostat_search_datasets`
 
-Searches the in-memory TOC index (loaded from the catalogue TXT file). The query is tokenized on whitespace and every token must match (AND), case-insensitively, somewhere in a combined `label + theme_path + code` haystack — so concept-order and theme-named queries resolve even when no single label contains the phrase verbatim. Returns datasets only (not folders), in TOC order. Paginated with the framework's opaque-cursor primitive (`paginateArray`): `limit` is the page size and the returned `next_cursor` fetches the next page over a stable order.
+Searches the in-memory TOC index (loaded from the catalogue TXT file). The query is tokenized on whitespace and every token must match (AND), case-insensitively, somewhere in a combined `label + theme_path + code` haystack — so concept-order and theme-named queries resolve even when no single label contains the phrase verbatim. A query carrying no non-whitespace token is rejected by the input schema, and the service treats an empty token list as zero matches rather than a match against everything.
+
+Returns datasets only (not folders), in TOC order, one row per code — Eurostat files some datasets under several TOC branches, so matches are deduplicated by code (first matching placement wins as the canonical `theme_path`) before any offset math, keeping `total_matches` and page slots counted in unique query targets.
+
+Paginated with the framework's opaque-cursor primitives (`encodeCursor` / `decodeCursor`): `limit` is the page size and the returned `next_cursor` fetches the next page over a stable order. The cursor payload carries the normalized query and the load timestamp of the TOC snapshot it was paged over alongside `offset`/`limit`. A cursor that is malformed, presented with a different query, or presented after the catalogue has refreshed underneath it is rejected as `invalid_cursor` rather than silently applied to a different result set — one message and one recovery cover all three, since the cursor is opaque and the caller's next move is the same in each case.
 
 **Input:**
 - `query: string` — search terms (tokenized, AND-matched across label + theme_path + code)
@@ -193,7 +198,7 @@ datasets: [{
   data_end: string?      // e.g., "2025"
   last_updated: string?  // e.g., "22.05.2026"
   obs_count: number?
-  theme_path: string[]   // breadcrumb: ["Economy and finance", "National accounts", ...]
+  theme_path: string[]   // breadcrumb: ["Database by themes", "Economy and finance", ...]
 }]
 next_step: string?       // suggested follow-up tool call
 ```
@@ -201,6 +206,7 @@ Enrichment (both surfaces): `total_matches` (full count across all pages), `trun
 
 **Errors:**
 - `no_match` (NotFound): no datasets matched the query
+- `invalid_cursor` (InvalidParams): the cursor is malformed, or was issued for a different query or for a catalogue snapshot that has since refreshed
 
 ### `eurostat_browse_themes`
 
@@ -351,7 +357,7 @@ missing_obs_count: number         // observations with null value
 
 ## Design Decisions
 
-**Why the TOC is cached in memory, not fetched per call:** The TOC TXT file is ~2 MB and parsed to ~10,000 entries. A per-call fetch would add 1–2s latency to every browse/search operation, and the catalogue changes at most twice daily. Session-level caching (fetch-on-first-use, lifetime = process lifetime) is the right tradeoff. The service logs when it loads the cache and its age.
+**Why the TOC is cached in memory, not fetched per call:** The TOC TXT file is ~2 MB and parsed to ~10,000 entries. A per-call fetch would add 1–2s latency to every browse/search operation, and the catalogue changes at most twice daily. Fetch-on-first-use with a 12-hour TTL (`EUROSTAT_TOC_CACHE_TTL_MS`) matched to that upstream cadence is the right tradeoff: zero per-call cost inside the window, bounded staleness for a process that stays up for weeks. The first call past the TTL triggers one refresh and concurrent callers share it; a refresh that fails logs and keeps serving the last loaded TOC, so an upstream outage does not take discovery down once the server holds valid data. A failed refresh also holds the next attempt off for a minute: `withRetry` bounds a single attempt, and without a rate bound every call for the duration of an outage would pay a full retry-and-backoff cycle before falling back to the same cache. A successful refresh clears the hold; a cold-start failure is not subject to it, since there is no cache to serve instead.
 
 **Why `get_dataset_info` uses the Statistics API instead of SDMX structure queries:** The SDMX datastructure endpoint returns XML (~3.5 MB for a single dataset with descendants), requires XML parsing, and maps codelists to global rather than dataset-specific values. The Statistics API returns JSON, the dimension values are already filtered to what that dataset actually has, and the response is significantly smaller when pinned to a narrow time slice.
 
@@ -375,7 +381,7 @@ missing_obs_count: number         // observations with null value
 
 **Async responses for large unfiltered queries:** Eurostat's API may return a `{"warning":{"status":413,...}}` async response for very large queries — documented API behavior, though it appears to depend on server load and is not guaranteed for any specific query size. The server detects and surfaces this as a recoverable `ServiceUnavailable` error with guidance to filter more tightly. Very large datasets like `nama_10_gdp` (1.1M observations) should be queried with at least geo + time filters as a best practice regardless.
 
-**TOC metadata lag:** The TOC is fetched once per session. If Eurostat adds a dataset during the session (twice-daily updates), it won't appear in search results until the server restarts. Acceptable for a statistical data server.
+**TOC metadata lag:** The cached TOC is at most `EUROSTAT_TOC_CACHE_TTL_MS` old (default 12 hours). A dataset Eurostat adds in one of its twice-daily updates will not appear in search or browse results until the next catalogue call past the TTL refreshes the cache. Acceptable for a statistical data server; lower the TTL to shorten the window.
 
 **NUTS version differences:** Eurostat NUTS classifications change periodically (NUTS 2013, 2016, 2021). Codes may refer to different geographies across versions. Dataset metadata notes the NUTS version, but the server does not expose NUTS version comparison tooling.
 
@@ -390,7 +396,9 @@ missing_obs_count: number         // observations with null value
 | 2026-05-23 | Use Statistics API (JSON-stat) over SDMX 2.1/3.0 for data queries | JSON-stat simpler to parse, Statistics API is the officially recommended endpoint for public data access. SDMX returns XML requiring additional dependency. |
 | 2026-05-23 | Use TOC TXT (not SDMX `dataflow` endpoint) for dataset catalogue | TOC includes predefined tables and the full theme hierarchy tree. SDMX catalog has 8,220 entries vs TOC's 8,933 entries — TOC is more complete. Single source enables both search and tree browse. |
 | 2026-05-23 | Cache TOC in memory for session lifetime | File is ~2 MB, changes at most twice daily. Per-call fetch adds 1–2s latency to every browse/search with no benefit. |
+| 2026-08-03 | Bound the TOC cache with a 12-hour TTL, superseding the session-lifetime entry above | The original tradeoff assumed a short-lived process; a hosted HTTP deployment keeps serving the snapshot taken at container start. A TTL matched to the upstream twice-daily cadence keeps the per-call cost at zero inside the window while capping staleness, and stale-on-error preserves the availability the in-memory cache was chosen for. |
+| 2026-08-03 | Bind search cursors to the query and TOC snapshot that produced them | The framework's `paginateArray` round-trips only `{offset, limit}`, so any structurally valid cursor paged any result set. Carrying the normalized query and the TOC load timestamp in the cursor turns both a cross-query cursor and a mid-pagination catalogue refresh into a clean `invalid_cursor` rejection instead of a silently shifted page. |
 | 2026-05-23 | Decode JSON-stat in the service layer | The stride-based flat index math is non-trivial and should not be re-implemented by callers. Every output consumer needs labeled data, not numeric indexes. |
 | 2026-05-23 | Surface async response as ServiceUnavailable (retryable) rather than implement polling | Async is Eurostat's soft error for oversized queries. The right recovery is adding filters, not polling. Polling would require cross-call state with no supported mechanism in the Statistics API. |
-| 2026-05-23 | 5 tools, no prompts, 1 resource | Domain is read-only data retrieval with a natural tool workflow (discover → inspect → query). Prompts add no value over well-designed tool descriptions. Resource for `dataset://code` provides cache-injectable context without requiring a full query. |
+| 2026-05-23 | 5 tools, no prompts, 1 resource | Domain is read-only data retrieval with a natural tool workflow (discover → inspect → query). Prompts add no value over well-designed tool descriptions. Resource for `eurostat://dataset/{dataset_code}` provides cache-injectable context without requiring a full query. |
 | 2026-05-23 | Exclude SDMX codelist tool | Global codelists (4,292 geo entries) are unhelpful without dataset scoping. `get_dimension_values` is dataset-scoped and returns actionable values. |
