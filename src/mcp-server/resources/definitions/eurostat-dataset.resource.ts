@@ -23,7 +23,11 @@ export const eurostatDatasetResource = resource('eurostat://dataset/{dataset_cod
           .object({
             code: z.string().describe('Dimension code.'),
             label: z.string().describe('Dimension name.'),
-            valuesCount: z.number().describe('Number of distinct values.'),
+            valuesCount: z
+              .number()
+              .describe(
+                'Number of distinct values — the dataset\'s full period count for "time", the most recent period\'s codelist otherwise.',
+              ),
             sampleValues: z
               .array(
                 z
@@ -40,12 +44,30 @@ export const eurostatDatasetResource = resource('eurostat://dataset/{dataset_cod
       .describe('Dataset dimensions.'),
     timeRange: z
       .object({
-        start: z.string().describe('Earliest available period.'),
-        end: z.string().describe('Most recent available period.'),
+        start: z
+          .string()
+          .optional()
+          .describe('Earliest available period. Omitted when Eurostat does not report it.'),
+        end: z
+          .string()
+          .optional()
+          .describe('Most recent available period. Omitted when Eurostat does not report it.'),
       })
-      .describe('Overall data coverage period.'),
-    obsCount: z.number().describe('Total number of observations.'),
-    lastUpdated: z.string().describe('ISO 8601 timestamp of last data update.'),
+      .describe(
+        'Overall data coverage period. Each bound is omitted when Eurostat does not report it — an omitted bound is unknown, not empty.',
+      ),
+    obsCount: z
+      .number()
+      .optional()
+      .describe(
+        'Total number of observations. Omitted when Eurostat does not report it — an omitted count is unknown, not zero.',
+      ),
+    lastUpdated: z
+      .string()
+      .optional()
+      .describe(
+        'ISO 8601 timestamp of last data update. Omitted when Eurostat does not report it.',
+      ),
     metadataUrl: z.string().optional().describe('Link to ESMS metadata page, when available.'),
   }),
 

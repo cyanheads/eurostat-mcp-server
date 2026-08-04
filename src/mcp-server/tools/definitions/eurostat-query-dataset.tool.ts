@@ -19,7 +19,7 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       .record(z.string(), z.array(z.string()))
       .default({})
       .describe(
-        'Dimension filters as a map of dimension code → array of valid values. Example: {"unit": ["CP_MEUR"], "na_item": ["B1GQ"], "geo": ["DE", "FR"]}. Do not include "geo" here if using geo_level. Invalid dimension values silently return no data — verify with eurostat_get_dimension_values first.',
+        'Dimension filters as a map of dimension code → array of valid values. Example: {"unit": ["CP_MEUR"], "na_item": ["B1GQ"], "geo": ["DE", "FR"]}. An empty array is treated as no filter for that dimension and is dropped from the request. Do not include "geo" here if using geo_level. Invalid dimension values silently return no data — verify with eurostat_get_dimension_values first.',
       ),
     geo_level: z
       .enum(GEO_LEVEL_VALUES)
@@ -106,10 +106,22 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       ),
     timeRange: z
       .object({
-        start: z.string().describe('Earliest period in this result.'),
-        end: z.string().describe('Most recent period in this result.'),
+        start: z
+          .string()
+          .optional()
+          .describe(
+            'Earliest period in this result. Omitted when the observations carry no time dimension and Eurostat reports no overall period.',
+          ),
+        end: z
+          .string()
+          .optional()
+          .describe(
+            'Most recent period in this result. Omitted when the observations carry no time dimension and Eurostat reports no overall period.',
+          ),
       })
-      .describe('Time coverage of the returned observations.'),
+      .describe(
+        'Time coverage of the returned observations. Each bound is omitted when neither the observations nor Eurostat report it — an omitted bound is unknown, not empty.',
+      ),
     missingObsCount: z
       .number()
       .describe('Number of observations with null value (missing data points in the source).'),
@@ -119,7 +131,9 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       .object({
         filters: z
           .record(z.string(), z.array(z.string()))
-          .describe('Dimension filters that were applied.'),
+          .describe(
+            'Dimension filters actually sent to Eurostat. Empty arrays from the request are dropped and do not appear here.',
+          ),
         geoLevel: z.string().optional().describe('NUTS geo level filter applied, if any.'),
         sincePeriod: z.string().optional().describe('Start of time range applied, if any.'),
         untilPeriod: z.string().optional().describe('End of time range applied, if any.'),
@@ -245,6 +259,7 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
     }
 
     const OBS_CAP = 5_000;
+    const { appliedFilters, ...queryResult } = result;
     const totalObs = result.observations.length;
     const truncated = totalObs > OBS_CAP;
     const observations = truncated ? result.observations.slice(0, OBS_CAP) : result.observations;
@@ -256,9 +271,12 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       missingObsCount: result.missingObsCount,
     });
 
+    // Sourced from the service's applied set, not raw input: a zero-length filter array is
+    // dropped from the upstream request, so echoing it back would claim a restriction that
+    // was never sent.
     ctx.enrich({
       appliedFilters: {
-        filters: input.filters,
+        filters: appliedFilters,
         ...(input.geo_level && { geoLevel: input.geo_level }),
         ...(sinceP && { sincePeriod: sinceP }),
         ...(untilP && { untilPeriod: untilP }),
@@ -271,13 +289,18 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       );
     }
 
-    return { ...result, observations, obsCount: totalObs, truncated };
+    return { ...queryResult, observations, obsCount: totalObs, truncated };
   },
 
   format: (result) => {
+    // An absent period bound is named as unreported rather than rendered as a blank, so
+    // content[] carries the same uncertainty structuredContent does.
+    const UNREPORTED = 'not reported by Eurostat';
+    const { start, end } = result.timeRange;
+    const period = start || end ? `${start ?? UNREPORTED} – ${end ?? UNREPORTED}` : UNREPORTED;
     const lines: string[] = [
       `# ${result.datasetLabel} (\`${result.datasetCode}\`)`,
-      `**Observations:** ${result.obsCount} (${result.missingObsCount} missing) | **Period:** ${result.timeRange.start} – ${result.timeRange.end}`,
+      `**Observations:** ${result.obsCount} (${result.missingObsCount} missing) | **Period:** ${period}`,
       `**Truncated:** ${result.truncated}${result.truncated ? ' — result capped at 5,000 rows. Add dimension filters to get the full result.' : ''}`,
       `**Dimensions:** ${result.dimensionsUsed.join(', ')}\n`,
     ];

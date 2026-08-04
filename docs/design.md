@@ -236,9 +236,9 @@ next_step: string?      // suggested follow-up (drill into folders or inspect a 
 
 ### `eurostat_get_dataset_info`
 
-Fetches dataset metadata by making a minimal Statistics API call (filtered to a single known observation to minimize payload), then extracts dimension structure and annotation metadata from the response.
+Fetches dataset metadata from the Statistics API — a minimal `lastTimePeriod=1` call, plus one bounded follow-up when the dataset has a `time` dimension — then extracts dimension structure and annotation metadata from the responses.
 
-**Implementation note:** The Statistics API returns dimension metadata only for values present in the queried result slice. For `get_dataset_info`, the service issues an unfiltered `lastTimePeriod=1` request (no dimension filters), which returns dimension codes and labels for all values present in the most recent period — sufficient for most use cases. This approach returns all `unit`, `na_item`, and other categorical dimension values present in recent data, and all recent `geo` values (typically 40–50 country-level codes), but only 1 `time` value. Dataset-level metadata (`OBS_COUNT`, periods, `last_updated`) is extracted from `extension.annotation`: note that `OBS_COUNT` is in the annotation's `title` field as a string and must be parsed to integer; `UPDATE_DATA` is in the `date` field. The dataset's human label comes from the top-level `label` field in the response.
+**Implementation note:** The Statistics API returns dimension metadata only for values present in the queried result slice. For `get_dataset_info`, the service issues an unfiltered `lastTimePeriod=1` request (no dimension filters), which returns dimension codes and labels for all values present in the most recent period — all `unit`, `na_item`, and other categorical dimension values present in recent data, and all recent `geo` values (typically 40–50 country-level codes). That slice truncates `time` to the single period it selects, so when the dataset has a `time` dimension the service issues one more bounded query — every other dimension pinned to its first value (the same pin-and-probe `get_dimension_values` uses, with the first response as the probe), `time` unfiltered — and reads `time`'s values from it. Cost: one extra round trip when `time` is present, bounded to |time| observations; a dataset without a `time` dimension stays at one request. Dataset-level metadata (`OBS_COUNT`, periods, `last_updated`) is extracted from `extension.annotation`: note that `OBS_COUNT` is in the annotation's `title` field as a string and must be parsed to integer; `UPDATE_DATA` is in the `date` field. Each of these is omitted from the output when its annotation is absent, rather than defaulted to `0` or `""` — an absent value is unknown, not zero. The dataset's human label comes from the top-level `label` field in the response.
 
 **Input:**
 - `dataset_code: string` — e.g., `nama_10_gdp`
@@ -250,18 +250,18 @@ label: string
 dimensions: [{
   code: string           // e.g., "unit"
   label: string          // e.g., "Unit of measure"
-  values_count: number   // how many valid values exist
+  values_count: number   // full period count for `time`; recent-period codelist size otherwise
   sample_values: [{code, label}]  // first 10 values as orientation
 }]
-time_range: { start: string, end: string }
-obs_count: number
-last_updated: string     // ISO timestamp
+time_range: { start: string?, end: string? }  // each bound omitted when not reported
+obs_count: number?       // omitted when not reported — an absent count is unknown, not zero
+last_updated: string?    // ISO timestamp; omitted when not reported
 metadata_url: string?    // link to ESMS metadata HTML
 ```
 
 **Errors:**
 - `not_found` (NotFound): dataset code does not exist or is not available for dissemination
-- `async_response` (ServiceUnavailable, retryable): Eurostat returned async warning; narrow with dimension filters
+- `async_response` (ServiceUnavailable, non-retryable): Eurostat returned async warning. This tool exposes no filters to narrow, so the same call cannot succeed — recovery is catalogue-level coverage from `eurostat_search_datasets`/`eurostat_browse_themes`, or `eurostat_get_dimension_values` one dimension at a time
 
 ### `eurostat_get_dimension_values`
 
@@ -270,7 +270,7 @@ Returns all valid values for a single dimension in a dataset, using the Statisti
 **Input:**
 - `dataset_code: string`
 - `dimension: string` — dimension code (e.g., `unit`, `na_item`, `geo`)
-- `geo_level: "aggregate"|"country"|"nuts1"|"nuts2"|"nuts3"?` — only used when `dimension === "geo"` (default: `country`; use `nuts1`/`nuts2`/`nuts3` to retrieve regional codes for datasets that carry NUTS data)
+- `geo_level: "aggregate"|"country"|"nuts1"|"nuts2"|"nuts3"?` — applies only when `dimension === "geo"` (default: `country`; use `nuts1`/`nuts2`/`nuts3` to retrieve regional codes for datasets that carry NUTS data). Pairing it with any other dimension is rejected as `conflicting_params` rather than accepted and ignored
 
 **Output:**
 ```
@@ -285,6 +285,8 @@ total_count: number
 
 **Errors:**
 - `not_found` (NotFound): dataset or dimension code does not exist
+- `async_response` (ServiceUnavailable, non-retryable): the dimension query matched too many observations; fall back to the sampled set from `get_dataset_info`, or narrow `geo` with `geo_level`
+- `conflicting_params` (ValidationError): `geo_level` was sent with a dimension other than `geo`, where it has no effect
 
 ### `eurostat_query_dataset`
 
@@ -292,8 +294,8 @@ The primary data-fetching tool. Accepts dimension filters as a map and returns d
 
 **Input:**
 - `dataset_code: string`
-- `filters: Record<string, string[]>` — dimension filters; key = dimension code, value = array of codes. Example: `{"unit": ["CP_MEUR"], "na_item": ["B1GQ"], "geo": ["DE", "FR"]}`. Do not include `"geo"` here when using `geo_level`. Invalid dimension values silently return no data rather than an error — verify codes with `eurostat_get_dimension_values` first.
-- `geo_level: "aggregate"|"country"|"nuts1"|"nuts2"|"nuts3"?` — filter by NUTS hierarchy level. Mutually exclusive with a `"geo"` key in `filters`; sending both returns a 400 error.
+- `filters: Record<string, string[]>` — dimension filters; key = dimension code, value = array of codes. Example: `{"unit": ["CP_MEUR"], "na_item": ["B1GQ"], "geo": ["DE", "FR"]}`. An empty array means "no filter for this dimension", not an error: it is dropped before the request is built, before the `geo`/`geo_level` conflict check, and from the applied filters echoed back — so `{"geo": []}` neither restricts the query nor conflicts with `geo_level`. Do not include `"geo"` here when using `geo_level`. Invalid dimension values silently return no data rather than an error — verify codes with `eurostat_get_dimension_values` first.
+- `geo_level: "aggregate"|"country"|"nuts1"|"nuts2"|"nuts3"?` — filter by NUTS hierarchy level. Mutually exclusive with a non-empty `"geo"` entry in `filters`; sending both is rejected as `conflicting_params` before the request reaches Eurostat.
 - `since_period: string?` — e.g., `"2020"`, `"2023-Q1"`, `"2024-01"`. Use `last_n_periods` instead for the N most recent periods without knowing the end date.
 - `until_period: string?` — e.g., `"2024"`. Omit for data through the latest available period.
 - `last_n_periods: number?` — N most recent periods; mutually exclusive with `since_period`/`until_period`
@@ -311,16 +313,16 @@ observations: [{
   status?: { code: string, label: string }  // e.g., {code:"p", label:"provisional"}
 }]
 obs_count: number
-time_range: { start: string, end: string }
+time_range: { start: string?, end: string? }  // bounds of the returned observations; each omitted when neither they nor Eurostat report it
 missing_obs_count: number         // observations with null value
 ```
 
 **Errors:**
 - `not_found` (NotFound): dataset code not found (HTTP 404, Eurostat error id 100)
 - `no_results` (NotFound): query returned no observations — `value: {}` with no error body; occurs when dimension value filters match no data (e.g., invalid geo code, future time period, or valid-but-absent combination). Detected by checking `value === {}` on an otherwise successful response.
-- `async_response` (ServiceUnavailable, retryable): query too large; add dimension filters to reduce result set
-- `invalid_dimension` (InvalidParams): dimension *code* is not defined in this dataset's structure (HTTP 400, Eurostat error id 150). Note: invalid dimension *values* do not produce an error — they silently return `no_results`.
-- `conflicting_params` (InvalidParams): `geo` filter and `geo_level` used simultaneously (HTTP 400)
+- `async_response` (ServiceUnavailable, non-retryable): query too large; add dimension filters to reduce result set
+- `invalid_dimension` (ValidationError): dimension *code* is not defined in this dataset's structure (HTTP 400, Eurostat error id 150). Note: invalid dimension *values* do not produce an error — they silently return `no_results`.
+- `conflicting_params` (ValidationError): mutually exclusive parameters combined — a non-empty `geo` filter with `geo_level`, or `since_period`/`until_period` with `last_n_periods`. Both are rejected locally, before the request reaches Eurostat.
 
 ---
 
@@ -369,7 +371,7 @@ missing_obs_count: number         // observations with null value
 
 **Why `query_dataset` returns decoded observations instead of raw JSON-stat:** JSON-stat's flat numeric index (`{"0": 4219310.0}`) with separate dimension index maps requires non-trivial decoding math. Every caller would need to re-implement it. The service layer does the stride-based decoding once and returns human-usable `{dimension_code: {code, label}, value, status}` objects. The raw format details are an implementation concern, not a public API surface.
 
-**Why no async polling:** Eurostat's async response is a soft error with guidance to narrow the query. Implementing polling (retry-after semantics) would require state management between tool calls. The better UX is to detect the async response immediately and return a `ServiceUnavailable` error with a concrete recovery hint: "Add dimension filters to reduce result size — query returned too many observations."
+**Why no async polling:** Eurostat's async response is a soft error with guidance to narrow the query. Implementing polling (retry-after semantics) would require state management between tool calls. The better UX is to detect the async response immediately and return a non-retryable `ServiceUnavailable` error whose recovery hint names a narrower call to make instead.
 
 **Why no DataCanvas:** The query tool returns decoded observations that are human-readable in format(). Tabular analysis can be done by the agent in subsequent steps. DataCanvas would add complexity; the domain's natural unit is a result set per filtered query, not a persistent analytical workspace.
 
@@ -379,7 +381,7 @@ missing_obs_count: number         // observations with null value
 
 **No free-text search on dimension values:** The Statistics API has no endpoint for searching dimension codes by label (e.g., "find the code for 'purchasing power standard per inhabitant'"). The agent must browse dimension values via `get_dimension_values` or know the codes.
 
-**Async responses for large unfiltered queries:** Eurostat's API may return a `{"warning":{"status":413,...}}` async response for very large queries — documented API behavior, though it appears to depend on server load and is not guaranteed for any specific query size. The server detects and surfaces this as a recoverable `ServiceUnavailable` error with guidance to filter more tightly. Very large datasets like `nama_10_gdp` (1.1M observations) should be queried with at least geo + time filters as a best practice regardless.
+**Async responses for large unfiltered queries:** Eurostat's API may return a `{"warning":{"status":413,...}}` async response for very large queries — documented API behavior, though it appears to depend on server load and is not guaranteed for any specific query size. The server detects and surfaces this as a non-retryable `ServiceUnavailable` error with guidance to filter more tightly — repeating the identical request cannot change the outcome. Very large datasets like `nama_10_gdp` (1.1M observations) should be queried with at least geo + time filters as a best practice regardless.
 
 **TOC metadata lag:** The cached TOC is at most `EUROSTAT_TOC_CACHE_TTL_MS` old (default 12 hours). A dataset Eurostat adds in one of its twice-daily updates will not appear in search or browse results until the next catalogue call past the TTL refreshes the cache. Acceptable for a statistical data server; lower the TTL to shorten the window.
 
@@ -400,5 +402,8 @@ missing_obs_count: number         // observations with null value
 | 2026-08-03 | Bind search cursors to the query and TOC snapshot that produced them | The framework's `paginateArray` round-trips only `{offset, limit}`, so any structurally valid cursor paged any result set. Carrying the normalized query and the TOC load timestamp in the cursor turns both a cross-query cursor and a mid-pagination catalogue refresh into a clean `invalid_cursor` rejection instead of a silently shifted page. |
 | 2026-05-23 | Decode JSON-stat in the service layer | The stride-based flat index math is non-trivial and should not be re-implemented by callers. Every output consumer needs labeled data, not numeric indexes. |
 | 2026-05-23 | Surface async response as ServiceUnavailable (retryable) rather than implement polling | Async is Eurostat's soft error for oversized queries. The right recovery is adding filters, not polling. Polling would require cross-call state with no supported mechanism in the Statistics API. |
+| 2026-08-04 | Classify `async_response` as non-retryable across all three data tools, superseding the blanket "retryable" entry above | The 413 warning is deterministic — the identical request produces the identical oversized response, so a retry is guidance toward a call that cannot succeed. `get_dimension_values` and `query_dataset` were already tightened; `get_dataset_info` was the last holdout, and its recovery hint now points at catalogue-level coverage metadata and per-dimension inspection instead of a wait-and-retry it cannot narrow. |
+| 2026-08-04 | Omit annotation-derived metadata fields rather than defaulting them | `obs_count: 0`, `time_range: {start:"",end:""}`, and `last_updated: ""` were indistinguishable from a real zero or a genuinely empty value. Omission follows the `metadata_url` precedent already in the extractor and preserves the upstream's own uncertainty. Applies to all three schemas reading those annotations: `get_dataset_info`, the `eurostat://dataset/{dataset_code}` resource, and `query_dataset`'s `time_range`, which falls back to the same two period annotations when the result carries no `time` dimension. |
+| 2026-08-04 | Spend a second bounded request in `get_dataset_info` to count `time` | The `lastTimePeriod=1` slice that makes the call cheap also reduces `time` to one value, and the tool tells callers to size a dimension from `values_count` — so `time` reported `1` for every dataset. The pin-and-probe already built for `get_dimension_values` reuses the first response as its probe, so the real period count costs one extra round trip bounded to \|time\| observations. |
 | 2026-05-23 | 5 tools, no prompts, 1 resource | Domain is read-only data retrieval with a natural tool workflow (discover → inspect → query). Prompts add no value over well-designed tool descriptions. Resource for `eurostat://dataset/{dataset_code}` provides cache-injectable context without requiring a full query. |
 | 2026-05-23 | Exclude SDMX codelist tool | Global codelists (4,292 geo entries) are unhelpful without dataset scoping. `get_dimension_values` is dataset-scoped and returns actionable values. |

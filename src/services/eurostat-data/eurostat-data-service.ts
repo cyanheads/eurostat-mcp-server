@@ -223,12 +223,28 @@ export class EurostatDataService {
     return data.extension?.annotation?.find((a) => a.type === type)?.[field];
   }
 
-  private extractMetadata(data: JsonStatResponse, datasetCode: string): DatasetMeta {
+  /**
+   * Build dataset metadata from a `lastTimePeriod=1` slice.
+   *
+   * `timeSlice`, when supplied, is a second response covering the dataset's full period
+   * range (see `getDatasetInfo`); the `time` dimension is read from it, since the
+   * one-period slice would otherwise report a single value for it.
+   *
+   * Annotation-derived fields are omitted when Eurostat does not report them — a missing
+   * observation count is not a zero, and a missing period bound is not an empty string.
+   */
+  private extractMetadata(
+    data: JsonStatResponse,
+    datasetCode: string,
+    timeSlice?: JsonStatResponse,
+  ): DatasetMeta {
     const dims = data.id ?? [];
     const dimension = data.dimension ?? {};
 
     const dimensions: DimensionInfo[] = dims.map((dimCode) => {
-      const cat = dimension[dimCode]?.category;
+      const cat =
+        (dimCode === 'time' ? timeSlice?.dimension?.[dimCode]?.category : undefined) ??
+        dimension[dimCode]?.category;
       const allValues = cat?.index ? Object.entries(cat.index).sort(([, a], [, b]) => a - b) : [];
       return {
         code: dimCode,
@@ -241,31 +257,41 @@ export class EurostatDataService {
       };
     });
 
-    const obsCountRaw = this.extractAnnotation(data, 'OBS_COUNT', 'title');
-    const obsCount = obsCountRaw ? parseInt(obsCountRaw, 10) : 0;
+    // An absent annotation and an unparseable one both land on NaN, and neither is a count.
+    const obsCount = Number.parseInt(this.extractAnnotation(data, 'OBS_COUNT', 'title') ?? '', 10);
 
-    const oldest = this.extractAnnotation(data, 'OBS_PERIOD_OVERALL_OLDEST', 'title') ?? '';
-    const latest = this.extractAnnotation(data, 'OBS_PERIOD_OVERALL_LATEST', 'title') ?? '';
-    const lastUpdated = this.extractAnnotation(data, 'UPDATE_DATA', 'date') ?? '';
+    const start = this.extractAnnotation(data, 'OBS_PERIOD_OVERALL_OLDEST', 'title');
+    const end = this.extractAnnotation(data, 'OBS_PERIOD_OVERALL_LATEST', 'title');
+    const lastUpdated = this.extractAnnotation(data, 'UPDATE_DATA', 'date');
     const metadataUrl = this.extractAnnotation(data, 'ESMS_HTML', 'href');
 
     return {
       code: datasetCode,
       label: data.label ?? datasetCode,
       dimensions,
-      timeRange: { start: oldest, end: latest },
-      obsCount: Number.isNaN(obsCount) ? 0 : obsCount,
-      lastUpdated,
+      timeRange: { ...(start && { start }), ...(end && { end }) },
+      ...(!Number.isNaN(obsCount) && { obsCount }),
+      ...(lastUpdated && { lastUpdated }),
       ...(metadataUrl && { metadataUrl }),
     };
   }
 
-  /** Fetch dataset metadata using a minimal lastTimePeriod=1 query. */
+  /**
+   * Fetch dataset metadata using a minimal `lastTimePeriod=1` query.
+   *
+   * That slice carries every dimension's full codelist except `time`, which it truncates to
+   * the single period it selects. A second bounded query — the same pin-and-probe
+   * `getDimensionValues` uses, with the first response serving as the probe — enumerates the
+   * real period set, so `time` reports its actual count instead of the filter's artifact.
+   * Cost: one extra round trip, bounded to |time| observations.
+   */
   async getDatasetInfo(datasetCode: string, ctx: Context): Promise<DatasetMeta> {
     ctx.log.info('Fetching dataset info', { datasetCode });
-    const url = this.buildUrl(datasetCode, { lastTimePeriod: '1' });
-    const data = await this.fetchJson(url, ctx);
-    return this.extractMetadata(data, datasetCode);
+    const data = await this.fetchJson(this.buildUrl(datasetCode, { lastTimePeriod: '1' }), ctx);
+    const timeSlice = (data.id ?? []).includes('time')
+      ? await this.fetchJson(this.buildUrl(datasetCode, this.pinDimensions(data, 'time')), ctx)
+      : undefined;
+    return this.extractMetadata(data, datasetCode, timeSlice);
   }
 
   /**
@@ -303,6 +329,9 @@ export class EurostatDataService {
    * |time| observations (avoiding the async 413 an unfiltered query risks on large datasets).
    * Every other dimension's full codelist is present in any single period, so `lastTimePeriod=1`
    * is both complete and cheap; for `geo` the NUTS level is applied, defaulting to `country`.
+   *
+   * `geoLevel` is a NUTS filter and only applies to `geo`; pairing it with any other dimension
+   * is rejected rather than accepted and ignored.
    */
   async getDimensionValues(
     datasetCode: string,
@@ -311,6 +340,13 @@ export class EurostatDataService {
     ctx: Context,
   ): Promise<DimensionValuesResult> {
     ctx.log.info('Fetching dimension values', { datasetCode, dimension, geoLevel });
+
+    if (geoLevel && dimension !== 'geo') {
+      throw validationError(
+        `"geo_level" filters the NUTS hierarchy of the "geo" dimension and has no effect on "${dimension}". Omit geo_level, or set dimension to "geo".`,
+        { reason: 'conflicting_params', dimension, geoLevel },
+      );
+    }
 
     let data: JsonStatResponse;
     if (dimension === 'time') {
@@ -362,10 +398,24 @@ export class EurostatDataService {
     lang: string,
     ctx: Context,
   ): Promise<QueryResult> {
-    ctx.log.info('Querying dataset', { datasetCode, filters, geoLevel, sinceP, untilP, lastN });
+    // A zero-length filter array places no restriction on the request. Drop those entries once,
+    // up front, so the conflict check, the request URL, the log line, and the applied filters
+    // echoed back to the caller all describe the same query.
+    const appliedFilters = Object.fromEntries(
+      Object.entries(filters).filter(([, values]) => values.length > 0),
+    );
+
+    ctx.log.info('Querying dataset', {
+      datasetCode,
+      filters: appliedFilters,
+      geoLevel,
+      sinceP,
+      untilP,
+      lastN,
+    });
 
     // Validate mutually exclusive params
-    if (filters.geo && geoLevel) {
+    if (appliedFilters.geo && geoLevel) {
       throw validationError(
         `"geo" filter and "geo_level" cannot be used together. Use one or the other: "geo" for specific country/region codes, "geo_level" for filtering by NUTS hierarchy level.`,
         { reason: 'conflicting_params' },
@@ -381,8 +431,8 @@ export class EurostatDataService {
     const params: Record<string, string | string[]> = { lang };
 
     // Apply dimension filters
-    for (const [dim, values] of Object.entries(filters)) {
-      if (values.length > 0) params[dim] = values;
+    for (const [dim, values] of Object.entries(appliedFilters)) {
+      params[dim] = values;
     }
     if (geoLevel) params.geoLevel = geoLevel;
     if (sinceP && !lastN) params.sinceTimePeriod = sinceP;
@@ -396,7 +446,7 @@ export class EurostatDataService {
     if (data.id && data.value !== undefined && Object.keys(data.value).length === 0) {
       throw notFound(
         `Query returned no observations for dataset "${datasetCode}". The dimension filter combination may not exist in the data. Verify dimension values with eurostat_get_dimension_values first.`,
-        { reason: 'no_results', datasetCode, filters },
+        { reason: 'no_results', datasetCode, filters: appliedFilters },
       );
     }
 
@@ -404,17 +454,17 @@ export class EurostatDataService {
     const missingObsCount = observations.filter((o) => o.value === null).length;
 
     // Compute timeRange from the actual time dimension values in the response.
-    // Fall back to dataset-wide annotations only when no time dimension is present.
-    const oldest = this.extractAnnotation(data, 'OBS_PERIOD_OVERALL_OLDEST', 'title') ?? '';
-    const latest = this.extractAnnotation(data, 'OBS_PERIOD_OVERALL_LATEST', 'title') ?? '';
+    // Fall back to dataset-wide annotations only when no time dimension is present, and omit
+    // a bound neither source reports — an unknown period is not an empty one.
     const timeCodes = observations
       .map((o) => (o.dimensions as Record<string, { code: string } | undefined>).time?.code)
       .filter((c): c is string => c !== undefined)
       .sort();
-    const timeRange = {
-      start: timeCodes[0] ?? oldest,
-      end: timeCodes[timeCodes.length - 1] ?? latest,
-    };
+    const start =
+      timeCodes[0] ?? this.extractAnnotation(data, 'OBS_PERIOD_OVERALL_OLDEST', 'title');
+    const end =
+      timeCodes.at(-1) ?? this.extractAnnotation(data, 'OBS_PERIOD_OVERALL_LATEST', 'title');
+    const timeRange = { ...(start && { start }), ...(end && { end }) };
 
     return {
       datasetCode,
@@ -424,6 +474,7 @@ export class EurostatDataService {
       obsCount: observations.length,
       timeRange,
       missingObsCount,
+      appliedFilters,
     };
   }
 }

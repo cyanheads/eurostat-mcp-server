@@ -44,6 +44,7 @@ const mockQueryResult = {
   obsCount: 3,
   timeRange: { start: '2023', end: '2023' },
   missingObsCount: 1,
+  appliedFilters: { unit: ['CP_MEUR'], na_item: ['B1GQ'], geo: ['DE', 'FR', 'IT'] },
 };
 
 describe('eurostatQueryDataset', () => {
@@ -73,6 +74,33 @@ describe('eurostatQueryDataset', () => {
     });
     expect(enrichment.appliedFilters?.sincePeriod).toBe('2023');
     expect(enrichment.notice).toBeUndefined();
+  });
+
+  it('reports only the filters the service actually applied', async () => {
+    // The service drops zero-length arrays before building the request; both response
+    // surfaces must echo that set, not the raw input that claimed a geo restriction.
+    const mockQuery = vi.fn().mockResolvedValue({
+      ...mockQueryResult,
+      appliedFilters: { unit: ['CP_MEUR'] },
+    });
+    vi.mocked(getEurostatDataService).mockReturnValue({ queryDataset: mockQuery } as never);
+    const ctx = createMockContext({ errors: eurostatQueryDataset.errors });
+    const input = eurostatQueryDataset.input.parse({
+      dataset_code: 'nama_10_gdp',
+      filters: { unit: ['CP_MEUR'], geo: [] },
+    });
+    const result = await eurostatQueryDataset.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.appliedFilters?.filters).toEqual({ unit: ['CP_MEUR'] });
+    expect(enrichment.appliedFilters?.filters).not.toHaveProperty('geo');
+    // The rendered trailer reads from the same enrichment value.
+    const trailer = eurostatQueryDataset.enrichmentTrailer!.appliedFilters as {
+      render: (f: unknown) => string;
+    };
+    expect(trailer.render(enrichment.appliedFilters)).not.toContain('geo=[]');
+    // The service's applied-filter bookkeeping stays out of the tool's output schema.
+    expect(result).not.toHaveProperty('appliedFilters');
   });
 
   it('applies default empty filters and EN language', () => {
@@ -210,6 +238,34 @@ describe('eurostatQueryDataset', () => {
     expect(text).toContain('3867000');
     expect(text).toContain('N/A');
     expect(text).toContain('provisional');
+  });
+
+  it('advertises both period bounds as optional in the output schema', () => {
+    // The wire contract, not just the handler: a result whose period neither the observations
+    // nor Eurostat report must validate without a fabricated empty bound.
+    const parsed = eurostatQueryDataset.output.parse({
+      ...mockQueryResult,
+      truncated: false,
+      timeRange: {},
+    });
+    expect(parsed.timeRange).toEqual({});
+  });
+
+  it('names an unreported period rather than rendering a blank range', () => {
+    const blocks = eurostatQueryDataset.format!({ ...mockQueryResult, timeRange: {} });
+    const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+    expect(text).toContain('**Period:** not reported by Eurostat');
+    // The pre-fix rendering of the same payload.
+    expect(text).not.toContain('**Period:**  – ');
+  });
+
+  it('renders a half-known period without inventing the missing bound', () => {
+    const blocks = eurostatQueryDataset.format!({
+      ...mockQueryResult,
+      timeRange: { start: '2023' },
+    });
+    const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+    expect(text).toContain('**Period:** 2023 – not reported by Eurostat');
   });
 
   it('formats sparse observations where value is null', () => {

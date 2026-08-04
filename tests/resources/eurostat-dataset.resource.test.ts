@@ -68,6 +68,59 @@ describe('eurostatDatasetResource', () => {
     await expect(eurostatDatasetResource.handler(params, ctx)).rejects.toThrow('Dataset not found');
   });
 
+  it('carries the real time period count through to the caller', async () => {
+    vi.mocked(getEurostatDataService).mockReturnValue({
+      getDatasetInfo: vi.fn().mockResolvedValue({
+        ...mockMeta,
+        dimensions: [
+          ...mockMeta.dimensions,
+          {
+            code: 'time',
+            label: 'Time',
+            valuesCount: 51,
+            sampleValues: [{ code: '1975', label: '1975' }],
+          },
+        ],
+      }),
+    } as never);
+    const ctx = createMockContext({ tenantId: 'test' });
+    const params = eurostatDatasetResource.params.parse({ dataset_code: 'nama_10_gdp' });
+    const result = await eurostatDatasetResource.handler(params, ctx);
+    expect(result.dimensions.find((d) => d.code === 'time')?.valuesCount).toBe(51);
+  });
+
+  it('advertises the annotation-derived fields as optional in the output schema', () => {
+    const parsed = eurostatDatasetResource.output!.parse({
+      code: 'xyz',
+      label: 'Sparse dataset',
+      dimensions: [],
+      timeRange: {},
+    });
+    expect(parsed.obsCount).toBeUndefined();
+    expect(parsed.lastUpdated).toBeUndefined();
+    expect(parsed.timeRange).toEqual({});
+  });
+
+  it('omits annotation-derived fields absent from the upstream metadata', async () => {
+    vi.mocked(getEurostatDataService).mockReturnValue({
+      getDatasetInfo: vi.fn().mockResolvedValue({
+        code: 'xyz',
+        label: 'Sparse dataset',
+        dimensions: [],
+        timeRange: {},
+      }),
+    } as never);
+    const ctx = createMockContext({ tenantId: 'test' });
+    const params = eurostatDatasetResource.params.parse({ dataset_code: 'xyz' });
+    const result = await eurostatDatasetResource.handler(params, ctx);
+    // Absent upstream annotations must not surface as 0 / '' — the resource schema declares
+    // these optional so a consumer can tell "unknown" from "zero".
+    expect(result.obsCount).toBeUndefined();
+    expect(result.lastUpdated).toBeUndefined();
+    expect(result.timeRange.start).toBeUndefined();
+    expect(result.timeRange.end).toBeUndefined();
+  });
+
   it('handles sparse metadata without metadataUrl', async () => {
     const sparseMeta = { ...mockMeta, metadataUrl: undefined };
     vi.mocked(getEurostatDataService).mockReturnValue({

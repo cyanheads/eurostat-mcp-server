@@ -123,6 +123,29 @@ describe('eurostatGetDimensionValues', () => {
     });
   });
 
+  it('surfaces conflicting_params when geo_level is sent with a non-geo dimension', async () => {
+    vi.mocked(getEurostatDataService).mockReturnValue({
+      getDimensionValues: vi.fn().mockRejectedValue(
+        Object.assign(new Error('geo_level does not apply to "unit"'), {
+          data: { reason: 'conflicting_params' },
+        }),
+      ),
+    } as never);
+    const ctx = createMockContext({ errors: eurostatGetDimensionValues.errors });
+    const input = eurostatGetDimensionValues.input.parse({
+      dataset_code: 'nama_10_gdp',
+      dimension: 'unit',
+      geo_level: 'nuts3',
+    });
+    // Previously this succeeded with geo_level silently ignored; the caller now hears about it.
+    await expect(eurostatGetDimensionValues.handler(input, ctx)).rejects.toMatchObject({
+      data: {
+        reason: 'conflicting_params',
+        recovery: { hint: expect.stringContaining('unit') },
+      },
+    });
+  });
+
   it('formats output with all values', () => {
     const blocks = eurostatGetDimensionValues.format!(mockUnitResult);
     expect(blocks.some((b) => b.type === 'text')).toBe(true);

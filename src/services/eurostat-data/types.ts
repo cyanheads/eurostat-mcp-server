@@ -50,15 +50,20 @@ export interface Observation {
   value: number | null;
 }
 
-/** Metadata about a dataset extracted from a JSON-stat response. */
+/**
+ * Metadata about a dataset extracted from a JSON-stat response.
+ *
+ * Annotation-derived fields are absent when Eurostat does not report them, rather than
+ * defaulted — a missing count is not a zero, and a missing period bound is not an empty string.
+ */
 export interface DatasetMeta {
   code: string;
   dimensions: DimensionInfo[];
   label: string;
-  lastUpdated: string;
+  lastUpdated?: string;
   metadataUrl?: string;
-  obsCount: number;
-  timeRange: { start: string; end: string };
+  obsCount?: number;
+  timeRange: { start?: string; end?: string };
 }
 
 export interface DimensionInfo {
@@ -66,7 +71,7 @@ export interface DimensionInfo {
   label: string;
   /** First 10 values as orientation. */
   sampleValues: Array<{ code: string; label: string }>;
-  /** Total number of distinct values in this slice. */
+  /** Distinct values for this dimension: the dataset's full period set for `time`, the most recent period's codelist otherwise. */
   valuesCount: number;
 }
 
@@ -77,14 +82,22 @@ export interface DimensionValuesResult {
   values: Array<{ code: string; label: string }>;
 }
 
+/**
+ * A decoded query result.
+ *
+ * `timeRange` bounds are absent when neither the returned observations nor the dataset-wide
+ * annotations report them — an unknown bound is not an empty period.
+ */
 export interface QueryResult {
+  /** Filters actually sent upstream — the requested filters minus any zero-length arrays. */
+  appliedFilters: Record<string, string[]>;
   datasetCode: string;
   datasetLabel: string;
   dimensionsUsed: string[];
   missingObsCount: number;
   obsCount: number;
   observations: Observation[];
-  timeRange: { start: string; end: string };
+  timeRange: { start?: string; end?: string };
 }
 
 export type GeoLevel = 'aggregate' | 'country' | 'nuts1' | 'nuts2' | 'nuts3';

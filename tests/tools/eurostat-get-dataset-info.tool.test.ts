@@ -41,6 +41,15 @@ const mockMeta = {
         { code: 'FR', label: 'France' },
       ],
     },
+    {
+      code: 'time',
+      label: 'Time',
+      valuesCount: 51,
+      sampleValues: [
+        { code: '1975', label: '1975' },
+        { code: '1976', label: '1976' },
+      ],
+    },
   ],
   timeRange: { start: '1975', end: '2024' },
   obsCount: 1_100_000,
@@ -60,9 +69,11 @@ describe('eurostatGetDatasetInfo', () => {
     const input = eurostatGetDatasetInfo.input.parse({ dataset_code: 'nama_10_gdp' });
     const result = await eurostatGetDatasetInfo.handler(input, ctx);
     expect(result.code).toBe('nama_10_gdp');
-    expect(result.dimensions).toHaveLength(3);
+    expect(result.dimensions).toHaveLength(4);
     expect(result.obsCount).toBe(1_100_000);
     expect(result.timeRange.start).toBe('1975');
+    // The time dimension reports the dataset's period count, not the metadata query's slice of 1.
+    expect(result.dimensions.find((d) => d.code === 'time')?.valuesCount).toBe(51);
   });
 
   it('throws not_found for an unknown dataset code', async () => {
@@ -80,7 +91,7 @@ describe('eurostatGetDatasetInfo', () => {
     });
   });
 
-  it('throws async_response with recovery hint for oversized metadata call', async () => {
+  it('surfaces async_response as non-retryable with a recovery path that can work', async () => {
     vi.mocked(getEurostatDataService).mockReturnValue({
       getDatasetInfo: vi
         .fn()
@@ -90,8 +101,17 @@ describe('eurostatGetDatasetInfo', () => {
     } as never);
     const ctx = createMockContext({ errors: eurostatGetDatasetInfo.errors });
     const input = eurostatGetDatasetInfo.input.parse({ dataset_code: 'nama_10_gdp' });
+    // The 413 is deterministic: the caller must be told retryable:false and pointed at a
+    // different call, not at repeating this one (which previously said "retry in a few seconds").
     await expect(eurostatGetDatasetInfo.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'async_response', recovery: { hint: expect.stringContaining('retry') } },
+      data: {
+        reason: 'async_response',
+        retryable: false,
+        recovery: { hint: expect.stringContaining('eurostat_search_datasets') },
+      },
+    });
+    await expect(eurostatGetDatasetInfo.handler(input, ctx)).rejects.toMatchObject({
+      data: { recovery: { hint: expect.not.stringContaining('retry') } },
     });
   });
 
@@ -126,6 +146,72 @@ describe('eurostatGetDatasetInfo', () => {
     const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
     expect(text).toContain('nama_10_gdp');
     expect(text).not.toContain('Metadata:');
+  });
+
+  it('advertises the annotation-derived fields as optional in the output schema', () => {
+    // The wire contract, not just the handler: a payload with no annotation-derived values
+    // must validate, or a sparse dataset cannot be represented without fabricating one.
+    const parsed = eurostatGetDatasetInfo.output.parse({
+      code: 'xyz',
+      label: 'Sparse dataset',
+      dimensions: [],
+      timeRange: {},
+    });
+    expect(parsed.obsCount).toBeUndefined();
+    expect(parsed.lastUpdated).toBeUndefined();
+    expect(parsed.timeRange).toEqual({});
+  });
+
+  it('names absent annotation-derived metadata as unreported rather than zero or blank', () => {
+    const sparseMeta = {
+      code: 'xyz',
+      label: 'Sparse dataset',
+      dimensions: [
+        {
+          code: 'geo',
+          label: 'Geopolitical entity',
+          valuesCount: 1,
+          sampleValues: [{ code: 'DE', label: 'Germany' }],
+        },
+      ],
+      timeRange: {},
+    };
+    const blocks = eurostatGetDatasetInfo.format!(sparseMeta);
+    const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+    expect(text).toContain('**Observations:** not reported by Eurostat');
+    expect(text).toContain('**Period:** not reported by Eurostat');
+    expect(text).toContain('**Last updated:** not reported by Eurostat');
+    // The pre-fix rendering of the same payload.
+    expect(text).not.toContain('**Observations:** 0');
+    expect(text).not.toContain('**Period:**  – ');
+  });
+
+  it('renders a half-known period range without inventing the missing bound', () => {
+    const blocks = eurostatGetDatasetInfo.format!({
+      ...mockMeta,
+      timeRange: { start: '1975' },
+    });
+    const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+    expect(text).toContain('**Period:** 1975 – not reported by Eurostat');
+  });
+
+  it('returns sparse metadata unchanged through the handler', async () => {
+    const sparseMeta = {
+      code: 'xyz',
+      label: 'Sparse dataset',
+      dimensions: [],
+      timeRange: {},
+    };
+    vi.mocked(getEurostatDataService).mockReturnValue({
+      getDatasetInfo: vi.fn().mockResolvedValue(sparseMeta),
+    } as never);
+    const ctx = createMockContext({ errors: eurostatGetDatasetInfo.errors });
+    const input = eurostatGetDatasetInfo.input.parse({ dataset_code: 'xyz' });
+    const result = await eurostatGetDatasetInfo.handler(input, ctx);
+    expect(result.obsCount).toBeUndefined();
+    expect(result.lastUpdated).toBeUndefined();
+    expect(result.timeRange.start).toBeUndefined();
+    expect(result.timeRange.end).toBeUndefined();
   });
 
   it('formats hint when dimension has more values than sample', () => {

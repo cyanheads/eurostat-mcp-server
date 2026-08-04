@@ -25,7 +25,7 @@ export const eurostatGetDimensionValues = tool('eurostat_get_dimension_values', 
       .enum(GEO_LEVEL_VALUES)
       .optional()
       .describe(
-        'NUTS hierarchy level filter — only relevant when dimension is "geo". Options: "aggregate" (EU/EA codes), "country" (2-letter codes, default), "nuts1" (3-char), "nuts2" (4-char), "nuts3" (5-char).',
+        'NUTS hierarchy level filter — applies only when dimension is "geo"; passing it with any other dimension is rejected. Options: "aggregate" (EU/EA codes), "country" (2-letter codes, default), "nuts1" (3-char), "nuts2" (4-char), "nuts3" (5-char).',
       ),
   }),
   output: z.object({
@@ -63,6 +63,13 @@ export const eurostatGetDimensionValues = tool('eurostat_get_dimension_values', 
       recovery:
         'Use eurostat_get_dataset_info for a sampled value set, or narrow the request with geo_level for the geo dimension.',
     },
+    {
+      reason: 'conflicting_params',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'geo_level was combined with a dimension other than "geo", where it has no effect.',
+      recovery:
+        'Drop geo_level to list that dimension, or set dimension to "geo" to filter by NUTS level.',
+    },
   ],
 
   async handler(input, ctx) {
@@ -88,6 +95,13 @@ export const eurostatGetDimensionValues = tool('eurostat_get_dimension_values', 
         throw ctx.fail('async_response', (err as Error).message, {
           recovery: {
             hint: `The "${input.dimension}" dimension query for "${input.dataset_code}" matched too many observations. Use eurostat_get_dataset_info for a sampled value set, or narrow with geo_level for the geo dimension.`,
+          },
+        });
+      }
+      if (reason === 'conflicting_params') {
+        throw ctx.fail('conflicting_params', (err as Error).message, {
+          recovery: {
+            hint: `geo_level applies only to the "geo" dimension and had no effect on "${input.dimension}". Re-send without geo_level, or set dimension to "geo".`,
           },
         });
       }

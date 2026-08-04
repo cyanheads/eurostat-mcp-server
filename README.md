@@ -9,7 +9,7 @@
 
 
 
-[![Version](https://img.shields.io/badge/Version-0.1.16-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/eurostat-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/eurostat-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/eurostat-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/eurostat-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/eurostat-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/eurostat-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -72,8 +72,8 @@ Navigate the Eurostat theme tree.
 Fetch metadata for a Eurostat dataset before querying it.
 
 - Returns all dimensions with their codes, labels, and up to 10 sample values each
-- Reports overall time range and total observation count across all periods
-- Uses a minimal Statistics API call (most recent period only) for efficiency
+- Reports overall time range and total observation count across all periods, each omitted when Eurostat does not report it
+- Uses a minimal Statistics API call (most recent period only), plus one bounded follow-up to count the dataset's periods when it has a `time` dimension
 - For dimensions with more than 10 values, use `eurostat_get_dimension_values` for the full list
 - Provides a link to the ESMS metadata page when available
 
@@ -84,7 +84,7 @@ Fetch metadata for a Eurostat dataset before querying it.
 List all valid values for a specific dataset dimension.
 
 - Retrieves the complete set of valid codes and labels for any dimension (unit, na_item, geo, etc.)
-- For the `geo` dimension, supports NUTS hierarchy filtering: `aggregate` (EU/EA totals), `country` (41 states), `nuts1` (127 major regions), `nuts2` (309 basic regions), `nuts3` (1,343 small regions)
+- For the `geo` dimension, supports NUTS hierarchy filtering: `aggregate` (EU/EA totals), `country` (41 states), `nuts1` (127 major regions), `nuts2` (309 basic regions), `nuts3` (1,343 small regions). Pairing it with any other dimension is rejected rather than ignored
 - Prevents silent no-data returns — invalid dimension values in `eurostat_query_dataset` return nothing without error; verify codes here first
 
 ---
@@ -94,11 +94,11 @@ List all valid values for a specific dataset dimension.
 Fetch statistical data from a Eurostat dataset.
 
 - Accepts dimension filters as a map of `{dimension_code: [value1, value2, ...]}`
-- NUTS geo-level filter (`aggregate`, `country`, `nuts1`, `nuts2`, `nuts3`) — mutually exclusive with a `geo` key in filters
+- NUTS geo-level filter (`aggregate`, `country`, `nuts1`, `nuts2`, `nuts3`) — mutually exclusive with a non-empty `geo` entry in filters; an empty array is treated as no filter and dropped
 - Time range via `since_period`/`until_period` (e.g., `"2020"`, `"2023-Q1"`) or `last_n_periods` for the N most recent
 - Returns decoded observations with dimension codes and labels, numeric values, and status flags (`p` = provisional, `e` = estimated, etc.)
-- Reports total observation count, missing value count, and effective time range of the result
-- Async-response detection — large unfiltered queries return an actionable error with filter guidance rather than silently timing out
+- Reports total observation count, missing value count, and the effective time range of the result, each period bound omitted when neither the observations nor Eurostat report it
+- Async-response detection — large unfiltered queries return an actionable, non-retryable error with filter guidance rather than silently timing out
 
 ## Resource
 

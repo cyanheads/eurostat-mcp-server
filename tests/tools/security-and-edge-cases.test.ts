@@ -5,7 +5,7 @@
  * @module tests/tools/security-and-edge-cases.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { eurostatDatasetResource } from '@/mcp-server/resources/definitions/eurostat-dataset.resource.js';
 import { eurostatBrowseThemes } from '@/mcp-server/tools/definitions/eurostat-browse-themes.tool.js';
@@ -48,10 +48,31 @@ const minimalMeta = {
       valuesCount: 1,
       sampleValues: [{ code: 'DE', label: 'Germany' }],
     },
+    {
+      code: 'time',
+      label: 'Time',
+      valuesCount: 5,
+      sampleValues: [{ code: '2020', label: '2020' }],
+    },
   ],
   timeRange: { start: '2020', end: '2024' },
   obsCount: 100,
   lastUpdated: '2026-01-01T00:00:00Z',
+};
+
+/** The same dataset as Eurostat reports it when no annotations are attached. */
+const sparseMeta = {
+  code: 'nama_10_gdp',
+  label: 'GDP and main components',
+  dimensions: [
+    {
+      code: 'geo',
+      label: 'Geography',
+      valuesCount: 1,
+      sampleValues: [{ code: 'DE', label: 'Germany' }],
+    },
+  ],
+  timeRange: {},
 };
 
 const minimalDimResult = {
@@ -75,6 +96,7 @@ const minimalQueryResult = {
   truncated: false,
   timeRange: { start: '2024', end: '2024' },
   missingObsCount: 0,
+  appliedFilters: {},
 };
 
 // ---------------------------------------------------------------------------
@@ -427,6 +449,89 @@ describe('Edge cases', () => {
     });
   });
 
+  describe('eurostatGetDatasetInfo — sparse upstream metadata', () => {
+    it('handler returns the omitted fields as omitted, not as 0 / empty string', async () => {
+      vi.mocked(getEurostatDataService).mockReturnValue({
+        getDatasetInfo: vi.fn().mockResolvedValue(sparseMeta),
+      } as never);
+      const ctx = createMockContext({ errors: eurostatGetDatasetInfo.errors });
+      const input = eurostatGetDatasetInfo.input.parse({ dataset_code: 'nama_10_gdp' });
+      const result = await eurostatGetDatasetInfo.handler(input, ctx);
+      expect(result.obsCount).toBeUndefined();
+      expect(result.lastUpdated).toBeUndefined();
+      expect(result.timeRange.start).toBeUndefined();
+    });
+
+    it('format marks each absent field as unreported on the content[] surface', () => {
+      const blocks = eurostatGetDatasetInfo.format!(sparseMeta);
+      const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+      expect(text).toContain('**Observations:** not reported by Eurostat');
+      expect(text).toContain('**Period:** not reported by Eurostat');
+      expect(text).toContain('**Last updated:** not reported by Eurostat');
+      expect(text).not.toContain('**Observations:** 0');
+    });
+
+    it('format still renders reported values', () => {
+      const blocks = eurostatGetDatasetInfo.format!(minimalMeta);
+      const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+      expect(text).toContain('**Observations:** 100');
+      expect(text).toContain('**Period:** 2020 – 2024');
+      expect(text).toContain('**Last updated:** 2026-01-01T00:00:00Z');
+      expect(text).not.toContain('not reported by Eurostat');
+    });
+
+    it('format reports the time dimension count it was given', () => {
+      const blocks = eurostatGetDatasetInfo.format!(minimalMeta);
+      const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+      expect(text).toContain('(`time`) — 5 values');
+    });
+  });
+
+  describe('eurostatGetDimensionValues — geo_level with a non-geo dimension', () => {
+    it('surfaces the rejection instead of returning a silently unfiltered result', async () => {
+      vi.mocked(getEurostatDataService).mockReturnValue({
+        getDimensionValues: vi.fn().mockRejectedValue(
+          Object.assign(new Error('geo_level does not apply'), {
+            data: { reason: 'conflicting_params' },
+          }),
+        ),
+      } as never);
+      const ctx = createMockContext({ errors: eurostatGetDimensionValues.errors });
+      // Passes Zod (the enum is valid); the cross-field rejection lives below the schema.
+      const input = eurostatGetDimensionValues.input.parse({
+        dataset_code: 'nama_10_gdp',
+        dimension: 'unit',
+        geo_level: 'nuts3',
+      });
+      // The reason alone would also match a bare rethrow of the mocked error; the recovery
+      // hint naming the offending dimension is what the tool's own catch branch contributes.
+      await expect(eurostatGetDimensionValues.handler(input, ctx)).rejects.toMatchObject({
+        data: {
+          reason: 'conflicting_params',
+          recovery: { hint: expect.stringContaining('"unit"') },
+        },
+      });
+    });
+  });
+
+  describe('eurostatQueryDataset — empty filter array', () => {
+    it('does not report an empty array as an applied filter', async () => {
+      vi.mocked(getEurostatDataService).mockReturnValue({
+        queryDataset: vi
+          .fn()
+          .mockResolvedValue({ ...minimalQueryResult, appliedFilters: { unit: ['CP_MEUR'] } }),
+      } as never);
+      const ctx = createMockContext({ errors: eurostatQueryDataset.errors });
+      const input = eurostatQueryDataset.input.parse({
+        dataset_code: 'nama_10_gdp',
+        filters: { unit: ['CP_MEUR'], geo: [] },
+      });
+      await eurostatQueryDataset.handler(input, ctx);
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.appliedFilters?.filters).toEqual({ unit: ['CP_MEUR'] });
+    });
+  });
+
   describe('eurostatGetDimensionValues — empty values list', () => {
     it('formats empty values list gracefully', () => {
       const emptyResult = {
@@ -460,6 +565,7 @@ describe('Edge cases', () => {
           obsCount: 5100,
           timeRange: { start: '2024', end: '2024' },
           missingObsCount: 0,
+          appliedFilters: {},
         }),
       } as never);
       const ctx = createMockContext({ errors: eurostatQueryDataset.errors });
@@ -585,7 +691,7 @@ describe('Edge cases', () => {
       const ctx = createMockContext({ errors: eurostatGetDatasetInfo.errors });
       const input = eurostatGetDatasetInfo.input.parse({ dataset_code: 'huge_dataset' });
       await expect(eurostatGetDatasetInfo.handler(input, ctx)).rejects.toMatchObject({
-        data: { reason: 'async_response' },
+        data: { reason: 'async_response', retryable: false },
       });
     });
   });

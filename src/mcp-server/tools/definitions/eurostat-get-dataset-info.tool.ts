@@ -35,7 +35,9 @@ export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
             label: z.string().describe('Human-readable dimension name (e.g., "Unit of measure").'),
             valuesCount: z
               .number()
-              .describe('Number of distinct values in this dimension for the most recent period.'),
+              .describe(
+                'Number of distinct values in this dimension. For "time" this is the dataset\'s full period count; every other dimension is counted from the most recent period.',
+              ),
             sampleValues: z
               .array(
                 z
@@ -54,14 +56,34 @@ export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
       .describe('All dimensions of the dataset with their valid codes and labels.'),
     timeRange: z
       .object({
-        start: z.string().describe('Earliest available period (e.g., "1975").'),
-        end: z.string().describe('Most recent available period (e.g., "2024").'),
+        start: z
+          .string()
+          .optional()
+          .describe(
+            'Earliest available period (e.g., "1975"). Omitted when Eurostat does not report it.',
+          ),
+        end: z
+          .string()
+          .optional()
+          .describe(
+            'Most recent available period (e.g., "2024"). Omitted when Eurostat does not report it.',
+          ),
       })
-      .describe('Overall data coverage period for this dataset.'),
+      .describe(
+        'Overall data coverage period for this dataset. Each bound is omitted when Eurostat does not report it — an omitted bound is unknown, not empty.',
+      ),
     obsCount: z
       .number()
-      .describe('Total number of observations in the full dataset (all periods).'),
-    lastUpdated: z.string().describe('ISO 8601 timestamp of the most recent data update.'),
+      .optional()
+      .describe(
+        'Total number of observations in the full dataset (all periods). Omitted when Eurostat does not report it — an omitted count is unknown, not zero.',
+      ),
+    lastUpdated: z
+      .string()
+      .optional()
+      .describe(
+        'ISO 8601 timestamp of the most recent data update. Omitted when Eurostat does not report it.',
+      ),
     metadataUrl: z
       .string()
       .optional()
@@ -81,9 +103,9 @@ export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
       reason: 'async_response',
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'Eurostat returned an async response (query too large for the API).',
-      retryable: true,
+      retryable: false,
       recovery:
-        'This is unexpected for a metadata call; retry in a few seconds. If it persists, the dataset may be unusually large.',
+        'The same call cannot succeed — this tool has no filters to narrow. Use eurostat_search_datasets or eurostat_browse_themes for catalogue-level coverage, or eurostat_get_dimension_values for one dimension at a time.',
     },
   ],
 
@@ -104,7 +126,7 @@ export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
       if (reason === 'async_response') {
         throw ctx.fail('async_response', (err as Error).message, {
           recovery: {
-            hint: 'This is unexpected for a metadata call; retry in a few seconds. If it persists, the dataset may be unusually large.',
+            hint: `Eurostat returned an oversized-response warning for "${input.dataset_code}", and this call exposes no filters to narrow — the same request will fail the same way. Use eurostat_search_datasets or eurostat_browse_themes for catalogue-level coverage (period range, observation count), or eurostat_get_dimension_values to inspect one dimension at a time.`,
           },
         });
       }
@@ -119,12 +141,16 @@ export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
   },
 
   format: (result) => {
+    // Absent annotation-derived values are named as unreported rather than rendered as a
+    // zero or a blank, so content[] carries the same uncertainty structuredContent does.
+    const UNREPORTED = 'not reported by Eurostat';
+    const { start, end } = result.timeRange;
     const lines: string[] = [
       `# ${result.label}`,
       `**Code:** ${result.code}`,
-      `**Period:** ${result.timeRange.start} – ${result.timeRange.end}`,
-      `**Observations:** ${result.obsCount.toLocaleString()}`,
-      `**Last updated:** ${result.lastUpdated}`,
+      `**Period:** ${start || end ? `${start ?? UNREPORTED} – ${end ?? UNREPORTED}` : UNREPORTED}`,
+      `**Observations:** ${result.obsCount?.toLocaleString() ?? UNREPORTED}`,
+      `**Last updated:** ${result.lastUpdated ?? UNREPORTED}`,
     ];
     if (result.metadataUrl) lines.push(`**Metadata:** ${result.metadataUrl}`);
     lines.push(`\n## Dimensions (${result.dimensions.length})`);

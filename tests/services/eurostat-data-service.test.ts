@@ -317,7 +317,7 @@ describe('EurostatDataService — extractMetadata', () => {
     expect(meta.metadataUrl).toBeUndefined();
   });
 
-  it('defaults obsCount to 0 when annotation is absent', () => {
+  it('omits obsCount, timeRange bounds, and lastUpdated when their annotations are absent', () => {
     const data: JsonStatResponse = {
       label: 'Dataset',
       id: ['geo'],
@@ -328,7 +328,94 @@ describe('EurostatDataService — extractMetadata', () => {
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const meta = (svc as any).extractMetadata(data, 'xyz');
+    // Previously defaulted to 0 / '' / '', which a caller could not tell apart from a real
+    // zero count or a known-empty period. Absent upstream metadata is now absent here too.
+    expect(meta.obsCount).toBeUndefined();
+    expect(meta.timeRange.start).toBeUndefined();
+    expect(meta.timeRange.end).toBeUndefined();
+    expect(meta.lastUpdated).toBeUndefined();
+    expect('obsCount' in meta).toBe(false);
+    expect('lastUpdated' in meta).toBe(false);
+  });
+
+  it('keeps a genuinely reported zero obsCount distinct from an absent one', () => {
+    const data: JsonStatResponse = {
+      label: 'Dataset',
+      id: ['geo'],
+      size: [1],
+      dimension: { geo: { label: 'Geo', category: { index: { DE: 0 }, label: {} } } },
+      extension: { annotation: [{ type: 'OBS_COUNT', title: '0' }] },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const meta = (svc as any).extractMetadata(data, 'xyz');
     expect(meta.obsCount).toBe(0);
+  });
+
+  it('omits obsCount when the annotation is present but unparseable', () => {
+    const data: JsonStatResponse = {
+      label: 'Dataset',
+      id: ['geo'],
+      size: [1],
+      dimension: { geo: { label: 'Geo', category: { index: { DE: 0 }, label: {} } } },
+      extension: { annotation: [{ type: 'OBS_COUNT', title: 'not-a-number' }] },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const meta = (svc as any).extractMetadata(data, 'xyz');
+    expect(meta.obsCount).toBeUndefined();
+  });
+
+  it('carries one period bound when only the other annotation is absent', () => {
+    const data: JsonStatResponse = {
+      label: 'Dataset',
+      id: ['geo'],
+      size: [1],
+      dimension: { geo: { label: 'Geo', category: { index: { DE: 0 }, label: {} } } },
+      extension: { annotation: [{ type: 'OBS_PERIOD_OVERALL_OLDEST', title: '1975' }] },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const meta = (svc as any).extractMetadata(data, 'xyz');
+    expect(meta.timeRange.start).toBe('1975');
+    expect(meta.timeRange.end).toBeUndefined();
+  });
+
+  it('counts time from the full-range slice instead of the one-period slice', () => {
+    // The lastTimePeriod=1 response every metadata call starts from: time truncated to one value.
+    const onePeriod: JsonStatResponse = {
+      label: 'Dataset',
+      id: ['geo', 'time'],
+      size: [2, 1],
+      dimension: {
+        geo: { label: 'Geo', category: { index: { EU27_2020: 0, DE: 1 }, label: {} } },
+        time: { label: 'Time', category: { index: { '2025': 0 }, label: { '2025': '2025' } } },
+      },
+    };
+    const fullRange: JsonStatResponse = {
+      label: 'Dataset',
+      id: ['geo', 'time'],
+      size: [1, 3],
+      dimension: {
+        geo: { label: 'Geo', category: { index: { EU27_2020: 0 }, label: {} } },
+        time: {
+          label: 'Time',
+          category: {
+            index: { '2023': 0, '2024': 1, '2025': 2 },
+            label: { '2023': '2023', '2024': '2024', '2025': '2025' },
+          },
+        },
+      },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const meta = (svc as any).extractMetadata(onePeriod, 'xyz', fullRange);
+    const time = meta.dimensions.find((d: { code: string }) => d.code === 'time');
+    expect(time.valuesCount).toBe(3);
+    expect(time.sampleValues.map((v: { code: string }) => v.code)).toEqual([
+      '2023',
+      '2024',
+      '2025',
+    ]);
+    // Every other dimension still comes from the one-period slice, which carries the full codelist.
+    const geo = meta.dimensions.find((d: { code: string }) => d.code === 'geo');
+    expect(geo.valuesCount).toBe(2);
   });
 
   it('samples at most 10 values per dimension', () => {
@@ -536,6 +623,15 @@ describe('EurostatDataService — getDimensionValues param building', () => {
     expect(bounded.get('geo')).toBe('EU27_2020');
   });
 
+  it('rejects geo_level paired with a non-geo dimension instead of ignoring it', async () => {
+    fetchMock.mockResolvedValue(okResponse(jsonStat({ unit: ['CP_MEUR'] })));
+    await expect(
+      svc().getDimensionValues('nama_10_gdp', 'unit', 'nuts3', createMockContext()),
+    ).rejects.toMatchObject({ data: { reason: 'conflicting_params' } });
+    // Rejected before any request — the parameter had no effect on the query it was sent with.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('surfaces async_response (non-retryable) when a dimension query matches too many rows', async () => {
     fetchMock.mockResolvedValue(
       okResponse({ warning: { status: 413, label: 'ASYNCHRONOUS_RESPONSE' } }),
@@ -545,6 +641,205 @@ describe('EurostatDataService — getDimensionValues param building', () => {
     ).rejects.toMatchObject({ data: { reason: 'async_response', retryable: false } });
     // retryable:false fails fast — no retry storm against an oversized query.
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getDatasetInfo — time coverage (fetch-stubbed, exercises the two-request path)
+// ---------------------------------------------------------------------------
+
+describe('EurostatDataService — getDatasetInfo time coverage', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const svc = () => new EurostatDataService(mockConfig, mockStorage);
+  const paramsOf = (callIndex: number): URLSearchParams =>
+    new URL(String(fetchMock.mock.calls[callIndex]?.[0])).searchParams;
+
+  it('reports the dataset-wide period count for time, not the one-period slice', async () => {
+    const onePeriod = jsonStat({
+      freq: ['A'],
+      geo: ['EU27_2020', 'DE'],
+      time: ['2025'],
+    });
+    const fullRange = jsonStat({
+      freq: ['A'],
+      geo: ['EU27_2020'],
+      time: ['2020', '2021', '2022', '2023', '2024', '2025'],
+    });
+    fetchMock.mockImplementation(async (input: string | URL) =>
+      okResponse(
+        new URL(String(input)).searchParams.get('lastTimePeriod') === '1' ? onePeriod : fullRange,
+      ),
+    );
+
+    const meta = await svc().getDatasetInfo('nama_10_gdp', createMockContext());
+
+    // What a caller reads: the real period count, not the 1 the metadata filter produced.
+    const time = meta.dimensions.find((d) => d.code === 'time');
+    expect(time?.valuesCount).toBe(6);
+    expect(time?.sampleValues[0]?.code).toBe('2020');
+    // Other dimensions still come from the cheap one-period slice.
+    expect(meta.dimensions.find((d) => d.code === 'geo')?.valuesCount).toBe(2);
+
+    // Exactly one extra round trip, bounded by pinning every other dimension.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const bounded = paramsOf(1);
+    expect(bounded.has('lastTimePeriod')).toBe(false);
+    expect(bounded.has('time')).toBe(false);
+    expect(bounded.get('freq')).toBe('A');
+    expect(bounded.get('geo')).toBe('EU27_2020');
+  });
+
+  it('makes no second request for a dataset with no time dimension', async () => {
+    fetchMock.mockResolvedValue(okResponse(jsonStat({ geo: ['DE', 'FR'] })));
+    const meta = await svc().getDatasetInfo('xyz', createMockContext());
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(meta.dimensions.map((d) => d.code)).toEqual(['geo']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// queryDataset — filter normalization (fetch-stubbed)
+// ---------------------------------------------------------------------------
+
+describe('EurostatDataService — queryDataset filter normalization', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** A response with one decodable observation, so queryDataset does not throw no_results. */
+  const oneObservation = () => ({
+    ...jsonStat({ geo: ['DE'], time: ['2024'] }),
+    value: { '0': 4_000_000 },
+  });
+  const svc = () => new EurostatDataService(mockConfig, mockStorage);
+  const paramsOf = (callIndex: number): URLSearchParams =>
+    new URL(String(fetchMock.mock.calls[callIndex]?.[0])).searchParams;
+
+  it('drops zero-length filter arrays from both the request and the applied set', async () => {
+    fetchMock.mockResolvedValue(okResponse(oneObservation()));
+    const res = await svc().queryDataset(
+      'nama_10_gdp',
+      { unit: ['CP_MEUR'], geo: [] },
+      undefined,
+      undefined,
+      undefined,
+      1,
+      'EN',
+      createMockContext(),
+    );
+    const p = paramsOf(0);
+    expect(p.getAll('unit')).toEqual(['CP_MEUR']);
+    expect(p.has('geo')).toBe(false);
+    // The caller is told what was sent, not what was asked for.
+    expect(res.appliedFilters).toEqual({ unit: ['CP_MEUR'] });
+  });
+
+  it('does not treat an empty geo array as conflicting with geo_level', async () => {
+    fetchMock.mockResolvedValue(okResponse(oneObservation()));
+    const res = await svc().queryDataset(
+      'nama_10_gdp',
+      { geo: [] },
+      'country',
+      undefined,
+      undefined,
+      1,
+      'EN',
+      createMockContext(),
+    );
+    // geo: [] places no restriction, so it cannot conflict with geo_level.
+    expect(paramsOf(0).get('geoLevel')).toBe('country');
+    expect(paramsOf(0).has('geo')).toBe(false);
+    expect(res.appliedFilters).toEqual({});
+  });
+});
+
+// ---------------------------------------------------------------------------
+// queryDataset — time coverage (fetch-stubbed)
+// ---------------------------------------------------------------------------
+
+describe('EurostatDataService — queryDataset time coverage', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const periodAnnotations = {
+    annotation: [
+      { type: 'OBS_PERIOD_OVERALL_OLDEST', title: '1975' },
+      { type: 'OBS_PERIOD_OVERALL_LATEST', title: '2025' },
+    ],
+  };
+  const query = () =>
+    new EurostatDataService(mockConfig, mockStorage).queryDataset(
+      'xyz',
+      {},
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'EN',
+      createMockContext(),
+    );
+
+  it('omits both bounds when neither the observations nor the annotations report a period', async () => {
+    // No time dimension to derive a period from and no dataset-wide annotations to fall back
+    // to. Both bounds previously became '', indistinguishable from a known-empty period.
+    fetchMock.mockResolvedValue(okResponse({ ...jsonStat({ geo: ['DE'] }), value: { '0': 42 } }));
+    const res = await query();
+    expect(res.timeRange).toEqual({});
+  });
+
+  it('carries one bound when only the other annotation is present', async () => {
+    fetchMock.mockResolvedValue(
+      okResponse({
+        ...jsonStat({ geo: ['DE'] }),
+        value: { '0': 42 },
+        extension: { annotation: [{ type: 'OBS_PERIOD_OVERALL_LATEST', title: '2025' }] },
+      }),
+    );
+    const res = await query();
+    expect(res.timeRange).toEqual({ end: '2025' });
+  });
+
+  it('falls back to the dataset-wide annotations when the result carries no time dimension', async () => {
+    fetchMock.mockResolvedValue(
+      okResponse({
+        ...jsonStat({ geo: ['DE'] }),
+        value: { '0': 42 },
+        extension: periodAnnotations,
+      }),
+    );
+    const res = await query();
+    expect(res.timeRange).toEqual({ start: '1975', end: '2025' });
+  });
+
+  it('reports the returned observations period rather than the dataset-wide annotations', async () => {
+    fetchMock.mockResolvedValue(
+      okResponse({
+        ...jsonStat({ geo: ['DE'], time: ['2023', '2024'] }),
+        value: { '0': 1, '1': 2 },
+        extension: periodAnnotations,
+      }),
+    );
+    const res = await query();
+    expect(res.timeRange).toEqual({ start: '2023', end: '2024' });
   });
 });
 
