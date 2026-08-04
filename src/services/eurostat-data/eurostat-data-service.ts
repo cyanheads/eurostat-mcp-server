@@ -5,6 +5,7 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
+import type { ColumnSchema } from '@cyanheads/mcp-ts-core/canvas';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import {
   McpError,
@@ -22,8 +23,12 @@ import {
   type GeoLevel,
   type JsonStatResponse,
   OBS_CAP,
+  OBS_FLAG_COLUMN,
+  OBS_FLAG_LABEL_COLUMN,
+  OBS_VALUE_COLUMN,
   type Observation,
-  type QueryResult,
+  type ObservationRow,
+  type QueryExecution,
 } from './types.js';
 
 // Context satisfies the runtime contract of RequestContext but lacks the index signature
@@ -215,16 +220,22 @@ export class EurostatDataService {
   }
 
   /**
-   * Decode a JSON-stat 2.0 response into labeled observations using stride-based indexing.
+   * Walk a JSON-stat 2.0 response's populated cells, yielding one labeled
+   * observation at a time via stride-based indexing.
    *
-   * Stops once `limit` observations have been built, in ascending linear-index order — an
-   * order the decoder sets itself rather than reading from the upstream key order, so the
-   * rows returned for a given response are the same every time. Bounding here keeps an
-   * oversized match from ever materializing as observation objects; the counts that
-   * describe the whole match come from `scanCells`.
+   * Cells come out in ascending linear-index order — an order this walk sets
+   * itself rather than reading from the upstream key order, so a given response
+   * always yields the same rows in the same sequence. Being a generator, it
+   * allocates one observation per pull and none in advance, which is what lets
+   * the same walk serve both a capped decode and an uncapped dataframe spill.
+   *
+   * This is the only place cell membership is decided: a cell is an observation
+   * when its linear index appears in `value` or in `status`. `scanCells` counts
+   * that same predicate from the other direction (over the key maps) so the
+   * totals it reports describe exactly this set.
    */
-  private decodeObservations(data: JsonStatResponse, limit: number): Observation[] {
-    if (!data.id || !data.size || !data.dimension) return [];
+  private *iterateObservations(data: JsonStatResponse): Generator<Observation> {
+    if (!data.id || !data.size || !data.dimension) return;
 
     const dims = data.id;
     const sizes = data.size;
@@ -246,10 +257,9 @@ export class EurostatDataService {
         }));
     });
 
-    const observations: Observation[] = [];
     const totalCells = sizes.reduce((a, b) => a * b, 1);
 
-    for (let linearIdx = 0; linearIdx < totalCells && observations.length < limit; linearIdx++) {
+    for (let linearIdx = 0; linearIdx < totalCells; linearIdx++) {
       const keyStr = String(linearIdx);
       if (!(keyStr in value) && !(keyStr in status)) continue;
 
@@ -277,9 +287,23 @@ export class EurostatDataService {
           label: statusLabels[statusCode] ?? statusCode,
         };
       }
-      observations.push(obs);
+      yield obs;
     }
+  }
 
+  /**
+   * Take the first `limit` observations off {@link iterateObservations}.
+   *
+   * Bounding here keeps an oversized match from ever materializing as observation
+   * objects — the walk stops the moment the cap is reached. The counts that
+   * describe the whole match come from `scanCells`.
+   */
+  private decodeObservations(data: JsonStatResponse, limit: number): Observation[] {
+    const observations: Observation[] = [];
+    for (const obs of this.iterateObservations(data)) {
+      observations.push(obs);
+      if (observations.length >= limit) break;
+    }
     return observations;
   }
 
@@ -473,7 +497,11 @@ export class EurostatDataService {
 
   /**
    * Query dataset observations with dimension filters.
-   * Returns decoded observations.
+   *
+   * Returns the capped observation list alongside `rows()`, a lazy generator
+   * over the whole match. Both read the same response body — already in memory
+   * before decoding starts — so reaching the rows past the cap costs no
+   * additional upstream request.
    */
   async queryDataset(
     datasetCode: string,
@@ -484,7 +512,7 @@ export class EurostatDataService {
     lastN: number | undefined,
     lang: string,
     ctx: Context,
-  ): Promise<QueryResult> {
+  ): Promise<QueryExecution> {
     // A zero-length filter array places no restriction on the request. Drop those entries once,
     // up front, so the conflict check, the request URL, the log line, and the applied filters
     // echoed back to the caller all describe the same query.
@@ -551,17 +579,77 @@ export class EurostatDataService {
       timeCodes.at(-1) ?? this.extractAnnotation(data, 'OBS_PERIOD_OVERALL_LATEST', 'title');
     const timeRange = { ...(start && { start }), ...(end && { end }) };
 
+    const dimensionsUsed = data.id ?? [];
+
     return {
       datasetCode,
       datasetLabel: data.label ?? datasetCode,
-      dimensionsUsed: data.id ?? [],
+      dimensionsUsed,
       observations,
       obsCount,
       timeRange,
       missingObsCount,
       appliedFilters,
+      rows: () => this.iterateRows(data, dimensionsUsed),
     };
   }
+
+  /** {@link iterateObservations}, flattened to dataframe rows one at a time. */
+  private *iterateRows(
+    data: JsonStatResponse,
+    dimensionsUsed: string[],
+  ): Generator<ObservationRow> {
+    for (const obs of this.iterateObservations(data)) {
+      yield toObservationRow(obs, dimensionsUsed);
+    }
+  }
+}
+
+/**
+ * Flatten one observation into a dataframe row.
+ *
+ * The inverse of the nested shape `Observation` carries: each dimension
+ * contributes `<dim>` (code) and `<dim>_label`, and the status flag contributes
+ * `obs_flag` / `obs_flag_label`. A dimension the observation does not carry
+ * yields `null` in both of its columns rather than an absent key, so every row
+ * has the same column set the table is declared with.
+ */
+export function toObservationRow(obs: Observation, dimensionsUsed: string[]): ObservationRow {
+  const row: ObservationRow = {};
+  for (const dim of dimensionsUsed) {
+    const cell = obs.dimensions[dim];
+    row[dim] = cell?.code ?? null;
+    row[`${dim}_label`] = cell?.label ?? null;
+  }
+  row[OBS_VALUE_COLUMN] = obs.value;
+  row[OBS_FLAG_COLUMN] = obs.status?.code ?? null;
+  row[OBS_FLAG_LABEL_COLUMN] = obs.status?.label ?? null;
+  return row;
+}
+
+/**
+ * Explicit canvas column schema for {@link toObservationRow}'s output.
+ *
+ * Declared rather than sniffed. Inference reads only the leading rows, which is
+ * enough to get the measure column wrong twice over: an all-integer prefix types
+ * it `BIGINT`, which the canvas then serializes as a string, and an all-missing
+ * prefix types it from nulls alone. Every column is nullable — a dimension can
+ * be absent from a cell, and a status flag usually is.
+ *
+ * Names and order mirror {@link toObservationRow}. Nothing in the type system
+ * ties a row's keys to a schema's names, so the service tests assert the two
+ * against each other instead.
+ */
+export function observationRowSchema(dimensionsUsed: string[]): ColumnSchema[] {
+  return [
+    ...dimensionsUsed.flatMap((dim): ColumnSchema[] => [
+      { name: dim, type: 'VARCHAR', nullable: true },
+      { name: `${dim}_label`, type: 'VARCHAR', nullable: true },
+    ]),
+    { name: OBS_VALUE_COLUMN, type: 'DOUBLE', nullable: true },
+    { name: OBS_FLAG_COLUMN, type: 'VARCHAR', nullable: true },
+    { name: OBS_FLAG_LABEL_COLUMN, type: 'VARCHAR', nullable: true },
+  ];
 }
 
 // --- Init/accessor pattern ---

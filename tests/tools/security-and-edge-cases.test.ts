@@ -5,22 +5,33 @@
  * @module tests/tools/security-and-edge-cases.test
  */
 
+import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eurostatDatasetResource } from '@/mcp-server/resources/definitions/eurostat-dataset.resource.js';
 import { eurostatBrowseThemes } from '@/mcp-server/tools/definitions/eurostat-browse-themes.tool.js';
+import { eurostatDataframeDescribe } from '@/mcp-server/tools/definitions/eurostat-dataframe-describe.tool.js';
+import { eurostatDataframeQuery } from '@/mcp-server/tools/definitions/eurostat-dataframe-query.tool.js';
 import { eurostatGetDatasetInfo } from '@/mcp-server/tools/definitions/eurostat-get-dataset-info.tool.js';
 import { eurostatGetDimensionValues } from '@/mcp-server/tools/definitions/eurostat-get-dimension-values.tool.js';
 import { eurostatQueryDataset } from '@/mcp-server/tools/definitions/eurostat-query-dataset.tool.js';
 import { eurostatSearchDatasets } from '@/mcp-server/tools/definitions/eurostat-search-datasets.tool.js';
+import {
+  observationRowSchema,
+  toObservationRow,
+} from '@/services/eurostat-data/eurostat-data-service.js';
+import { withRealCanvas } from '../helpers/real-canvas.js';
 
 // Mock catalogue service
 vi.mock('@/services/eurostat-catalogue/eurostat-catalogue-service.js', () => ({
   getEurostatCatalogueService: vi.fn(),
 }));
 
-// Mock data service
-vi.mock('@/services/eurostat-data/eurostat-data-service.js', () => ({
+// Mock data service. Only the accessor is replaced — the query tool also imports the real
+// row builder and column schema from this module, and a bare factory would blank them out.
+vi.mock('@/services/eurostat-data/eurostat-data-service.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/eurostat-data/eurostat-data-service.js')>()),
   getEurostatDataService: vi.fn(),
 }));
 
@@ -880,5 +891,216 @@ describe('Edge cases', () => {
         ctx,
       );
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SQL input surface — eurostat_dataframe_query takes caller-supplied SQL, so the
+// read-only gate is exercised against a real DuckDB canvas. A fake canvas would
+// have to re-implement the gate, which would test the fake instead of the server.
+// ---------------------------------------------------------------------------
+
+describe('eurostat_dataframe_query — SQL injection resistance', () => {
+  let canvas: DataCanvas;
+  let teardown: () => Promise<void>;
+  let canvasId: string;
+  const TABLE = 'df_secure01';
+  const DIMS = ['geo', 'time'];
+
+  const ctx = () =>
+    createMockContext({ errors: eurostatDataframeQuery.errors, tenantId: 'default' });
+
+  const run = (sql: string) =>
+    eurostatDataframeQuery.handler(
+      eurostatDataframeQuery.input.parse({ canvas_id: canvasId, sql }),
+      ctx(),
+    );
+
+  beforeAll(async () => {
+    ({ canvas, teardown } = withRealCanvas());
+    const instance = await canvas.acquire(undefined, ctx());
+    canvasId = instance.canvasId;
+    await instance.registerTable(
+      TABLE,
+      [
+        toObservationRow(
+          {
+            dimensions: {
+              geo: { code: 'DE', label: 'Germany' },
+              time: { code: '2023', label: '2023' },
+            },
+            value: 1,
+          },
+          DIMS,
+        ),
+      ],
+      { schema: observationRowSchema(DIMS) },
+    );
+  });
+
+  afterAll(async () => {
+    await teardown();
+  });
+
+  /** The caller sees a ValidationError naming the reason — not a silent empty result. */
+  const expectRejected = async (sql: string) => {
+    const err = (await run(sql).catch((e: unknown) => e)) as McpError;
+    expect(err).toBeInstanceOf(McpError);
+    expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(typeof (err.data as { reason?: unknown } | undefined)?.reason).toBe('string');
+    return err;
+  };
+
+  describe('statement chaining', () => {
+    for (const sql of [
+      `SELECT * FROM ${TABLE}; DROP TABLE ${TABLE}`,
+      `SELECT * FROM ${TABLE}; DELETE FROM ${TABLE}`,
+      `SELECT 1; SELECT 2`,
+      `SELECT * FROM ${TABLE};UPDATE ${TABLE} SET obs_value = 0`,
+    ]) {
+      it(`rejects: ${sql.slice(0, 52)}`, async () => {
+        const err = await expectRejected(sql);
+        expect(err.data).toMatchObject({ reason: 'multi_statement' });
+      });
+    }
+  });
+
+  describe('comment tricks', () => {
+    it('rejects a trailing statement hidden behind a line comment', async () => {
+      const err = await expectRejected(`SELECT * FROM ${TABLE} -- harmless\n; DROP TABLE ${TABLE}`);
+      expect(err.data).toMatchObject({ reason: 'multi_statement' });
+    });
+
+    it('rejects a non-SELECT verb wrapped in a block comment prefix', async () => {
+      const err = await expectRejected(`/* SELECT */ DELETE FROM ${TABLE}`);
+      expect(err.data).toMatchObject({ reason: 'non_select_statement' });
+    });
+
+    it('leaves a comment inside an otherwise valid SELECT alone', async () => {
+      // The gate rejects statements, not comments — a legitimate annotated query still runs.
+      const result = await run(`SELECT geo /* the country code */ FROM ${TABLE} -- one row`);
+      expect(result.rows).toEqual([{ geo: 'DE' }]);
+    });
+  });
+
+  describe('non-SELECT verbs', () => {
+    for (const [label, sql] of [
+      ['DELETE', `DELETE FROM ${TABLE}`],
+      ['UPDATE', `UPDATE ${TABLE} SET obs_value = 0`],
+      ['INSERT', `INSERT INTO ${TABLE} (geo) VALUES ('XX')`],
+      ['DROP', `DROP TABLE ${TABLE}`],
+      ['CREATE', `CREATE TABLE evil AS SELECT * FROM ${TABLE}`],
+      ['ALTER', `ALTER TABLE ${TABLE} RENAME TO gone`],
+      ['ATTACH', `ATTACH '/tmp/evil.db' AS evil`],
+      ['PRAGMA', 'PRAGMA database_list'],
+      ['SET', "SET memory_limit = '16GB'"],
+      ['INSTALL', 'INSTALL httpfs'],
+      ['COPY', `COPY ${TABLE} TO '/tmp/exfil.csv'`],
+    ] as const) {
+      it(`rejects ${label}`, async () => {
+        await expectRejected(sql);
+      });
+    }
+  });
+
+  describe('reaching outside the registered tables', () => {
+    for (const [label, sql] of [
+      ['read_csv', "SELECT * FROM read_csv('/etc/passwd')"],
+      ['read_csv_auto', "SELECT * FROM read_csv_auto('/etc/passwd')"],
+      ['read_json', "SELECT * FROM read_json('/etc/passwd')"],
+      ['read_parquet', "SELECT * FROM read_parquet('/etc/shadow')"],
+      ['read_text', "SELECT * FROM read_text('/etc/passwd')"],
+      ['read_blob', "SELECT * FROM read_blob('/etc/passwd')"],
+      ['glob', "SELECT * FROM glob('/**')"],
+      ['sqlite_scan', "SELECT * FROM sqlite_scan('/tmp/x.db', 't')"],
+      ['postgres_scan', "SELECT * FROM postgres_scan('host=x', 'public', 't')"],
+      ['http url', "SELECT * FROM 'https://example.com/data.parquet'"],
+      ['pragma call', 'SELECT * FROM pragma_database_list()'],
+    ] as const) {
+      it(`rejects ${label}`, async () => {
+        await expectRejected(sql);
+      });
+    }
+
+    it('rejects a subquery that smuggles a file read past a legitimate table', async () => {
+      await expectRejected(`SELECT g.geo FROM ${TABLE} g JOIN read_csv('/etc/passwd') p ON true`);
+    });
+
+    it('rejects a UNION arm that reads a file', async () => {
+      await expectRejected(
+        `SELECT geo FROM ${TABLE} UNION ALL SELECT * FROM read_text('/etc/hostname')`,
+      );
+    });
+
+    it('rejects a CTE that reads a file', async () => {
+      await expectRejected(
+        `WITH leak AS (SELECT * FROM read_csv('/etc/passwd')) SELECT * FROM leak`,
+      );
+    });
+  });
+
+  describe('after every rejected attempt', () => {
+    it('the staged table is intact and still holds its original row', async () => {
+      const result = await run(`SELECT geo, obs_value FROM ${TABLE}`);
+      expect(result.rows).toEqual([{ geo: 'DE', obs_value: 1 }]);
+    });
+
+    it('no extra table was created on the canvas', async () => {
+      const instance = await canvas.acquire(canvasId, ctx());
+      expect((await instance.describe()).map((t) => t.name)).toEqual([TABLE]);
+    });
+  });
+
+  describe('oversized and malformed SQL', () => {
+    it('rejects an empty statement at the schema boundary', () => {
+      expect(() => eurostatDataframeQuery.input.parse({ canvas_id: canvasId, sql: '' })).toThrow();
+    });
+
+    it('rejects an empty canvas_id at the schema boundary', () => {
+      expect(() =>
+        eurostatDataframeQuery.input.parse({ canvas_id: '', sql: 'SELECT 1' }),
+      ).toThrow();
+    });
+
+    it('rejects a 10,000-character predicate without crashing', async () => {
+      await expectRejected(`SELECT * FROM ${TABLE} WHERE geo = '${'A'.repeat(10_000)}`);
+    });
+
+    it('does not leak the canvas scratch path into the error message', async () => {
+      const err = await expectRejected(`SELECT no_such_column FROM ${TABLE}`);
+      expect(err.message).not.toContain('/var/');
+      expect(err.message).not.toContain('canvas-test');
+    });
+  });
+
+  describe('canvas isolation', () => {
+    it('refuses a canvas belonging to another tenant the same way as an unknown one', async () => {
+      const other = createMockContext({
+        errors: eurostatDataframeQuery.errors,
+        tenantId: 'someone-else',
+      });
+      const input = eurostatDataframeQuery.input.parse({
+        canvas_id: canvasId,
+        sql: `SELECT * FROM ${TABLE}`,
+      });
+      // Uniform with an unknown id — existence must not leak across tenants.
+      await expect(eurostatDataframeQuery.handler(input, other)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.NotFound,
+      });
+    });
+  });
+});
+
+describe('eurostat_dataframe_describe — input validation', () => {
+  it('rejects an empty canvas_id', () => {
+    expect(() => eurostatDataframeDescribe.input.parse({ canvas_id: '' })).toThrow();
+  });
+
+  it('accepts an injection-shaped canvas_id at the schema and rejects it at the canvas', () => {
+    // The id is opaque, so the schema only checks it is non-empty; the lookup is what
+    // refuses it. Nothing interpolates it into SQL.
+    expect(() =>
+      eurostatDataframeDescribe.input.parse({ canvas_id: "'; DROP TABLE t; --" }),
+    ).not.toThrow();
   });
 });

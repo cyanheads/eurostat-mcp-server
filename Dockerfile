@@ -47,7 +47,10 @@ LABEL org.opencontainers.image.source="https://github.com/cyanheads/eurostat-mcp
 COPY package.json bun.lock ./
 
 # Install only production dependencies, ignoring any lifecycle scripts (like 'prepare')
-# that are not needed in the final production image.
+# that are not needed in the final production image. This installs every direct
+# runtime dependency, including the @duckdb/node-api binding that backs DataCanvas —
+# the canvas is gated at runtime by CANVAS_PROVIDER_TYPE, not at build time, so the
+# image always carries the binding and a deployment turns the feature on with an env var.
 RUN --mount=type=cache,target=/root/.bun/install/cache \
     bun install --production --frozen-lockfile --ignore-scripts
 
@@ -75,8 +78,16 @@ COPY --from=build /usr/src/app/dist ./dist
 # The 'oven/bun' image already provides a non-root user named 'bun'.
 # We will use this existing user for enhanced security.
 
-# Create and set permissions for the log directory, assigning ownership to the 'bun' user.
-RUN mkdir -p /var/log/eurostat-mcp-server && chown -R bun:bun /var/log/eurostat-mcp-server
+# Create and set permissions for the log and canvas directories, assigning ownership
+# to the 'bun' user. DuckDB writes spill files under CANVAS_TEMP_PATH and the framework
+# sandboxes path exports to CANVAS_EXPORT_PATH. The export root is the one that breaks
+# by default: it resolves under the working directory /usr/src/app, which this non-root
+# user does not own. Both are pointed at owned directories below so neither depends on
+# the image's writable-by-accident paths.
+RUN mkdir -p /var/log/eurostat-mcp-server \
+             /var/lib/eurostat-mcp-server/canvas-tmp \
+             /var/lib/eurostat-mcp-server/canvas-exports \
+    && chown -R bun:bun /var/log/eurostat-mcp-server /var/lib/eurostat-mcp-server
 
 # Switch to the non-root user
 USER bun
@@ -94,6 +105,8 @@ ENV MCP_SESSION_MODE="stateless"
 ENV MCP_LOG_LEVEL="info"
 ENV LOGS_DIR="/var/log/eurostat-mcp-server"
 ENV MCP_FORCE_CONSOLE_LOGGING="true"
+ENV CANVAS_TEMP_PATH="/var/lib/eurostat-mcp-server/canvas-tmp"
+ENV CANVAS_EXPORT_PATH="/var/lib/eurostat-mcp-server/canvas-exports"
 
 # Expose the port the server listens on
 EXPOSE ${MCP_HTTP_PORT}

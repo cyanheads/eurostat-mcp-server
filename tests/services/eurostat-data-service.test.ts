@@ -11,8 +11,14 @@ import {
   EurostatDataService,
   getEurostatDataService,
   initEurostatDataService,
+  observationRowSchema,
+  toObservationRow,
 } from '@/services/eurostat-data/eurostat-data-service.js';
-import { type JsonStatResponse, OBS_CAP } from '@/services/eurostat-data/types.js';
+import {
+  type JsonStatResponse,
+  OBS_CAP,
+  type ObservationRow,
+} from '@/services/eurostat-data/types.js';
 
 /** Minimal mock AppConfig and StorageService — service ignores both */
 const mockConfig = {} as never;
@@ -1087,6 +1093,173 @@ describe('EurostatDataService — queryDataset row cap (#27)', () => {
     const res = await query();
     expect(res.observations).toHaveLength(2);
     expect(res.obsCount).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// queryDataset — the dataframe row source (#8)
+// ---------------------------------------------------------------------------
+
+describe('EurostatDataService — dataframe row source (#8)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  const PERIODS = Array.from({ length: 60 }, (_, i) => String(2000 + i));
+  const GEOS = Array.from({ length: 100 }, (_, i) => `G${i}`);
+
+  /** 6,000 populated cells — 1,000 past OBS_CAP — with one flagged and one missing cell. */
+  const oversized = () => {
+    const value: Record<string, number | null> = {};
+    for (let i = 0; i < PERIODS.length * GEOS.length; i++) value[String(i)] = i;
+    value['10'] = null;
+    return {
+      ...jsonStat({ time: PERIODS, geo: GEOS }),
+      value,
+      status: { '3': 'p' },
+      extension: { status: { label: { p: 'provisional' } } },
+    };
+  };
+
+  const query = () =>
+    new EurostatDataService(mockConfig, mockStorage).queryDataset(
+      'nama_10_gdp',
+      {},
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'EN',
+      createMockContext(),
+    );
+
+  it('flattens each dimension into a code column and a label column', async () => {
+    fetchMock.mockResolvedValue(
+      okResponse({
+        ...jsonStat({ geo: ['DE'], time: ['2023'] }),
+        value: { '0': 4_000_000 },
+        status: { '0': 'p' },
+        extension: { status: { label: { p: 'provisional' } } },
+      }),
+    );
+    const res = await query();
+    const rows = [...res.rows()];
+    expect(rows).toEqual([
+      {
+        geo: 'DE',
+        geo_label: 'DE',
+        time: '2023',
+        time_label: '2023',
+        obs_value: 4_000_000,
+        obs_flag: 'p',
+        obs_flag_label: 'provisional',
+      },
+    ]);
+    // Every column is a scalar — a nested {code,label} object cannot be a dataframe column.
+    for (const cell of Object.values(rows[0] ?? {})) {
+      expect(typeof cell === 'object' && cell !== null).toBe(false);
+    }
+  });
+
+  it('carries a missing value and an absent flag as nulls, not as omitted keys', async () => {
+    fetchMock.mockResolvedValue(
+      okResponse({ ...jsonStat({ geo: ['IT'], time: ['2023'] }), value: { '0': null } }),
+    );
+    const [row] = [...(await query()).rows()];
+    expect(row).toMatchObject({ obs_value: null, obs_flag: null, obs_flag_label: null });
+    // Declared columns must be present on every row, or the canvas appender sees a ragged table.
+    expect(Object.keys(row ?? {})).toEqual(
+      observationRowSchema(['geo', 'time']).map((c) => c.name),
+    );
+  });
+
+  it('fills a dimension the observation does not carry with nulls, not a missing column', () => {
+    // Every row must present the full declared column set. A row short of a column makes the
+    // table ragged, and the value that lands in the gap is whatever the appender puts there.
+    const row = toObservationRow(
+      { dimensions: { geo: { code: 'DE', label: 'Germany' } }, value: 7 },
+      ['geo', 'time'],
+    );
+    expect(row).toEqual({
+      geo: 'DE',
+      geo_label: 'Germany',
+      time: null,
+      time_label: null,
+      obs_value: 7,
+      obs_flag: null,
+      obs_flag_label: null,
+    });
+  });
+
+  it('reaches every matched cell, including the ones past the inline cap', async () => {
+    fetchMock.mockResolvedValue(okResponse(oversized()));
+    const res = await query();
+    let count = 0;
+    let last: ObservationRow | undefined;
+    for (const row of res.rows()) {
+      count++;
+      last = row;
+    }
+    expect(res.observations).toHaveLength(OBS_CAP);
+    expect(count).toBe(res.obsCount);
+    expect(count).toBe(6000);
+    // The period the capped observation list never reaches.
+    expect(last?.time).toBe('2059');
+  });
+
+  it('yields rows the inline observations agree with, cell for cell', async () => {
+    // The preview and the staged table are the same walk, so the capped observation list is a
+    // prefix of the row source. A row source derived separately could drift from it silently.
+    fetchMock.mockResolvedValue(okResponse(oversized()));
+    const res = await query();
+    const iter = res.rows();
+    for (const obs of res.observations) {
+      const row = iter.next().value as ObservationRow;
+      expect(row).toEqual(toObservationRow(obs, res.dimensionsUsed));
+    }
+    // …and there is more past the prefix.
+    expect(iter.next().done).toBe(false);
+  });
+
+  it('decodes on demand rather than building the whole match up front', async () => {
+    /**
+     * Instrumentation, not a stub: the spy delegates to the real generator and only counts
+     * what it yields. A `rows()` that materialized its source — `[...this.iterate…]` — would
+     * drive the count to the full 6,000 before the caller pulled its first row, which is the
+     * million-object allocation the inline cap exists to avoid.
+     */
+    const proto = EurostatDataService.prototype as unknown as Record<string, unknown>;
+    const real = proto.iterateObservations as (data: JsonStatResponse) => Generator<unknown>;
+    let yielded = 0;
+    vi.spyOn(proto, 'iterateObservations' as never).mockImplementation(function* (
+      this: EurostatDataService,
+      data: JsonStatResponse,
+    ) {
+      for (const obs of real.call(this, data)) {
+        yielded++;
+        yield obs;
+      }
+    } as never);
+
+    fetchMock.mockResolvedValue(okResponse(oversized()));
+    const res = await query();
+
+    // The capped decode is itself demand-driven: it stops at the cap, not at cell 6,000.
+    expect(yielded).toBe(OBS_CAP);
+
+    const before = yielded;
+    const iter = res.rows();
+    iter.next();
+    iter.next();
+    iter.next();
+    expect(yielded - before).toBe(3);
+    iter.return(undefined);
   });
 });
 

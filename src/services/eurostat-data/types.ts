@@ -51,6 +51,22 @@ export interface Observation {
 }
 
 /**
+ * One observation flattened into a dataframe row.
+ *
+ * A dataframe column holds a scalar, so `Observation`'s nested `{code, label}`
+ * pair per dimension is split across two columns — `<dim>` for the code and
+ * `<dim>_label` for the label — and the status flag likewise. The measure
+ * columns carry the `obs_` prefix Eurostat's own SDMX-CSV output uses, which
+ * also keeps them clear of any dimension code.
+ */
+export type ObservationRow = Record<string, string | number | null>;
+
+/** Measure column names — the non-dimension columns of an {@link ObservationRow}. */
+export const OBS_VALUE_COLUMN = 'obs_value';
+export const OBS_FLAG_COLUMN = 'obs_flag';
+export const OBS_FLAG_LABEL_COLUMN = 'obs_flag_label';
+
+/**
  * Metadata about a dataset extracted from a JSON-stat response.
  *
  * Annotation-derived fields are absent when Eurostat does not report them, rather than
@@ -118,6 +134,23 @@ export interface QueryResult {
   /** Decoded observations, capped at `OBS_CAP` — the first cap rows in linear-index order. */
   observations: Observation[];
   timeRange: { start?: string; end?: string };
+}
+
+/**
+ * A query result plus a lazy row source over everything it matched.
+ *
+ * `observations` stops at `OBS_CAP`; `rows()` does not. Both read the same
+ * single walk of the response, so the capped list is always a prefix of the row
+ * source rather than a separately-derived set that can drift from it.
+ */
+export interface QueryExecution extends QueryResult {
+  /**
+   * Fresh generator over every matched cell, in the same order `observations`
+   * uses. Nothing is materialized until a consumer pulls, so staging a
+   * million-cell match costs one row object at a time rather than an array of
+   * them — the allocation `OBS_CAP` exists to avoid.
+   */
+  rows: () => Generator<ObservationRow>;
 }
 
 /**

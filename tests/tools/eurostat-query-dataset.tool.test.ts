@@ -3,15 +3,26 @@
  * @module tests/tools/eurostat-query-dataset.tool.test
  */
 
+import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eurostatQueryDataset } from '@/mcp-server/tools/definitions/eurostat-query-dataset.tool.js';
+import { setCanvas } from '@/services/canvas-accessor.js';
+import { withRealCanvas } from '../helpers/real-canvas.js';
 
-vi.mock('@/services/eurostat-data/eurostat-data-service.js', () => ({
+// Only the accessor is replaced — the tool also imports the real row builder and column
+// schema from this module, and a bare factory would blank them out.
+vi.mock('@/services/eurostat-data/eurostat-data-service.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/eurostat-data/eurostat-data-service.js')>()),
   getEurostatDataService: vi.fn(),
 }));
 
-import { getEurostatDataService } from '@/services/eurostat-data/eurostat-data-service.js';
+import {
+  EurostatDataService,
+  getEurostatDataService,
+  observationRowSchema,
+} from '@/services/eurostat-data/eurostat-data-service.js';
 
 const makeObs = (
   geo: string,
@@ -324,5 +335,272 @@ describe('eurostatQueryDataset', () => {
     expect(structured.observations).toHaveLength(300);
     expect(renderedRows).toBe(structured.observations.length);
     expect(text).toContain('geo=G299');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DataCanvas spillover (#8) — the same query run against a real service, with
+// and without a canvas. The service is real (fetch-stubbed) so the rows the
+// canvas receives come from the production decoder, not a test-built lookalike.
+// ---------------------------------------------------------------------------
+
+describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
+  let canvas: DataCanvas;
+  let teardown: () => Promise<void>;
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  const PERIODS = Array.from({ length: 60 }, (_, i) => String(2000 + i));
+  const GEOS = Array.from({ length: 100 }, (_, i) => `G${i}`);
+
+  /** A JSON-stat body with `cells` populated cells across a time × geo grid. */
+  function jsonStatBody(times: string[], geos: string[], cells: number): object {
+    const axis = (codes: string[]) => ({
+      label: 'dim',
+      category: {
+        index: Object.fromEntries(codes.map((c, i) => [c, i])),
+        label: Object.fromEntries(codes.map((c) => [c, `${c} label`])),
+      },
+    });
+    const value: Record<string, number> = {};
+    for (let i = 0; i < cells; i++) value[String(i)] = i;
+    return {
+      id: ['time', 'geo'],
+      size: [times.length, geos.length],
+      label: 'GDP and main components',
+      dimension: { time: axis(times), geo: axis(geos) },
+      value,
+    };
+  }
+
+  const okResponse = (body: object) =>
+    new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+
+  /** 6,000 cells — 1,000 past the inline cap. */
+  const oversized = () => jsonStatBody(PERIODS, GEOS, 6000);
+  /** 100 cells — comfortably inside the cap. */
+  const small = () => jsonStatBody(PERIODS.slice(0, 10), GEOS.slice(0, 10), 100);
+
+  const ctx = () => createMockContext({ errors: eurostatQueryDataset.errors, tenantId: 'default' });
+
+  const run = (input?: Record<string, unknown>) =>
+    eurostatQueryDataset.handler(
+      eurostatQueryDataset.input.parse({ dataset_code: 'nama_10_gdp', ...input }),
+      ctx(),
+    );
+
+  beforeAll(() => {
+    ({ canvas, teardown } = withRealCanvas());
+  });
+  afterAll(async () => {
+    await teardown();
+  });
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(getEurostatDataService).mockReturnValue(
+      new EurostatDataService({} as never, {} as never),
+    );
+    setCanvas(canvas);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    setCanvas(canvas);
+  });
+
+  describe('with a canvas', () => {
+    it('stages the whole match and names it in the response', async () => {
+      fetchMock.mockImplementation(async () => okResponse(oversized()));
+      const result = await run();
+
+      expect(result.truncated).toBe(true);
+      expect(result.observations).toHaveLength(5000);
+      expect(result.obsCount).toBe(6000);
+      // The rows past the inline cap are reachable, which is the whole point.
+      expect(result.stagedRowCount).toBe(6000);
+      expect(result.tableName).toMatch(/^df_[0-9a-f]{8}$/);
+      expect(result.canvasId).toBeTypeOf('string');
+    });
+
+    it('stages exactly what the inline rows show, in the same order', async () => {
+      fetchMock.mockImplementation(async () => okResponse(oversized()));
+      const result = await run();
+
+      const instance = await canvas.acquire(result.canvasId, ctx());
+      const staged = await instance.query(`SELECT * FROM ${result.tableName} LIMIT 3`);
+      const inline = result.observations.slice(0, 3).map((obs) => {
+        const dims = obs.dimensions as Record<string, { code: string; label: string }>;
+        return {
+          time: dims.time?.code,
+          time_label: dims.time?.label,
+          geo: dims.geo?.code,
+          geo_label: dims.geo?.label,
+          obs_value: obs.value,
+          obs_flag: null,
+          obs_flag_label: null,
+        };
+      });
+      expect(staged.rows).toEqual(inline);
+
+      // …and the table carries periods the capped inline list never reaches.
+      const beyond = await instance.query(
+        `SELECT DISTINCT time FROM ${result.tableName} WHERE time > '2049' ORDER BY time`,
+      );
+      expect(beyond.rowCount).toBeGreaterThan(0);
+    });
+
+    it('declares the flat column set rather than letting DuckDB guess it', async () => {
+      fetchMock.mockImplementation(async () => okResponse(oversized()));
+      const result = await run();
+      const instance = await canvas.acquire(result.canvasId, ctx());
+      const [table] = await instance.describe({ tableName: result.tableName });
+      expect(table?.columns.map((c) => c.name)).toEqual(
+        observationRowSchema(['time', 'geo']).map((c) => c.name),
+      );
+      // A sniffed schema over all-integer leading rows would type the measure as BIGINT,
+      // which the canvas then returns as a string.
+      expect(table?.columns.find((c) => c.name === 'obs_value')?.type).toBe('DOUBLE');
+    });
+
+    it('points the notice at the staged table instead of only at narrowing filters', async () => {
+      fetchMock.mockImplementation(async () => okResponse(oversized()));
+      const c = ctx();
+      const result = await eurostatQueryDataset.handler(
+        eurostatQueryDataset.input.parse({ dataset_code: 'nama_10_gdp' }),
+        c,
+      );
+      // Asserted before the substring check — `toContain(undefined ?? '')` passes on any string.
+      expect(result.tableName).toBeTypeOf('string');
+      const notice = getEnrichment(c).notice ?? '';
+      expect(notice).toContain(result.tableName);
+      expect(notice).toContain(result.canvasId);
+      expect(notice).toContain('eurostat_dataframe_query');
+    });
+
+    it('stages nothing when the result fits inline', async () => {
+      const acquire = vi.spyOn(canvas, 'acquire');
+      fetchMock.mockImplementation(async () => okResponse(small()));
+      const result = await run();
+
+      expect(result.truncated).toBe(false);
+      expect(result.observations).toHaveLength(100);
+      // No canvas is minted for a result the caller already holds in full.
+      expect(acquire).not.toHaveBeenCalled();
+      expect(result.canvasId).toBeUndefined();
+      expect(result.tableName).toBeUndefined();
+      expect(result.stagedRowCount).toBeUndefined();
+    });
+
+    it('reuses a caller-supplied canvas so two results can be joined', async () => {
+      fetchMock.mockImplementation(async () => okResponse(oversized()));
+      const first = await run();
+      const second = await run({ canvas_id: first.canvasId });
+
+      expect(second.canvasId).toBe(first.canvasId);
+      expect(second.tableName).not.toBe(first.tableName);
+
+      const instance = await canvas.acquire(first.canvasId, ctx());
+      const names = (await instance.describe()).map((t) => t.name);
+      expect(names).toContain(first.tableName);
+      expect(names).toContain(second.tableName);
+    });
+
+    it('surfaces an unknown caller-supplied canvas rather than silently minting a new one', async () => {
+      fetchMock.mockImplementation(async () => okResponse(oversized()));
+      await expect(run({ canvas_id: 'zzzzzzzzzz' })).rejects.toMatchObject({
+        code: JsonRpcErrorCode.NotFound,
+        data: { reason: 'canvas_not_found' },
+      });
+    });
+  });
+
+  describe('without a canvas', () => {
+    beforeEach(() => {
+      setCanvas(undefined);
+    });
+
+    it('returns the capped result unchanged, with no canvas fields at all', async () => {
+      fetchMock.mockImplementation(async () => okResponse(oversized()));
+      const result = await run();
+
+      expect(result.truncated).toBe(true);
+      expect(result.observations).toHaveLength(5000);
+      expect(result.obsCount).toBe(6000);
+      // Every added field is optional and absent — not null, not an empty string — so a
+      // caller on this deployment sees exactly the payload it saw before spillover existed.
+      expect('canvasId' in result).toBe(false);
+      expect('tableName' in result).toBe(false);
+      expect('stagedRowCount' in result).toBe(false);
+    });
+
+    it('keeps the notice pointed at narrowing the query', async () => {
+      fetchMock.mockImplementation(async () => okResponse(oversized()));
+      const c = ctx();
+      await eurostatQueryDataset.handler(
+        eurostatQueryDataset.input.parse({ dataset_code: 'nama_10_gdp' }),
+        c,
+      );
+      const notice = getEnrichment(c).notice ?? '';
+      expect(notice).toContain('dimension filters');
+      // Naming a tool this deployment does not list would send the agent nowhere.
+      expect(notice).not.toContain('eurostat_dataframe_query');
+    });
+
+    it('ignores a canvas_id it cannot honour instead of failing the query', async () => {
+      fetchMock.mockImplementation(async () => okResponse(oversized()));
+      const result = await run({ canvas_id: 'zzzzzzzzzz' });
+      expect(result.obsCount).toBe(6000);
+      expect(result.tableName).toBeUndefined();
+    });
+
+    it('validates the output schema without the canvas fields', () => {
+      const parsed = eurostatQueryDataset.output.parse({
+        ...mockQueryResult,
+        truncated: true,
+      });
+      expect(parsed.canvasId).toBeUndefined();
+      expect(parsed.tableName).toBeUndefined();
+      expect(parsed.stagedRowCount).toBeUndefined();
+    });
+
+    it('renders the pre-spillover truncation banner in content[]', () => {
+      const blocks = eurostatQueryDataset.format!({
+        ...mockQueryResult,
+        truncated: true,
+        obsCount: 6000,
+      });
+      const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+      expect(text).toContain('**Truncated:** true');
+      expect(text).toContain('5,000');
+      // Narrowing the query is the only route to the rest here, and the banner must say so
+      // rather than point at a canvas this deployment does not have.
+      expect(text).toContain('Add dimension filters');
+      expect(text).not.toContain('**Staged:**');
+      expect(text).not.toContain('canvas');
+    });
+  });
+
+  it('renders the staged handle into content[] when there is one (format parity)', () => {
+    const blocks = eurostatQueryDataset.format!({
+      ...mockQueryResult,
+      truncated: true,
+      obsCount: 6000,
+      canvasId: 'cnv0000001',
+      tableName: 'df_abcd1234',
+      stagedRowCount: 6000,
+    });
+    const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+    expect(text).toContain('df_abcd1234');
+    expect(text).toContain('cnv0000001');
+    expect(text).toContain('6000');
+    expect(text).toContain('eurostat_dataframe_query');
+    // The truncation banner itself changes when there is a table — it must not keep telling
+    // the reader that narrowing the query is the way to the rest.
+    expect(text).toContain('the whole match is staged on the canvas below');
+    expect(text).not.toContain('Add dimension filters');
   });
 });
