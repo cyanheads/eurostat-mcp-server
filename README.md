@@ -1,7 +1,7 @@
 <div align="center">
   <h1>@cyanheads/eurostat-mcp-server</h1>
   <p><b>Search and query the Eurostat catalogue — EU economy, demography, trade, health, and NUTS regional data via MCP. STDIO or Streamable HTTP.</b>
-  <div>5 Tools • 1 Resource</div>
+  <div>5 Tools (7 with the dataframe canvas) • 1 Resource</div>
   </p>
 </div>
 
@@ -9,7 +9,7 @@
 
 
 
-[![Version](https://img.shields.io/badge/Version-0.3.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/eurostat-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/eurostat-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/eurostat-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.4.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/eurostat-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/eurostat-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/eurostat-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -31,7 +31,7 @@
 
 ## Tools
 
-5 tools for discovering and querying Eurostat statistical datasets:
+5 tools for discovering and querying Eurostat statistical datasets, plus 2 more when the optional dataframe canvas is enabled:
 
 | Tool | Description |
 |:---|:---|
@@ -40,6 +40,8 @@
 | `eurostat_get_dataset_info` | Fetch metadata for a dataset: dimensions with sample values, time range, observation count, and last-update date |
 | `eurostat_get_dimension_values` | List all valid codes for a specific dimension (e.g., all geo codes, all unit codes); supports NUTS hierarchy filtering |
 | `eurostat_query_dataset` | Fetch decoded statistical observations with dimension filters, NUTS geo-level, and time-range controls |
+| `eurostat_dataframe_describe` | List the tables staged on a dataframe canvas with their row counts and column types — canvas only |
+| `eurostat_dataframe_query` | Run a read-only SQL SELECT across staged tables — canvas only |
 
 ### `eurostat_search_datasets`
 
@@ -99,8 +101,21 @@ Fetch statistical data from a Eurostat dataset.
 - Time range via `since_period`/`until_period` (e.g., `"2020"`, `"2023-Q1"`) or `last_n_periods` for the N most recent
 - Returns decoded observations with dimension codes and labels, numeric values, and status flags (`p` = provisional, `e` = estimated, etc.)
 - Reports total observation count, missing value count, and the effective time range of the result, each period bound omitted when neither the observations nor Eurostat report it
-- Returned rows are capped at 5,000, applied while decoding so a broad query never builds the rest; `obsCount`, `missingObsCount` and `timeRange` still describe the whole match, and `truncated` flags when rows were dropped. Filter the query to shrink what Eurostat sends — the cap bounds the decode, not the transfer
+- Inline rows are capped at 5,000, applied while decoding so a broad query never builds the rest; `obsCount`, `missingObsCount` and `timeRange` still describe the whole match, and `truncated` flags when the cap bit. Filter the query to shrink what Eurostat sends — the cap bounds the decode, not the transfer
+- With the dataframe canvas enabled, a match past the cap is also staged whole as a SQL table and the response returns `canvasId` / `tableName` / `stagedRowCount`; the rows are streamed into the table one at a time from the response body already in memory, so nothing extra is fetched and the match is never materialized as an array. Without a canvas those fields are absent and narrowing the query is the way to the rest
+- Pass `canvas_id` from an earlier response to stage several results side by side and join across them
 - Async-response detection — large unfiltered queries return an actionable, non-retryable error with filter guidance rather than silently timing out
+
+---
+
+### `eurostat_dataframe_describe` / `eurostat_dataframe_query`
+
+SQL over the results `eurostat_query_dataset` stages. **Listed only when the dataframe canvas is enabled** (`CANVAS_PROVIDER_TYPE=duckdb`); the server is fully functional without it, and clients never see tools they cannot call.
+
+- `eurostat_dataframe_describe` lists the staged tables with row counts and column names and types — call it before writing SQL
+- `eurostat_dataframe_query` runs a single read-only `SELECT`. Statement chaining, non-`SELECT` verbs, and functions that read files or external data are rejected with a typed error
+- Staged columns are flat: each dimension contributes a code column named after the dimension (`geo`) and a label column beside it (`geo_label`), followed by `obs_value`, `obs_flag`, and `obs_flag_label`
+- The DuckDB binding ships with the server, so `CANVAS_PROVIDER_TYPE=duckdb` is the only switch. The exception is the one-click `.mcpb` bundle, which strips platform-specific native bindings to stay portable — a bundle install cannot run the canvas, so reach for the npm, Docker, or from-source install for SQL analytics
 
 ## Resource
 
@@ -126,6 +141,7 @@ Eurostat-specific:
 - Async-response detection — Eurostat returns a warning object rather than an error for over-limit queries; the server intercepts it and returns an actionable error with filter guidance
 - NUTS hierarchy geo-level filtering across query and dimension-value tools
 - Status flag decoding (provisional, estimated, definition differs, etc.)
+- Optional DuckDB dataframe canvas — a query matching more than the inline cap is streamed row by row into a SQL table, reaching the observations the cap drops without a second request to Eurostat
 
 Agent-friendly output:
 
@@ -251,6 +267,10 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `EUROSTAT_BASE_URL` | Eurostat API base URL | `https://ec.europa.eu/eurostat/api/dissemination` |
 | `EUROSTAT_REQUEST_TIMEOUT_MS` | HTTP request timeout in ms | `30000` |
 | `EUROSTAT_TOC_CACHE_TTL_MS` | Catalogue TOC cache lifetime in ms — the first search or browse call past this age refreshes it | `43200000` (12 hours) |
+| `CANVAS_PROVIDER_TYPE` | `duckdb` enables the dataframe canvas: lists the two dataframe tools and lets `eurostat_query_dataset` stage a match past its inline cap | `none` |
+| `CANVAS_TEMP_PATH` | Directory DuckDB writes canvas spill files to. Must be writable by the server process | `<os tmpdir>/mcp-canvas` |
+| `CANVAS_TTL_MS` | Sliding lifetime of a staged canvas in ms; every call against it extends the window | `86400000` (24 hours) |
+| `CANVAS_DEFAULT_ROW_LIMIT` | Max rows one `eurostat_dataframe_query` returns before reporting `truncated` | `10000` |
 | `OTEL_ENABLED` | Enable OpenTelemetry | `false` |
 
 ## Running the server
@@ -279,10 +299,11 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 
 | Directory | Purpose |
 |:---|:---|
-| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Five tools for discovery and data access. |
+| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Five tools for discovery and data access, plus two canvas-gated dataframe tools. |
 | `src/mcp-server/resources` | Resource definitions. Dataset metadata resource. |
 | `src/services/eurostat-catalogue` | Catalogue service — fetches and parses the Eurostat TOC TXT file; TTL-bounded in-memory cache. |
-| `src/services/eurostat-data` | Data service — Statistics API HTTP client, JSON-stat 2.0 decoder, async-response detection. |
+| `src/services/eurostat-data` | Data service — Statistics API HTTP client, JSON-stat 2.0 decoder, async-response detection, dataframe row source. |
+| `src/services/canvas-accessor.ts` | Module-level accessor for the optional DataCanvas, plus the acquire helper that names the misconfigured path on a permission failure. |
 | `src/config` | Server-specific environment variable parsing and validation with Zod. |
 | `tests/` | Unit and integration tests, mirroring the `src/` structure. |
 

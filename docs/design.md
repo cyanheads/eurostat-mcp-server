@@ -10,7 +10,9 @@
 | `eurostat_browse_themes` | List the Eurostat theme hierarchy. At root returns the second-level theme folders (Economy, Population, Transport, etc.) — the practical entry points for navigation. With a `theme_code` returns its immediate children (subthemes and datasets). Enables tree-navigation for dataset discovery without text search. | `theme_code?` | `readOnlyHint: true, openWorldHint: true` |
 | `eurostat_get_dataset_info` | Fetch metadata for a dataset: dimensions, their codes and descriptions, time range, obs count, and last-updated date. The prerequisite call before querying data — reveals what `unit`, `na_item`, and other dimension values are valid. | `dataset_code` | `readOnlyHint: true` |
 | `eurostat_get_dimension_values` | List valid values for a specific dimension in a dataset (e.g., all `unit` codes for `nama_10_gdp`). Useful when the full dimension list from `get_dataset_info` is large and needs exploring. | `dataset_code`, `dimension` | `readOnlyHint: true` |
-| `eurostat_query_dataset` | Fetch statistical data from a dataset with dimension filters. Returns decoded observations (code, label, value, status flag) plus metadata about the query. Supports `geoLevel` for NUTS hierarchy filtering. | `dataset_code`, `filters{}`, `geo_level?`, `since_period?`, `until_period?`, `last_n_periods?`, `lang?` | `readOnlyHint: true` |
+| `eurostat_query_dataset` | Fetch statistical data from a dataset with dimension filters. Returns decoded observations (code, label, value, status flag) plus metadata about the query. Supports `geoLevel` for NUTS hierarchy filtering. Stages a match past the inline cap on the dataframe canvas when one is configured. | `dataset_code`, `filters{}`, `geo_level?`, `since_period?`, `until_period?`, `last_n_periods?`, `lang?`, `canvas_id?` | `readOnlyHint: true` |
+| `eurostat_dataframe_describe` | List the tables staged on a dataframe canvas with their row counts and column names and types. Registered only when the canvas is enabled. | `canvas_id` | `readOnlyHint: true` |
+| `eurostat_dataframe_query` | Run a single read-only SQL `SELECT` across the staged tables. Registered only when the canvas is enabled. | `canvas_id`, `sql` | `readOnlyHint: true` |
 
 ### Resources
 
@@ -68,8 +70,12 @@ Target users: economic researchers comparing EU countries or regions, journalist
 | `EUROSTAT_BASE_URL` | No | Override API base URL (default: `https://ec.europa.eu/eurostat/api/dissemination`) |
 | `EUROSTAT_REQUEST_TIMEOUT_MS` | No | HTTP request timeout in ms (default: `30000`) |
 | `EUROSTAT_TOC_CACHE_TTL_MS` | No | How long a fetched catalogue TOC stays usable before the next catalogue call refreshes it, in ms (default: `43200000` — 12 hours) |
+| `CANVAS_PROVIDER_TYPE` | No | `duckdb` enables the dataframe canvas — the two dataframe tools become callable and `query_dataset` stages a match past its inline cap (default: `none`) |
+| `CANVAS_TEMP_PATH` | No | DuckDB spill directory; must be writable by the server process (default: `<os tmpdir>/mcp-canvas`) |
+| `CANVAS_TTL_MS` | No | Sliding lifetime of a staged canvas in ms (default: `86400000` — 24 hours) |
+| `CANVAS_DEFAULT_ROW_LIMIT` | No | Max rows one `dataframe_query` response carries before reporting `truncated` (default: `10000`) |
 
-No API keys required.
+No API keys required. The canvas variables are framework-owned (`@cyanheads/mcp-ts-core`), not part of this server's own Zod config schema. `@duckdb/node-api` is a runtime dependency, so every install and the published image already carry the binding and `CANVAS_PROVIDER_TYPE` is the only switch.
 
 ---
 
@@ -295,7 +301,7 @@ total_count: number
 
 The primary data-fetching tool. Accepts dimension filters as a map and returns decoded observations.
 
-**Implementation note:** the response carries at most 5,000 observations. That bound is applied inside the JSON-stat decoder, which stops once 5,000 cells have been built, in ascending linear-index order — an order the decoder walks itself rather than reading from the upstream key order, so a given response always yields the same rows. A broad query therefore never materializes its full observation set: `nama_10_gdp` unfiltered matches ~1.1M cells, and only the first 5,000 become objects. The totals that describe the match — `obs_count`, `missing_obs_count`, and the `time_range` bounds — are counted from the response's `value`/`status` cell keys instead of from the decoded array, so they stay whole while the row list is capped, and `obs_count` is what `truncated` is computed from. This bounds the client-side work and allocation, not the request: Eurostat still serves the full body (~18 MB for that query, ~93% of its wall time), so the way to make a broad query fast is to filter it.
+**Implementation note:** the response carries at most 5,000 observations. That bound is applied inside the JSON-stat decoder, which stops once 5,000 cells have been built, in ascending linear-index order — an order the decoder walks itself rather than reading from the upstream key order, so a given response always yields the same rows. A broad query therefore never materializes its full observation set: `nama_10_gdp` unfiltered matches ~1.1M cells, and only the first 5,000 are held. (With a canvas configured, a capped match is also spilled — every cell then becomes an object, but one at a time as the canvas appender pulls it, never as an array. See **Spillover** below.) The totals that describe the match — `obs_count`, `missing_obs_count`, and the `time_range` bounds — are counted from the response's `value`/`status` cell keys instead of from the decoded array, so they stay whole while the row list is capped, and `obs_count` is what `truncated` is computed from. This bounds the client-side work and allocation, not the request: Eurostat still serves the full body (~18 MB for that query, ~93% of its wall time), so the way to make a broad query fast is to filter it.
 
 **Input:**
 - `dataset_code: string`
@@ -318,11 +324,20 @@ observations: [{
   status?: { code: string, label: string }  // e.g., {code:"p", label:"provisional"}
 }]
 obs_count: number                 // observations matched, before the 5,000-row cap
-truncated: boolean                // true when obs_count exceeds the cap and rows were dropped
+truncated: boolean                // true when obs_count exceeds the cap and the inline rows are a prefix of the match
 time_range: { start: string?, end: string? }  // bounds of the whole match, not of the returned rows; each omitted when neither the match nor Eurostat report it
 missing_obs_count: number         // observations with null value, across the whole match
+canvas_id: string?                // dataframe canvas holding the staged match; omitted when nothing was staged
+table_name: string?               // canvas table holding every matched observation, flat; omitted when nothing was staged
+staged_row_count: number?         // rows written to that table (equals obs_count); omitted alongside table_name
 ```
 `observations` is capped at 5,000 rows; every other field above describes the full match, so `obs_count` and `observations.length` diverge whenever `truncated` is true.
+
+**Spillover.** When `truncated` is true *and* a dataframe canvas is configured, the whole match is also registered as a canvas table and the three optional fields above name it. The rows are pulled from a lazy generator over the response body already in memory — the same walk the capped decode takes its first 5,000 yields from — so the staged table is by construction a superset of the inline rows in the same order, no additional upstream request is made, and the match is never materialized as an array. Staging is skipped entirely when the result fits inline: the caller already holds every row, and minting a canvas for it would burn a per-tenant slot for nothing.
+
+Canvas columns are flat, because a dataframe column holds a scalar. Each dimension becomes two columns — `<dim>` for the code, `<dim>_label` for the label — followed by `obs_value`, `obs_flag`, and `obs_flag_label` (the `obs_` prefix is Eurostat's own SDMX-CSV vocabulary, and keeps the measure columns clear of any dimension code). The column schema is declared rather than sniffed: inference reads only the leading rows, so an all-integer prefix would type the measure as `BIGINT`, which the canvas then serializes as a string.
+
+Without a canvas the three fields are absent — not null, not empty — the notice points at narrowing the query rather than at a tool that is not listed, and every other part of the response is byte-identical to what it was before spillover existed.
 
 **Errors:**
 - `not_found` (NotFound): dataset code not found (HTTP 404, Eurostat error id 100)
@@ -330,6 +345,25 @@ missing_obs_count: number         // observations with null value, across the wh
 - `async_response` (ServiceUnavailable, non-retryable): query too large; add dimension filters to reduce result set
 - `invalid_dimension` (ValidationError): dimension *code* is not defined in this dataset's structure (HTTP 400, Eurostat error id 150). Note: invalid dimension *values* do not produce an error — they silently return `no_results`.
 - `conflicting_params` (ValidationError): mutually exclusive parameters combined — a non-empty `geo` filter with `geo_level`, or `since_period`/`until_period` with `last_n_periods`. Both are rejected locally, before the request reaches Eurostat.
+- `canvas_not_found` (NotFound): a `canvas_id` was supplied for staging but is unknown or expired. Only reachable on a deployment with a canvas; without one the parameter is ignored rather than validated.
+
+### `eurostat_dataframe_describe` / `eurostat_dataframe_query`
+
+The SQL surface over what `query_dataset` stages. Both are wrapped in `disabledTool()` when `CANVAS_PROVIDER_TYPE` is `none`: they stay visible on the landing page and the server card — with the variable that turns them on — but are skipped at MCP registration, so clients never see a tool they cannot call, and an operator reading the README does not have to guess why it is missing.
+
+`dataframe_query` passes caller SQL straight to the canvas. It is not pre-filtered here: the framework's gate rejects anything that is not a single `SELECT` (statement count, statement type, an EXPLAIN-plan operator allowlist, and a table-function deny-list covering file and external-data readers), and each rejection carries a typed reason. A second, weaker string filter in front of that would only shadow those reasons with a vaguer message. `denySystemCatalogs` is left off because `dataframe_describe` already exposes the catalog deliberately.
+
+**Input:**
+- `canvas_id: string` — the `canvasId` from a `query_dataset` response
+- `sql: string` (query only) — a single read-only `SELECT`
+
+**Output:** `describe` returns `canvas_id`, `expires_at`, and `tables[]` (`name`, `kind`, `row_count`, `expires_at?`, `columns[]`). `query` returns `canvas_id`, `columns[]`, `rows[]`, `row_count`, `truncated`. 64-bit integer results come back as strings — the framework's JSON-safe row shape — so `COUNT(*)` is a string unless cast.
+
+**Errors:**
+- `canvas_disabled` (ServiceUnavailable, non-retryable): the deployment runs without a canvas. Recovery is `query_dataset` with narrower filters
+- `canvas_not_found` (NotFound): unknown or expired `canvas_id`; also what a canvas belonging to another tenant returns, so existence does not leak across tenants
+- `missing_table` (NotFound, query only): the SQL names a table that is not staged or has expired
+- SQL gate rejections surface as `ValidationError` with the framework's reason (`multi_statement`, `non_select_statement`, `denied_function`, `invalid_sql`, …)
 
 ---
 
@@ -352,6 +386,15 @@ missing_obs_count: number         // observations with null value, across the wh
 | 2 | Find NUTS2 GDP dataset | `eurostat_browse_themes` (`"reg_eco10"`) |
 | 3 | Get dataset metadata | `eurostat_get_dataset_info` (`"nama_10r_2gdp"`) |
 | 4 | Query GDP for all NUTS2 regions | `eurostat_query_dataset` (`geo_level: "nuts2"`) |
+
+### Common workflow: analyse a match larger than the inline cap (canvas enabled)
+
+| # | Action | Tool |
+|:--|:-------|:-----|
+| 1 | Query the dataset; the response caps at 5,000 rows and returns `canvasId` + `tableName` | `eurostat_query_dataset` |
+| 2 | Confirm the staged table and column names | `eurostat_dataframe_describe` |
+| 3 | Aggregate or filter across the whole match — `SELECT geo, AVG(obs_value) … GROUP BY geo` | `eurostat_dataframe_query` |
+| 4 | Stage a second dataset onto the same canvas by passing `canvas_id`, then join across both | `eurostat_query_dataset` → `eurostat_dataframe_query` |
 
 ### Common workflow: explore unknown topic domain
 
@@ -380,7 +423,11 @@ missing_obs_count: number         // observations with null value, across the wh
 
 **Why no async polling:** Eurostat's async response is a soft error with guidance to narrow the query. Implementing polling (retry-after semantics) would require state management between tool calls. The better UX is to detect the async response immediately and return a non-retryable `ServiceUnavailable` error whose recovery hint names a narrower call to make instead.
 
-**Why no DataCanvas:** The query tool returns decoded observations that are human-readable in format(). Tabular analysis can be done by the agent in subsequent steps. DataCanvas would add complexity; the domain's natural unit is a result set per filtered query, not a persistent analytical workspace.
+**Why no DataCanvas:** ~~The query tool returns decoded observations that are human-readable in format(). Tabular analysis can be done by the agent in subsequent steps. DataCanvas would add complexity; the domain's natural unit is a result set per filtered query, not a persistent analytical workspace.~~
+
+> **Superseded 2026-08-04 — see "Why the canvas earns its keep now" below.** The reasoning above holds only while a result set fits in the response. It does not: `query_dataset` caps the observations it returns at 5,000, and a filtered query on a mid-sized dataset routinely matches more (`nama_10_gdp` filtered to one unit, last four periods, matches ~6.6k). "The agent can analyse it in subsequent steps" was true of the rows it received and false of the rows it never saw, which no follow-up call could reach — there is no cursor, and the only recovery was to hand-partition the query across dimension values.
+
+**Why the canvas earns its keep now:** the rows past the cap are already in memory. `query_dataset` downloads and parses the entire upstream body before decoding starts — the cap bounds object construction, not the transfer — so staging the full match costs no additional request to Eurostat and no re-fetch. That makes this the cheapest possible way to close the gap. It also passes both gates the framework's canvas guidance sets: the data is analytical rather than a discovery surface (an agent writes `GROUP BY geo` over observations, which is exactly the workload), and it is too large to inline (that is the premise). The canvas stays opt-in and off by default, so a deployment that does not want a native dependency loses nothing it had.
 
 ---
 
@@ -397,6 +444,12 @@ missing_obs_count: number         // observations with null value, across the wh
 **Shadowed folder placements are not addressable:** `theme_code` takes a bare code, not a path, so a code filed under several branches always resolves to the first one — including when the caller has just browsed a different placement and drills into a folder code it listed. `other_placements` makes the ambiguity visible, but reaching a shadowed branch would need path-qualified addressing. Affects 43 of the ~1,900 folder codes, 10 with differing child sets.
 
 **No SDMX constraint data:** The Statistics API returns dimension values observed in actual data for a filtered query, not all theoretically valid codes for the dataset. A code may be valid per the codelist but absent from the data for a given time period or geography.
+
+**The canvas does not raise the transfer ceiling:** staging reaches the rows past the inline cap of a response the server already received; it does nothing for a dataset too large to download inside `EUROSTAT_REQUEST_TIMEOUT_MS`. That bound stays where it was — measured, an unfiltered `nama_10_gdp` is ~18.7 MB over ~23 s and `hlth_cd_asdr2` ~73 MB over ~87 s, past the 30 s default. Filtering remains the only route to a dataset larger than one response.
+
+**Canvas tables are in-memory and per-process:** a restart drops every staged table, and a `canvas_id` issued by one process is meaningless to another. Behind a load balancer, a follow-up `dataframe_query` must reach the same instance that staged the table. Both are properties of the framework's canvas, not of this server; a `canvas_id` that no longer resolves fails as `canvas_not_found` with a recovery hint to re-run the query.
+
+**No canvas from a `.mcpb` bundle:** the bundle strips platform-specific native bindings so it stays portable and inside the registry size cap, which removes DuckDB. A bundle install runs the five core tools; SQL analytics needs the npm, Docker, or from-source install.
 
 ---
 
@@ -417,5 +470,14 @@ missing_obs_count: number         // observations with null value, across the wh
 | 2026-08-04 | Apply `query_dataset`'s 5,000-row cap inside the decoder, and count the totals from the response's cell keys | The cap previously ran after every matched cell had been decoded, so a broad query built ~1.1M observation objects to return 5,000. Stopping the decode at the cap removes that allocation. The totals then cannot come from the decoded array, so `obs_count`, `missing_obs_count` and `time_range` are counted from the `value`/`status` keys instead — one pass, no per-observation object — and keep describing the whole match. End-to-end latency barely moves: the full response body is already in memory before decoding starts, and transferring it is ~93% of a broad query's wall time. |
 | 2026-08-04 | A failed time enumeration omits `time`'s `values_count`/`sample_values` instead of failing the call | The second request in `get_dataset_info` answers one dimension's value count; everything else comes from the first. Aborting the call over it discarded the label, dimension list, period range, observation count and metadata URL already retrieved. Falling back to the one-period slice was rejected — it silently restores `values_count: 1` for every dataset, the exact defect the second request was added to fix. Omission extends the idiom already used for the annotation-derived fields and works identically on the tool and the resource, which has no enrichment surface for a notice. |
 | 2026-08-04 | Resolve a duplicated folder code to its first TOC placement, and disclose the others | `code_index` kept the last placement, so a duplicated code browsed the final branch and the earlier one became unreachable — most visibly the root code `data`, which returned "Cross cutting topics" 2 children instead of the 9 top-level themes. First-wins matches the canonical-placement rule `search()` already applies to duplicate dataset codes, and in all 10 live cases where placements differ the first lists at least as many children as the ones it shadows (a superset in nine; `data` is the exception, its two branches listing different children that a root-level browse already unions). `other_placements` returns the breadcrumbs of the branches not taken, so an ambiguous code is visible rather than silently resolved. |
+| 2026-08-04 | Stage a capped `query_dataset` match on a DataCanvas, superseding the "Why no DataCanvas" decision above | The cap left rows unreachable with no cursor and no continuation — the only recovery was hand-partitioning the query. Those rows are already in the parsed response body, so staging them costs no extra upstream request. Canvas stays off by default; the server's behaviour without one is unchanged. |
+| 2026-08-04 | Feed the spill from a lazy generator, never a materialised array | The 0.3.0 cap exists to stop a broad query building ~1.1M observation objects. Collecting the full match into an array to hand to the canvas would reinstate exactly that allocation. One generator walks the response's populated cells; the capped decode takes its first 5,000 yields and the canvas appender pulls the rest one row at a time — which also makes the inline rows a prefix of the staged table by construction rather than by agreement between two code paths. |
+| 2026-08-04 | Stage only when the cap actually bit | Under the cap the caller already holds every row, so a table would duplicate the response and consume a per-tenant canvas slot for nothing. The canvas is acquired inside the same condition, so an uncapped query makes no canvas call at all. |
+| 2026-08-04 | Flat `<dim>` / `<dim>_label` columns with `obs_`-prefixed measures, on a declared schema | A dataframe column holds a scalar, so the nested `{code, label}` observation shape cannot cross into SQL intact; splitting it keeps both halves queryable. The `obs_` prefix matches Eurostat's own SDMX-CSV naming and cannot collide with a dimension code. The schema is declared rather than sniffed because inference reads only the leading rows and would type an all-integer prefix as `BIGINT`, which the canvas then returns as a string. |
+| 2026-08-04 | No row cap on what is staged | The transfer timeout already bounds this path far below any size DuckDB struggles with — the largest response that fits in the 30 s default is ~1M observations, and DuckDB spills to the configured scratch directory rather than failing. A second cap would be a limit guarding a state the first one already prevents. |
+| 2026-08-04 | Register the dataframe tools via `disabledTool()` rather than omitting them | Omitting them hides the capability from the landing page and server card too, so an operator reading the README sees a tool the server never mentions. The wrapper keeps them off `tools/list` — clients still cannot call them — while rendering the reason and the variable that enables them, and it keeps the framework's canvas-consumer pairing check satisfied in both configurations. |
+| 2026-08-04 | Fail rather than degrade when staging errors | A canvas that quietly stops working looks identical to one that was never enabled, and the difference only surfaces as a capability silently missing. Acquire failures caused by an unwritable scratch directory are re-thrown naming `CANVAS_TEMP_PATH`, so the actionable case is actionable rather than a bare `EACCES`. |
+| 2026-08-04 | `dataframe_describe` omits the canvas's `approxSizeBytes` | The framework populates that field from DuckDB's `duckdb_tables().estimated_size`, which is an estimated row *cardinality*, not a byte size — measured, it comes back equal to `rowCount` (6,607 and 7,882 on two staged tables). Surfacing it would report a row count under a byte-shaped name, and `row_count` already carries that number exactly. |
+| 2026-08-04 | `@duckdb/node-api` as a runtime dependency, with no build-time gate on it | The canvas is already gated at runtime by `CANVAS_PROVIDER_TYPE` (`none` by default), so the ~110 MB binding sits inert until an operator turns the feature on. Gating the install on top of that — a dev dependency plus a Docker build arg — would mean the published image, which is built with no custom build args, could never list the dataframe tools at all. Shipping the binding in every install and image leaves one switch to reason about. The `.mcpb` bundle is the one surface that cannot run the canvas: it strips platform-specific native bindings to stay portable and inside the registry size cap. |
 | 2026-05-23 | 5 tools, no prompts, 1 resource | Domain is read-only data retrieval with a natural tool workflow (discover → inspect → query). Prompts add no value over well-designed tool descriptions. Resource for `eurostat://dataset/{dataset_code}` provides cache-injectable context without requiring a full query. |
 | 2026-05-23 | Exclude SDMX codelist tool | Global codelists (4,292 geo entries) are unhelpful without dataset scoping. `get_dimension_values` is dataset-scoped and returns actionable values. |
