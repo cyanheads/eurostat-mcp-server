@@ -1,11 +1,9 @@
 # eurostat-mcp-server - Directory Structure
 
-Generated on: 2026-08-04 18:04:13
+Generated on: 2026-08-21 23:11:46
 
 ```text
 eurostat-mcp-server/
-├── .agents/
-├── .claude/
 ├── .claude-plugin/
 │   └── plugin.json
 ├── .codex-plugin/
@@ -16,6 +14,8 @@ eurostat-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── CODE_OF_CONDUCT.md
+│   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
 │   └── SECURITY.md
 ├── .vscode/

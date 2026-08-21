@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.1](changelog/0.6.x/0.6.1.md) — 2026-08-21
+
+Adopts mcp-ts-core 0.12.3 and MCP SDK v2, reports truncated bulk previews on both output surfaces, and refreshes the build and test configuration.
+
 ## [0.6.0](changelog/0.6.x/0.6.0.md) — 2026-08-04 · ⚠️ Breaking
 
 eurostat_query_dataset's observations[].status carries only the OBS_FLAG now, confidentiality moved to a new confStatus field (#35); a wholly-confidential slice no longer wrongly raises no_results (#36).
