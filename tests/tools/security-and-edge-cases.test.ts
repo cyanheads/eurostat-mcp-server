@@ -114,6 +114,9 @@ const unmeasuredTimeMeta = {
   obsCount: 100,
 };
 
+const resourceParams = eurostatDatasetResource.params;
+if (!resourceParams) throw new Error('eurostatDatasetResource must declare params');
+
 const minimalDimResult = {
   dimensionCode: 'unit',
   dimensionLabel: 'Unit',
@@ -773,7 +776,9 @@ describe('Edge cases', () => {
         filters: { unit: ['CP_MEUR'], geo: [] },
       });
       await eurostatQueryDataset.handler(input, ctx);
-      const enrichment = getEnrichment(ctx);
+      const enrichment = getEnrichment(ctx) as {
+        appliedFilters?: { filters: Record<string, string[]> };
+      };
       expect(enrichment.appliedFilters?.filters).toEqual({ unit: ['CP_MEUR'] });
     });
   });
@@ -973,14 +978,14 @@ describe('Edge cases', () => {
         getDatasetInfo: mockGetInfo,
       } as never);
       const ctx = createMockContext({ tenantId: 'test' });
-      const params = eurostatDatasetResource.params.parse({ dataset_code: 'nama_10_gdp' });
+      const params = resourceParams.parse({ dataset_code: 'nama_10_gdp' });
       await eurostatDatasetResource.handler(params, ctx);
       expect(mockGetInfo).toHaveBeenCalledWith('nama_10_gdp', ctx);
     });
 
     it('returns full meta shape including dimensions array', async () => {
       const ctx = createMockContext({ tenantId: 'test' });
-      const params = eurostatDatasetResource.params.parse({ dataset_code: 'nama_10_gdp' });
+      const params = resourceParams.parse({ dataset_code: 'nama_10_gdp' });
       const result = await eurostatDatasetResource.handler(params, ctx);
       expect(result.dimensions).toBeInstanceOf(Array);
       expect(result.dimensions[0]).toMatchObject({ code: 'geo', valuesCount: 1 });
@@ -992,7 +997,7 @@ describe('Edge cases', () => {
         getDatasetInfo: mockGetInfo,
       } as never);
       const ctx = createMockContext({ tenantId: 'test' });
-      const params = eurostatDatasetResource.params.parse({ dataset_code: '../etc/passwd' });
+      const params = resourceParams.parse({ dataset_code: '../etc/passwd' });
       await expect(eurostatDatasetResource.handler(params, ctx)).rejects.toThrow();
       // The injection reaches the service, which rejects it — no crash before the service call
       expect(mockGetInfo).toHaveBeenCalledWith('../etc/passwd', ctx);
@@ -1137,7 +1142,7 @@ describe('eurostat_dataframe_query — SQL injection resistance', () => {
 
   /** The caller sees a ValidationError naming the reason — not a silent empty result. */
   const expectRejected = async (sql: string) => {
-    const err = (await run(sql).catch((e: unknown) => e)) as McpError;
+    const err = (await Promise.resolve(run(sql)).catch((e: unknown) => e)) as McpError;
     expect(err).toBeInstanceOf(McpError);
     expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
     expect(typeof (err.data as { reason?: unknown } | undefined)?.reason).toBe('string');

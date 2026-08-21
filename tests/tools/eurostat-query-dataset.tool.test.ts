@@ -53,6 +53,7 @@ const mockQueryResult = {
     makeObs('IT', 'Italy', '2023', null),
   ],
   obsCount: 3,
+  truncated: false,
   timeRange: { start: '2023', end: '2023' },
   missingObsCount: 1,
   appliedFilters: { unit: ['CP_MEUR'], na_item: ['B1GQ'], geo: ['DE', 'FR', 'IT'] },
@@ -77,7 +78,10 @@ describe('eurostatQueryDataset', () => {
     expect(result.missingObsCount).toBe(1);
     expect(result.datasetCode).toBe('nama_10_gdp');
     expect(result.observations).toHaveLength(3);
-    const enrichment = getEnrichment(ctx);
+    const enrichment = getEnrichment(ctx) as {
+      appliedFilters?: { filters: Record<string, string[]>; sincePeriod?: string };
+      notice?: string;
+    };
     expect(enrichment.appliedFilters?.filters).toEqual({
       unit: ['CP_MEUR'],
       na_item: ['B1GQ'],
@@ -102,7 +106,9 @@ describe('eurostatQueryDataset', () => {
     });
     const result = await eurostatQueryDataset.handler(input, ctx);
 
-    const enrichment = getEnrichment(ctx);
+    const enrichment = getEnrichment(ctx) as {
+      appliedFilters?: { filters: Record<string, string[]> };
+    };
     expect(enrichment.appliedFilters?.filters).toEqual({ unit: ['CP_MEUR'] });
     expect(enrichment.appliedFilters?.filters).not.toHaveProperty('geo');
     // The rendered trailer reads from the same enrichment value.
@@ -501,7 +507,9 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
       fetchMock.mockImplementation(async () => okResponse(oversized()));
       const result = await run();
       const instance = await canvas.acquire(result.canvasId, ctx());
-      const [table] = await instance.describe({ tableName: result.tableName });
+      const [table] = await instance.describe(
+        result.tableName ? { tableName: result.tableName } : {},
+      );
       expect(table?.columns.map((c) => c.name)).toEqual(
         observationRowSchema(['time', 'geo']).map((c) => c.name),
       );

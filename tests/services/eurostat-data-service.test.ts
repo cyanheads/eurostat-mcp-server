@@ -20,6 +20,7 @@ import {
 import {
   type JsonStatResponse,
   OBS_CAP,
+  type Observation,
   type ObservationRow,
 } from '@/services/eurostat-data/types.js';
 
@@ -922,7 +923,7 @@ describe('EurostatDataService — getDatasetInfo time coverage', () => {
     // What a caller reads: the real period count, not the 1 the metadata filter produced.
     const time = meta.dimensions.find((d) => d.code === 'time');
     expect(time?.valuesCount).toBe(6);
-    expect(time?.sampleValues[0]?.code).toBe('2020');
+    expect(time?.sampleValues?.[0]?.code).toBe('2020');
     // Other dimensions still come from the cheap one-period slice.
     expect(meta.dimensions.find((d) => d.code === 'geo')?.valuesCount).toBe(2);
 
@@ -1372,18 +1373,20 @@ describe('EurostatDataService — dataframe row source (#8)', () => {
      * drive the count to the full 6,000 before the caller pulled its first row, which is the
      * million-object allocation the inline cap exists to avoid.
      */
-    const proto = EurostatDataService.prototype as unknown as Record<string, unknown>;
-    const real = proto.iterateObservations as (data: JsonStatResponse) => Generator<unknown>;
+    const proto = EurostatDataService.prototype as unknown as {
+      iterateObservations(data: JsonStatResponse): Generator<Observation>;
+    };
+    const real = proto.iterateObservations;
     let yielded = 0;
-    vi.spyOn(proto, 'iterateObservations' as never).mockImplementation(function* (
-      this: EurostatDataService,
+    vi.spyOn(proto, 'iterateObservations').mockImplementation(function* (
+      this: typeof proto,
       data: JsonStatResponse,
     ) {
       for (const obs of real.call(this, data)) {
         yielded++;
         yield obs;
       }
-    } as never);
+    });
 
     fetchMock.mockResolvedValue(okResponse(oversized()));
     const res = await query();

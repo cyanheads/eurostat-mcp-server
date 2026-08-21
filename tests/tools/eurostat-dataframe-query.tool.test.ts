@@ -114,9 +114,9 @@ describe('eurostatDataframeQuery', () => {
       canvas_id: canvasId,
       sql: 'SELECT no_such_column FROM df_test0001',
     });
-    const err = (await eurostatDataframeQuery
-      .handler(input, ctx())
-      .catch((e: unknown) => e)) as McpError;
+    const err = (await Promise.resolve(eurostatDataframeQuery.handler(input, ctx())).catch(
+      (e: unknown) => e,
+    )) as McpError;
     expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
     expect(err.data).toMatchObject({ reason: 'invalid_sql' });
   });
@@ -130,9 +130,9 @@ describe('eurostatDataframeQuery', () => {
         canvas_id: canvasId,
         sql: 'SELECT 1',
       });
-      const err = (await eurostatDataframeQuery
-        .handler(input, ctx())
-        .catch((e: unknown) => e)) as McpError;
+      const err = (await Promise.resolve(eurostatDataframeQuery.handler(input, ctx())).catch(
+        (e: unknown) => e,
+      )) as McpError;
       expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
       expect(err.data).toMatchObject({ reason: 'canvas_disabled' });
       // The caller is told what to do instead, not just that something is off.

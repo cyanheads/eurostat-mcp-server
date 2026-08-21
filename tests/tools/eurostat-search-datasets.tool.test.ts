@@ -3,6 +3,7 @@
  * @module tests/tools/eurostat-search-datasets.tool.test
  */
 
+import type { McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { eurostatSearchDatasets } from '@/mcp-server/tools/definitions/eurostat-search-datasets.tool.js';
@@ -112,9 +113,13 @@ describe('eurostatSearchDatasets', () => {
     } as never);
     const ctx = createMockContext({ errors: eurostatSearchDatasets.errors });
     const input = eurostatSearchDatasets.input.parse({ query: 'inflation', cursor: 'STALE' });
-    const err = await eurostatSearchDatasets.handler(input, ctx).catch((e) => e);
+    const err = (await Promise.resolve(eurostatSearchDatasets.handler(input, ctx)).catch(
+      (e: unknown) => e,
+    )) as McpError;
     expect(err).toMatchObject({ data: { reason: 'invalid_cursor' } });
-    expect(err.data.recovery.hint).toContain('without a cursor');
+    expect((err.data as { recovery: { hint: string } }).recovery.hint).toContain(
+      'without a cursor',
+    );
   });
 
   it('formats output with all relevant fields', () => {

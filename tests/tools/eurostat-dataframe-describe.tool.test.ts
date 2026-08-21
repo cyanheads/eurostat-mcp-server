@@ -96,9 +96,9 @@ describe('eurostatDataframeDescribe', () => {
     setCanvas(undefined);
     try {
       const input = eurostatDataframeDescribe.input.parse({ canvas_id: stagedCanvasId });
-      const err = (await eurostatDataframeDescribe
-        .handler(input, ctx())
-        .catch((e: unknown) => e)) as McpError;
+      const err = (await Promise.resolve(eurostatDataframeDescribe.handler(input, ctx())).catch(
+        (e: unknown) => e,
+      )) as McpError;
       expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
       expect(err.data).toMatchObject({ reason: 'canvas_disabled' });
       expect((err.data as { recovery?: { hint?: string } }).recovery?.hint).toContain(

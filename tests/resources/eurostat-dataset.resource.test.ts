@@ -30,6 +30,9 @@ const mockMeta = {
   metadataUrl: 'https://ec.europa.eu/eurostat/cache/metadata/en/nama_10_gdp_esms.htm',
 };
 
+const resourceParams = eurostatDatasetResource.params;
+if (!resourceParams) throw new Error('eurostatDatasetResource must declare params');
+
 describe('eurostatDatasetResource', () => {
   beforeEach(() => {
     vi.mocked(getEurostatDataService).mockReturnValue({
@@ -39,7 +42,7 @@ describe('eurostatDatasetResource', () => {
 
   it('returns metadata for a valid dataset_code', async () => {
     const ctx = createMockContext({ tenantId: 'test' });
-    const params = eurostatDatasetResource.params.parse({ dataset_code: 'nama_10_gdp' });
+    const params = resourceParams.parse({ dataset_code: 'nama_10_gdp' });
     const result = await eurostatDatasetResource.handler(params, ctx);
     expect(result).toMatchObject({
       code: 'nama_10_gdp',
@@ -54,7 +57,7 @@ describe('eurostatDatasetResource', () => {
       getDatasetInfo: mockGetInfo,
     } as never);
     const ctx = createMockContext({ tenantId: 'test' });
-    const params = eurostatDatasetResource.params.parse({ dataset_code: 'nama_10_gdp' });
+    const params = resourceParams.parse({ dataset_code: 'nama_10_gdp' });
     await eurostatDatasetResource.handler(params, ctx);
     expect(mockGetInfo).toHaveBeenCalledWith('nama_10_gdp', ctx);
   });
@@ -64,7 +67,7 @@ describe('eurostatDatasetResource', () => {
       getDatasetInfo: vi.fn().mockRejectedValue(new Error('Dataset not found')),
     } as never);
     const ctx = createMockContext({ tenantId: 'test' });
-    const params = eurostatDatasetResource.params.parse({ dataset_code: 'nonexistent_xyz' });
+    const params = resourceParams.parse({ dataset_code: 'nonexistent_xyz' });
     await expect(eurostatDatasetResource.handler(params, ctx)).rejects.toThrow('Dataset not found');
   });
 
@@ -84,7 +87,7 @@ describe('eurostatDatasetResource', () => {
       }),
     } as never);
     const ctx = createMockContext({ tenantId: 'test' });
-    const params = eurostatDatasetResource.params.parse({ dataset_code: 'nama_10_gdp' });
+    const params = resourceParams.parse({ dataset_code: 'nama_10_gdp' });
     const result = await eurostatDatasetResource.handler(params, ctx);
     expect(result.dimensions.find((d) => d.code === 'time')?.valuesCount).toBe(51);
   });
@@ -111,7 +114,7 @@ describe('eurostatDatasetResource', () => {
       }),
     } as never);
     const ctx = createMockContext({ tenantId: 'test' });
-    const params = eurostatDatasetResource.params.parse({ dataset_code: 'xyz' });
+    const params = resourceParams.parse({ dataset_code: 'xyz' });
     const result = await eurostatDatasetResource.handler(params, ctx);
     // Absent upstream annotations must not surface as 0 / '' — the resource schema declares
     // these optional so a consumer can tell "unknown" from "zero".
@@ -142,7 +145,7 @@ describe('eurostatDatasetResource', () => {
       }),
     } as never);
     const ctx = createMockContext({ tenantId: 'test' });
-    const params = eurostatDatasetResource.params.parse({ dataset_code: 'nama_10_gdp' });
+    const params = resourceParams.parse({ dataset_code: 'nama_10_gdp' });
     const result = await eurostatDatasetResource.handler(params, ctx);
     const time = result.dimensions.find((d) => d.code === 'time');
     expect(time?.valuesCount).toBeUndefined();
@@ -158,7 +161,7 @@ describe('eurostatDatasetResource', () => {
       getDatasetInfo: vi.fn().mockResolvedValue(sparseMeta),
     } as never);
     const ctx = createMockContext({ tenantId: 'test' });
-    const params = eurostatDatasetResource.params.parse({ dataset_code: 'nama_10_gdp' });
+    const params = resourceParams.parse({ dataset_code: 'nama_10_gdp' });
     const result = await eurostatDatasetResource.handler(params, ctx);
     expect(result.metadataUrl).toBeUndefined();
     expect(result.code).toBe('nama_10_gdp');

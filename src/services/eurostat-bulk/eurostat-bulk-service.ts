@@ -36,10 +36,6 @@ import {
   type TsvHeader,
 } from './types.js';
 
-// Context satisfies the runtime contract of RequestContext but lacks the index signature
-// required by fetchWithTimeout.
-const asReqCtx = (ctx: Context) => ctx as unknown as Record<string, unknown> & typeof ctx;
-
 /**
  * Decoded characters buffered before an XML body is classified.
  *
@@ -278,7 +274,7 @@ export class EurostatBulkService {
 
     let response: Response;
     try {
-      response = await fetchWithTimeout(url.toString(), bulkTimeoutMs, asReqCtx(ctx), {
+      response = await fetchWithTimeout(url.toString(), bulkTimeoutMs, ctx, {
         signal: ctx.signal,
         // 400 (bad filter value or arity) and 404 (unknown dataset) are modeled outcomes
         // reclassified below into the declared error contract, not service failures.

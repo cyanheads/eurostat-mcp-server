@@ -37,10 +37,6 @@ import {
   type QueryExecution,
 } from './types.js';
 
-// Context satisfies the runtime contract of RequestContext but lacks the index signature
-// required by fetchWithTimeout/withRetry.
-const asReqCtx = (ctx: Context) => ctx as unknown as Record<string, unknown> & typeof ctx;
-
 /** Separator between the observation flag and the confidentiality status inside a JSON-stat status. */
 const CONF_SEPARATOR = '|';
 
@@ -114,7 +110,7 @@ export class EurostatDataService {
       async () => {
         let response: Awaited<ReturnType<typeof fetchWithTimeout>>;
         try {
-          response = await fetchWithTimeout(url.toString(), requestTimeoutMs, asReqCtx(ctx), {
+          response = await fetchWithTimeout(url.toString(), requestTimeoutMs, ctx, {
             signal: ctx.signal,
             // 400 (invalid dimension / conflicting params) and 404 (unknown dataset) are
             // modeled outcomes reclassified below into the declared error contract, not
@@ -162,7 +158,7 @@ export class EurostatDataService {
         this.checkResponseErrors(parsed, url.toString());
         return parsed;
       },
-      { operation: 'fetchJsonStat', context: asReqCtx(ctx), baseDelayMs: 1000, signal: ctx.signal },
+      { operation: 'fetchJsonStat', context: ctx, baseDelayMs: 1000, signal: ctx.signal },
     );
   }
 

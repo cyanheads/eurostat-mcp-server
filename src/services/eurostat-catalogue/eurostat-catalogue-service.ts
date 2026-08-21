@@ -18,10 +18,6 @@ import {
 import { getServerConfig } from '@/config/server-config.js';
 import type { BrowseItem, DatasetResult, TocEntry } from './types.js';
 
-// Context satisfies the runtime contract of RequestContext (requestId, tenantId, etc.)
-// but lacks the [key: string]: unknown index signature required by fetchWithTimeout/withRetry.
-const asReqCtx = (ctx: Context) => ctx as unknown as Record<string, unknown> & typeof ctx;
-
 /** Upper bound on datasets returned per search page, mirroring the tool's `limit` cap. */
 const MAX_PAGE_SIZE = 100;
 
@@ -103,7 +99,7 @@ export class EurostatCatalogueService {
 
     const text = await withRetry(
       async () => {
-        const response = await fetchWithTimeout(url, requestTimeoutMs, asReqCtx(ctx), {
+        const response = await fetchWithTimeout(url, requestTimeoutMs, ctx, {
           signal: ctx.signal,
         });
         const body = await response.text();
@@ -114,7 +110,7 @@ export class EurostatCatalogueService {
         }
         return body;
       },
-      { operation: 'fetchToc', context: asReqCtx(ctx), baseDelayMs: 1000, signal: ctx.signal },
+      { operation: 'fetchToc', context: ctx, baseDelayMs: 1000, signal: ctx.signal },
     );
 
     const entries = this.parseToc(text);
@@ -371,7 +367,7 @@ export class EurostatCatalogueService {
     ctx: Context,
   ): PaginationState {
     try {
-      const state = decodeCursor(cursor, asReqCtx(ctx));
+      const state = decodeCursor(cursor, ctx);
       if (state.query === queryKey && state.generation === generation) return state;
     } catch {
       // Undecodable cursor — same rejection as one that decodes but does not match.

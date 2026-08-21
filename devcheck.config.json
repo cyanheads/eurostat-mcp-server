@@ -6,14 +6,13 @@
       "typescript",
       "tsc-alias",
       "depcheck",
-      "tsx",
       "@cyanheads/mcp-ts-core",
       "@socketsecurity/bun-security-scanner"
     ],
     "ignorePatterns": []
   },
   "outdated": {
-    "allowlist": ["@cyanheads/mcp-ts-core"]
+    "allowlist": []
   },
   "packaging": {
     "pluginManifests": true
