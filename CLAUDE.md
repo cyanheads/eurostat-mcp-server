@@ -1,9 +1,10 @@
 # Agent Protocol
 
 **Server:** @cyanheads/eurostat-mcp-server
-**Version:** 0.6.0
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.11.1`
+**Version:** 0.6.1
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.12.3`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
+**MCP SDK:** `@modelcontextprotocol/server` `^2.0.0`
 **Zod:** `^4.4.3`
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -34,7 +35,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 - **Logic throws, framework catches.** Tool/resource handlers are pure — throw on failure, no `try/catch`. Plain `Error` is fine; the framework catches, classifies, and formats. Use error factories (`notFound()`, `validationError()`, etc.) when the error code matters.
 - **Use `ctx.log`** for request-scoped logging. No `console` calls.
 - **Use `ctx.state`** for tenant-scoped storage. Never access persistence directly.
-- **Check `ctx.elicit`** for presence before calling.
+- **Need input the caller didn't supply?** `return ctx.requestInput(...)` and read `ctx.inputs` when the handler is re-entered. Never `await` for user input mid-handler.
 - **Secrets in env vars only** — never hardcoded.
 - **Close the loop on issues.** When implementing work tracked by a GitHub issue, comment on the issue with what landed and close it. Do both — a comment without a close leaves stale issues open; a close without a comment leaves no record of what shipped. The comment is for future readers — state the concrete changes, not the conversation that produced them.
 
@@ -90,7 +91,7 @@ export const itemData = resource('inventory://{itemId}', {
   params: z.object({ itemId: z.string().describe('Item identifier') }),
   auth: ['inventory:read'],
   async handler(params, ctx) {
-    const item = await ctx.state.get(`item:${params.itemId}`);
+    const item = await ctx.state.get(`item/${params.itemId}`);
     if (!item) throw notFound(`Item ${params.itemId} not found`, { itemId: params.itemId });
     return item;
   },
@@ -124,6 +125,7 @@ import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 const ServerConfigSchema = z.object({
   apiKey: z.string().describe('External API key'),
   maxResults: z.coerce.number().default(100),
+  verboseLogging: z.stringbool().default(false).describe('Enable verbose logging'),
 });
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
@@ -131,12 +133,21 @@ export function getServerConfig() {
   _config ??= parseEnvConfig(ServerConfigSchema, {
     apiKey: 'MY_API_KEY',
     maxResults: 'MY_MAX_RESULTS',
+    verboseLogging: 'MY_VERBOSE_LOGGING',
   });
   return _config;
 }
 ```
 
 `parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`MY_API_KEY`) not the path (`apiKey`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
+
+For env booleans use `z.stringbool()`, never `z.coerce.boolean()` — `Boolean("false")` is `true`, so a coerced flag can't be disabled through the environment. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` and rejects anything else.
+
+### Server identity and instructions
+
+`createApp()` accepts optional identity fields forwarded to the SDK's `initialize` response and the server manifest. Keep this server's in-code identity to `name: 'eurostat-mcp-server'` and `title: 'eurostat-mcp-server'`; package metadata remains authoritative for the description and website.
+
+`instructions` is optional server-level orientation, sent on every `initialize` as session-level context. Use it for deployment guidance and cross-tool workflows instead of repeating the same context across tool descriptions.
 
 ---
 
@@ -146,13 +157,13 @@ Handlers receive a unified `ctx` object. Key properties:
 
 | Property | Description |
 |:---------|:------------|
-| `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. |
+| `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino and client `notifications/message`, so treat it as client-visible. |
 | `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Accepts any serializable value. |
-| `ctx.elicit` | Ask user for structured input — form call `(message, schema)` or `.url(message, url)` for an external link. **Check for presence first:** `if (ctx.elicit) { ... }` |
+| `ctx.requestInput` | Suspend and ask the caller for more input — `return ctx.requestInput({ inputRequests: { key: inputRequired.elicit({ message, requestedSchema }) } })`. Never returns; the handler is re-entered with the answers. |
+| `ctx.inputs` | Reader over a retried request's responses — `.accepted(key, schema)`, `.view(key)`, `.state()`, `.dropped`. Empty on the first round. |
 | `ctx.enrich` | Success-path agent context (empty-result notices, query echo, pagination totals) — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). |
 | `ctx.content` | Non-text content blocks — `.image(data, mimeType)`, `.audio(data, mimeType)`, or `ctx.content(block)` for a raw block. Prepended to `content[]` after `format()`; never enters `structuredContent`. |
 | `ctx.signal` | `AbortSignal` for cancellation. |
-| `ctx.progress` | Task progress (present when `task: true`) — `.setTotal(n)`, `.increment()`, `.update(message)`. |
 | `ctx.requestId` | Unique request ID. |
 | `ctx.tenantId` | Tenant ID from JWT; `'default'` for stdio or HTTP with auth off. |
 
@@ -174,7 +185,7 @@ errors: [
 ],
 async handler(input, ctx) {
   const item = await db.find(input.id);
-  if (!item) throw ctx.fail('no_match', `No item ${input.id}`);
+  if (!item) throw ctx.fail('no_match', `No item ${input.id}`, ctx.recoveryFor('no_match'));
   return item;
 }
 ```
@@ -264,7 +275,7 @@ Available skills:
 | `api-auth` | Auth modes, scopes, JWT/OAuth |
 | `api-canvas` | DataCanvas: register tabular data, run SQL, export, plus the `spillover()` helper for big result sets — Tier 3 opt-in |
 | `api-config` | AppConfig, parseConfig, env vars |
-| `api-context` | Context interface, logger, state, progress |
+| `api-context` | Context interface, RequestContext, logger, state, multi-round-trip input |
 | `api-errors` | McpError, JsonRpcErrorCode, error patterns |
 | `api-linter` | Definition lint rules reference (`format-parity`, `schema-*`, `server-json-*`, …) |
 | `api-services` | LLM, Speech, Graph services |
@@ -293,12 +304,15 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run audit:refresh` | Delete `bun.lock`, reinstall, and re-run `bun audit`. Use when `devcheck` flags a transitive advisory — Bun's `update` is sticky on transitive resolutions, so the advisory may be a stale-lockfile false positive. If it survives the refresh, it's real. |
 | `bun run tree` | Generate directory structure doc |
 | `bun run format` | Auto-fix formatting |
+| `bun run format:unsafe` | Apply behavior-changing Biome fixes for manual review |
 | `bun run test` | Run tests |
 | `bun run lint:mcp` | Validate MCP definitions against spec |
 | `bun run lint:packaging` | Validate env var alignment between `manifest.json` and `server.json` (skipped cleanly when `manifest.json` is absent) |
 | `bun run list-skills` | List skills in `skills/` with name + description |
 | `bun run release:github` | Create GitHub Release from the latest annotated tag (attach `.mcpb`, enforce title format) |
 | `bun run bundle` | Build and pack as `dist/eurostat-mcp-server.mcpb` for one-click Claude Desktop install |
+| `bun run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/*.md` |
+| `bun run changelog:check` | Verify `CHANGELOG.md` is in sync with `changelog/` |
 | `bun run start:stdio` | Production mode (stdio) |
 | `bun run start:http` | Production mode (HTTP) |
 
@@ -311,6 +325,14 @@ When you complete a skill's checklist, check the boxes and add a completion time
 **Adding an env var requires both files:** `server.json` stdio `environmentVariables[]` (registry discovery) and `manifest.json` `mcp_config.env` (bundle install UX, plus `user_config` if user-prompted). `bun run lint:packaging` (run by `devcheck`) verifies the env var names align.
 
 **README install badges** (Claude Desktop `.mcpb`, Cursor, VS Code) and config-generation commands are ship-time concerns — see the `polish-docs-meta` skill (`skills/polish-docs-meta/references/readme.md`).
+
+---
+
+## Changelog
+
+The source of truth is one file per release under `changelog/<major.minor>.x/<version>.md`. `CHANGELOG.md` is a generated navigation index; never hand-edit it. `changelog/template.md` is a pristine framework reference and must remain synced from the installed package.
+
+Per-version frontmatter requires a one-line `summary`; use `breaking: true` only for consumer-facing breaks and `security: true` only for a security fix in this server's own source. Optional `agent-notes` carry downstream adoption instructions and do not render in `CHANGELOG.md`.
 
 ---
 
@@ -350,6 +372,7 @@ import { getMyService } from '@/services/my-domain/my-service.js';
 - [ ] Optional nested objects: handler guards for empty inner values from form-based clients (`if (input.obj?.field && ...)`, not just `if (input.obj)`). When regex/length constraints matter, use `z.union([z.literal(''), z.string().regex(...).describe(...)])` — literal variants are exempt from `describe-on-fields`.
 - [ ] JSDoc `@fileoverview` + `@module` on every file
 - [ ] `ctx.log` for logging, `ctx.state` for storage
+- [ ] Missing input reads `ctx.inputs` first, then returns `ctx.requestInput(...)`
 - [ ] Handlers throw on failure — error factories or plain `Error`, no try/catch
 - [ ] `format()` renders all data the LLM needs — different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data
 - [ ] If wrapping external API: raw/domain/output schemas reviewed against real upstream sparsity/nullability before finalizing required vs optional fields
