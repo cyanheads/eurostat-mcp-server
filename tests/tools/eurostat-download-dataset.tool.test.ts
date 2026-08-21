@@ -8,7 +8,7 @@
 
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eurostatDownloadDataset } from '@/mcp-server/tools/definitions/eurostat-download-dataset.tool.js';
 import { setCanvas } from '@/services/canvas-accessor.js';
@@ -111,6 +111,11 @@ function mockDimensionOrder(order: string[] = DIMENSIONS): {
 const parse = (input: Record<string, unknown>) =>
   eurostatDownloadDataset.input.parse({ dataset_code: 'nama_10_gdp', ...input });
 
+const renderedText = (result: Parameters<NonNullable<typeof eurostatDownloadDataset.format>>[0]) =>
+  eurostatDownloadDataset.format!(result)
+    .map((block) => (block.type === 'text' ? block.text : ''))
+    .join('');
+
 describe('eurostatDownloadDataset — input schema', () => {
   it('defaults filters to an empty map and preview_limit to 50', () => {
     const input = parse({});
@@ -180,7 +185,9 @@ describe('eurostatDownloadDataset — with a canvas', () => {
     const result = await eurostatDownloadDataset.handler(parse({}), ctx);
 
     const instance = await canvas.acquire(result.canvasId, ctx);
-    const [table] = await instance.describe({ tableName: result.tableName });
+    const [table] = await instance.describe(
+      result.tableName ? { tableName: result.tableName } : {},
+    );
     expect(table?.columns.map((c) => c.name)).toEqual([
       ...DIMENSIONS,
       'time',
@@ -221,6 +228,32 @@ describe('eurostatDownloadDataset — with a canvas', () => {
     expect(result.rowCount).toBe(60);
     expect(result.missingCount).toBe(rows.filter((r) => r.obs_value === null).length);
     expect(result.periodRange).toEqual({ start: '2022', end: '2024' });
+  });
+
+  it('discloses a truncated inline preview on structuredContent and content[]', async () => {
+    mockDownload(stubDownload(makeRows(4)));
+    setCanvas(undefined);
+
+    const result = await runToolContract(eurostatDownloadDataset, {
+      dataset_code: 'nama_10_gdp',
+      preview_limit: 3,
+    });
+
+    expect(result.structuredContent).toMatchObject({ truncated: true, shown: 3, cap: 3 });
+    expect(result.content).toContainEqual(
+      expect.objectContaining({
+        text: expect.stringContaining('**truncated:** true\n**shown:** 3\n**cap:** 3'),
+      }),
+    );
+  });
+
+  it('does not mark a complete inline preview as truncated', async () => {
+    mockDownload(stubDownload(makeRows(1)));
+    const ctx = createMockContext({ errors: eurostatDownloadDataset.errors, tenantId: 'default' });
+
+    await eurostatDownloadDataset.handler(parse({ preview_limit: 3 }), ctx);
+
+    expect(getEnrichment(ctx).truncated).toBeUndefined();
   });
 
   it('surfaces a budget-truncated download as a flag plus a notice naming the knob', async () => {
@@ -446,7 +479,7 @@ describe('eurostatDownloadDataset — format()', () => {
   };
 
   it('renders every output field into content[]', () => {
-    const text = eurostatDownloadDataset.format!(result)[0]?.text ?? '';
+    const text = renderedText(result);
     for (const fragment of [
       'nama_10_gdp',
       '120',
@@ -463,29 +496,27 @@ describe('eurostatDownloadDataset — format()', () => {
   });
 
   it('renders a missing value as NULL rather than a blank', () => {
-    const text = eurostatDownloadDataset.format!(result)[0]?.text ?? '';
+    const text = renderedText(result);
     expect(text).toContain('obs_value=NULL');
   });
 
   it('says nothing was staged when there is no table', () => {
-    const text =
-      eurostatDownloadDataset.format!({
-        ...result,
-        canvasId: undefined,
-        tableName: undefined,
-        stagedRowCount: undefined,
-      })[0]?.text ?? '';
+    const text = renderedText({
+      ...result,
+      canvasId: undefined,
+      tableName: undefined,
+      stagedRowCount: undefined,
+    });
     expect(text).toContain('without a dataframe canvas');
   });
 
   it('marks a budget-truncated download in the rendered text', () => {
-    const text =
-      eurostatDownloadDataset.format!({ ...result, budgetExceeded: true })[0]?.text ?? '';
+    const text = renderedText({ ...result, budgetExceeded: true });
     expect(text).toContain('not all of it');
   });
 
   it('names an unreported period range instead of rendering a blank', () => {
-    const text = eurostatDownloadDataset.format!({ ...result, periodRange: {} })[0]?.text ?? '';
+    const text = renderedText({ ...result, periodRange: {} });
     expect(text).toContain('not reported by Eurostat');
   });
 });

@@ -150,6 +150,12 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
       .describe('Rows written to the canvas table. Matches rowCount. Omitted alongside tableName.'),
   }),
   enrichment: {
+    truncated: z
+      .boolean()
+      .optional()
+      .describe('True when the inline observation preview omits rows.'),
+    shown: z.number().optional().describe('Observations returned in the inline preview.'),
+    cap: z.number().optional().describe('The preview_limit applied to inline observations.'),
     appliedQuery: z
       .object({
         filters: z
@@ -339,6 +345,9 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
         url: download.url,
       },
     });
+    if (stats.rowCount > preview.length) {
+      ctx.enrich.truncated({ shown: preview.length, cap: input.preview_limit });
+    }
 
     const notices: string[] = [];
     if (stats.budgetExceeded) {
