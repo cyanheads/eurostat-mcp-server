@@ -3,7 +3,8 @@
  * @module tests/tools/eurostat-browse-themes.tool.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { eurostatBrowseThemes } from '@/mcp-server/tools/definitions/eurostat-browse-themes.tool.js';
 
@@ -120,6 +121,121 @@ describe('eurostatBrowseThemes', () => {
       },
     });
   });
+
+  it('keeps root navigation aligned across structuredContent and content[]', async () => {
+    const result = await runToolContract(eurostatBrowseThemes, {});
+
+    expect(result.structuredContent).toMatchObject({
+      items: mockRootItems,
+      parentPath: [],
+      nextStep: expect.stringContaining('sub-themes'),
+    });
+    const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+    expect(text).toContain('econ');
+    expect(text).toContain('pop');
+    expect(text).toContain('sub-themes');
+  });
+
+  it('treats an empty theme_code as root navigation on both response paths', async () => {
+    const result = await runToolContract(eurostatBrowseThemes, { theme_code: '   ' });
+
+    expect(result.structuredContent).toMatchObject({ items: mockRootItems, parentPath: [] });
+    const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+    expect(text).toContain('econ');
+    expect(text).not.toContain('**Path:**');
+  });
+
+  it('keeps folder navigation aligned across structuredContent and content[]', async () => {
+    vi.mocked(getEurostatCatalogueService).mockReturnValue({
+      browse: vi.fn().mockResolvedValue({
+        items: mockChildItems,
+        parentPath: ['Economy and finance'],
+      }),
+    } as never);
+
+    const result = await runToolContract(eurostatBrowseThemes, { theme_code: 'econ' });
+
+    expect(result.structuredContent).toMatchObject({
+      items: mockChildItems,
+      parentPath: ['Economy and finance'],
+      nextStep: expect.stringContaining('eurostat_get_dataset_info'),
+    });
+    const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+    expect(text).toContain('Economy and finance');
+    expect(text).toContain('nama_10_gdp');
+    expect(text).toContain('eurostat_get_dataset_info');
+  });
+
+  it('preserves not_found and root recovery on both error response paths', async () => {
+    vi.mocked(getEurostatCatalogueService).mockReturnValue({
+      browse: vi.fn().mockRejectedValue(
+        new McpError(JsonRpcErrorCode.NotFound, 'Theme "nonexistent_xyz" not found.', {
+          reason: 'not_found',
+          themeCode: 'nonexistent_xyz',
+        }),
+      ),
+    } as never);
+
+    const result = await runToolContract(eurostatBrowseThemes, {
+      theme_code: 'nonexistent_xyz',
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.NotFound,
+        data: {
+          reason: 'not_found',
+          recovery: { hint: expect.stringContaining('without theme_code') },
+        },
+      },
+    });
+    const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+    expect(text).toContain('nonexistent_xyz');
+    expect(text).toContain('eurostat_browse_themes without theme_code');
+  });
+
+  it.each([
+    ['dataset', 'nama_10_gdp'],
+    ['table', 'nama_10_gdp_t'],
+  ] as const)(
+    'preserves not_a_folder recovery for a known %s code on both error response paths',
+    async (entryType, themeCode) => {
+      vi.mocked(getEurostatCatalogueService).mockReturnValue({
+        browse: vi
+          .fn()
+          .mockRejectedValue(
+            new McpError(
+              JsonRpcErrorCode.ValidationError,
+              `Theme code "${themeCode}" identifies a ${entryType}, not a folder.`,
+              { reason: 'not_a_folder', themeCode, entryType },
+            ),
+          ),
+      } as never);
+
+      const result = await runToolContract(eurostatBrowseThemes, { theme_code: themeCode });
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          message: expect.stringContaining(entryType),
+          data: {
+            reason: 'not_a_folder',
+            themeCode,
+            entryType,
+            recovery: {
+              hint: expect.stringMatching(/eurostat_get_dataset_info.*eurostat_query_dataset/i),
+            },
+          },
+        },
+      });
+      const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+      expect(text).toContain(themeCode);
+      expect(text).toContain(entryType);
+      expect(text).toMatch(/eurostat_get_dataset_info.*eurostat_query_dataset/is);
+    },
+  );
 
   it('trims whitespace from theme_code', async () => {
     const mockBrowse = vi.fn().mockResolvedValue({ items: mockRootItems, parentPath: [] });

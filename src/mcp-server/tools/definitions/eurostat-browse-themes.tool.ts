@@ -94,9 +94,16 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
     {
       reason: 'not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The provided theme_code does not exist as a folder in the TOC.',
+      when: 'The provided theme_code does not exist in the TOC.',
       recovery:
         'Call eurostat_browse_themes without theme_code to see valid root themes, then navigate from there.',
+    },
+    {
+      reason: 'not_a_folder',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The provided theme_code identifies a dataset or table entry instead of a folder.',
+      recovery:
+        'Pass the code to eurostat_get_dataset_info to inspect it, then eurostat_query_dataset to retrieve data.',
     },
   ],
 
@@ -107,10 +114,20 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
     try {
       browsed = await svc.browse(themeCode, ctx);
     } catch (err) {
-      if ((err as McpError).data?.reason === 'not_found') {
+      const data = (err as McpError).data;
+      if (data?.reason === 'not_found') {
         throw ctx.fail('not_found', (err as Error).message, {
           recovery: {
             hint: 'Call eurostat_browse_themes without theme_code to see valid root themes, then navigate from there.',
+          },
+        });
+      }
+      if (data?.reason === 'not_a_folder') {
+        throw ctx.fail('not_a_folder', (err as Error).message, {
+          themeCode,
+          entryType: data.entryType,
+          recovery: {
+            hint: `Pass "${themeCode}" as dataset_code to eurostat_get_dataset_info to inspect its dimensions, then eurostat_query_dataset to retrieve data.`,
           },
         });
       }

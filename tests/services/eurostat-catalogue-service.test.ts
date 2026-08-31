@@ -238,11 +238,21 @@ describe('EurostatCatalogueService — browse', () => {
     });
   });
 
-  it('throws not_found when theme code refers to a dataset, not a folder', async () => {
+  it('throws not_a_folder with the dataset type when theme code refers to a dataset', async () => {
     const svc = await makeLoadedService([tocLine('GDP dataset', 'nama_10_gdp', 'dataset')]);
     const ctx = createMockContext();
     await expect(svc.browse('nama_10_gdp', ctx)).rejects.toMatchObject({
-      data: { reason: 'not_found' },
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'not_a_folder', themeCode: 'nama_10_gdp', entryType: 'dataset' },
+    });
+  });
+
+  it('throws not_a_folder with the table type when theme code refers to a table', async () => {
+    const svc = await makeLoadedService([tocLine('GDP table', 'nama_10_gdp_t', 'table')]);
+    const ctx = createMockContext();
+    await expect(svc.browse('nama_10_gdp_t', ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'not_a_folder', themeCode: 'nama_10_gdp_t', entryType: 'table' },
     });
   });
 

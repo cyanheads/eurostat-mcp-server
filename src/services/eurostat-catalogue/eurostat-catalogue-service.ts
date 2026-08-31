@@ -6,7 +6,12 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
-import { invalidParams, notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import {
+  invalidParams,
+  notFound,
+  serviceUnavailable,
+  validationError,
+} from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import {
   decodeCursor,
@@ -306,14 +311,16 @@ export class EurostatCatalogueService {
 
     const folderIdxMaybe = toc.codeIndex.get(themeCode);
     const folderEntry = folderIdxMaybe !== undefined ? toc.entries[folderIdxMaybe] : undefined;
-    if (
-      folderIdxMaybe === undefined ||
-      folderEntry === undefined ||
-      folderEntry.type !== 'folder'
-    ) {
+    if (folderIdxMaybe === undefined || folderEntry === undefined) {
       throw notFound(
         `Theme "${themeCode}" not found in the Eurostat TOC. Use eurostat_browse_themes without theme_code to see top-level themes, then navigate from there.`,
         { reason: 'not_found', themeCode },
+      );
+    }
+    if (folderEntry.type !== 'folder') {
+      throw validationError(
+        `Theme code "${themeCode}" identifies a ${folderEntry.type} entry, not a folder. Only folder codes can be expanded with eurostat_browse_themes.`,
+        { reason: 'not_a_folder', themeCode, entryType: folderEntry.type },
       );
     }
     const childIndexes = this.indexesWhere(toc.entries, (e) => e.parentIndex === folderIdxMaybe);
