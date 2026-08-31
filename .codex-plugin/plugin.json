@@ -1,6 +1,6 @@
 {
   "name": "eurostat-mcp-server",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Search and query the Eurostat catalogue — EU economy, demography, trade, health, and NUTS regional data via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads",

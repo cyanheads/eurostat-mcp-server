@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.3](changelog/0.6.x/0.6.3.md) — 2026-08-30
+
+Distinguishes known dataset and table browse codes from codes absent from the Eurostat catalogue.
+
 ## [0.6.2](changelog/0.6.x/0.6.2.md) — 2026-08-30
 
 Uses dataset-scoped SDMX metadata, adds bounded query previews, and makes query and canvas recovery paths explicit.
