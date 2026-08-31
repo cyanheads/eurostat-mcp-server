@@ -1,6 +1,6 @@
 # eurostat-mcp-server - Directory Structure
 
-Generated on: 2026-08-21 23:11:46
+Generated on: 2026-08-31 05:30:43
 
 ```text
 eurostat-mcp-server/
@@ -162,12 +162,14 @@ eurostat-mcp-server/
 │   │   │   └── types.ts
 │   │   ├── eurostat-data/
 │   │   │   ├── eurostat-data-service.ts
+│   │   │   ├── sdmx-metadata.ts
 │   │   │   └── types.ts
 │   │   ├── canvas-accessor.ts
 │   │   └── eurostat-codelists.ts
 │   └── index.ts
 ├── tests/
 │   ├── fixtures/
+│   │   ├── eurostat-sdmx-metadata.ts
 │   │   ├── sts-inpr-m-ie-confidential.json
 │   │   └── sts-inpr-m-ie-empty.json
 │   ├── helpers/
@@ -179,7 +181,8 @@ eurostat-mcp-server/
 │   │   ├── canvas-accessor.test.ts
 │   │   ├── eurostat-bulk-service.test.ts
 │   │   ├── eurostat-catalogue-service.test.ts
-│   │   └── eurostat-data-service.test.ts
+│   │   ├── eurostat-data-service.test.ts
+│   │   └── eurostat-sdmx-metadata.test.ts
 │   └── tools/
 │       ├── eurostat-browse-themes.tool.test.ts
 │       ├── eurostat-dataframe-describe.tool.test.ts

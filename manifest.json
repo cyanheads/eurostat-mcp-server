@@ -1,10 +1,10 @@
 {
   "manifest_version": "0.3",
   "name": "eurostat-mcp-server",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Search and query the Eurostat catalogue \u2014 EU economy, demography, trade, health, and NUTS regional data via MCP. STDIO or Streamable HTTP.",
   "author": {
-    "name": "Casey Hand",
+    "name": "cyanheads",
     "email": "casey@caseyjhand.com",
     "url": "https://caseyjhand.com"
   },
