@@ -162,6 +162,22 @@ describe('eurostatDownloadDataset — with a canvas', () => {
     expect(result.canvasId).toBeTruthy();
   });
 
+  it('guides callers to describe the staged table before querying it on both response paths', async () => {
+    mockDownload(stubDownload(makeRows(4)));
+
+    const result = await runToolContract(eurostatDownloadDataset, {
+      dataset_code: 'nama_10_gdp',
+      preview_limit: 3,
+    });
+
+    expect(result.structuredContent).toMatchObject({
+      tableName: expect.stringMatching(/^df_[0-9a-f]{8}$/),
+      notice: expect.stringMatching(/eurostat_dataframe_describe.*eurostat_dataframe_query/i),
+    });
+    const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+    expect(text).toMatch(/eurostat_dataframe_describe.*eurostat_dataframe_query/is);
+  });
+
   it('returns a preview that is a prefix of the staged table, not a sample', async () => {
     const rows = makeRows(40);
     mockDownload(stubDownload(rows));
@@ -268,6 +284,32 @@ describe('eurostatDownloadDataset — with a canvas', () => {
     expect(notice).toContain('EUROSTAT_BULK_MAX_BYTES');
   });
 
+  it('composes staged guidance with byte-budget and inline-preview disclosure', async () => {
+    mockDownload(stubDownload(makeRows(5), { budgetExceeded: true, bytesRead: 52_428_912 }));
+
+    const result = await runToolContract(eurostatDownloadDataset, {
+      dataset_code: 'nama_10_gdp',
+      preview_limit: 3,
+    });
+
+    expect(result.structuredContent).toMatchObject({
+      budgetExceeded: true,
+      rowCount: 15,
+      truncated: true,
+      shown: 3,
+      cap: 3,
+      notice: expect.stringMatching(
+        /byte budget.*eurostat_dataframe_describe.*eurostat_dataframe_query/is,
+      ),
+    });
+    const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+    expect(text).toContain('**truncated:** true');
+    expect(text).toContain('**shown:** 3');
+    expect(text).toContain('**cap:** 3');
+    expect(text).toContain('EUROSTAT_BULK_MAX_BYTES');
+    expect(text).toMatch(/eurostat_dataframe_describe.*eurostat_dataframe_query/is);
+  });
+
   it('reports a gzip-compressed body as compressed', async () => {
     mockDownload(stubDownload(makeRows(2), { compressed: true }));
     const ctx = createMockContext({ errors: eurostatDownloadDataset.errors, tenantId: 'default' });
@@ -279,7 +321,7 @@ describe('eurostatDownloadDataset — with a canvas', () => {
     mockDownload(stubDownload(makeRows(2)));
     const ctx = createMockContext({ errors: eurostatDownloadDataset.errors, tenantId: 'default' });
     await eurostatDownloadDataset.handler(parse({}), ctx);
-    expect(getEnrichment(ctx).notice).toBeUndefined();
+    expect(getEnrichment(ctx).notice).not.toContain('byte budget');
   });
 
   it('echoes the request it actually sent, dropping empty filter arrays', async () => {
@@ -335,11 +377,19 @@ describe('eurostatDownloadDataset — with a canvas', () => {
 
   it('fails a download that carried no observations', async () => {
     mockDownload(stubDownload([]));
-    const ctx = createMockContext({ errors: eurostatDownloadDataset.errors, tenantId: 'default' });
-    await expect(eurostatDownloadDataset.handler(parse({}), ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.NotFound,
-      data: { reason: 'no_results' },
+    const result = await runToolContract(eurostatDownloadDataset, {
+      dataset_code: 'nama_10_gdp',
     });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.NotFound,
+        data: { reason: 'no_results', recovery: { hint: expect.any(String) } },
+      },
+    });
+    expect(result.content).toContainEqual(
+      expect.objectContaining({ text: expect.stringContaining('Recovery:') }),
+    );
   });
 });
 
@@ -388,6 +438,23 @@ describe('eurostatDownloadDataset — without a canvas', () => {
     const notice = getEnrichment(ctx).notice as string;
     expect(notice).toContain('byte budget');
     expect(notice).toContain('without a dataframe canvas');
+  });
+
+  it('never advertises dataframe tools when the canvas is disabled', async () => {
+    mockDownload(stubDownload(makeRows(4), { budgetExceeded: true }));
+    const result = await runToolContract(eurostatDownloadDataset, {
+      dataset_code: 'nama_10_gdp',
+      preview_limit: 3,
+    });
+
+    const structuredText = JSON.stringify(result.structuredContent);
+    const contentText = result.content
+      .map((block) => ('text' in block ? block.text : ''))
+      .join('\n');
+    expect(structuredText).not.toContain('eurostat_dataframe_describe');
+    expect(structuredText).not.toContain('eurostat_dataframe_query');
+    expect(contentText).not.toContain('eurostat_dataframe_describe');
+    expect(contentText).not.toContain('eurostat_dataframe_query');
   });
 });
 
@@ -493,6 +560,7 @@ describe('eurostatDownloadDataset — format()', () => {
     ]) {
       expect(text).toContain(fragment);
     }
+    expect(text).toMatch(/eurostat_dataframe_describe.*eurostat_dataframe_query/is);
   });
 
   it('renders a missing value as NULL rather than a blank', () => {

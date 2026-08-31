@@ -97,7 +97,7 @@ const sparseMeta = {
   timeRange: {},
 };
 
-/** Metadata whose `time` value set could not be measured — the enumeration request failed. */
+/** Metadata whose SDMX constraint does not enumerate the `time` value set. */
 const unmeasuredTimeMeta = {
   code: 'nama_10_gdp',
   label: 'GDP and main components',
@@ -798,17 +798,17 @@ describe('Edge cases', () => {
     });
   });
 
-  describe('eurostatQueryDataset — truncation at 5000 observations', () => {
+  describe('eurostatQueryDataset — 5,000-observation staging threshold', () => {
     /**
-     * A capped service result: the decoder stops at 5,000 rows, and `obsCount` reports the
-     * whole match. The two therefore diverge — a fixture where they match cannot occur, and
-     * would let truncation detection read either field and still look correct.
+     * A previewed service result: the decoder stops at the requested 50 rows, and `obsCount`
+     * reports the whole match. The two therefore diverge, keeping preview size independent
+     * from the threshold that sets `truncated`.
      */
     const cappedResult = {
       datasetCode: 'nama_10_gdp',
       datasetLabel: 'GDP',
       dimensionsUsed: ['geo', 'time'],
-      observations: Array.from({ length: 5000 }, (_, i) => ({
+      observations: Array.from({ length: 50 }, (_, i) => ({
         dimensions: {
           geo: { code: `G${i}`, label: `Country ${i}` },
           time: { code: '2024', label: '2024' },
@@ -821,17 +821,15 @@ describe('Edge cases', () => {
       appliedFilters: {},
     };
 
-    it('sets truncated:true from the honest total when the returned rows are already capped', async () => {
+    it('sets truncated:true from the honest total rather than the preview length', async () => {
       vi.mocked(getEurostatDataService).mockReturnValue({
         queryDataset: vi.fn().mockResolvedValue(cappedResult),
       } as never);
       const ctx = createMockContext({ errors: eurostatQueryDataset.errors });
       const input = eurostatQueryDataset.input.parse({ dataset_code: 'nama_10_gdp' });
       const result = await eurostatQueryDataset.handler(input, ctx);
-      // observations.length is 5,000 — exactly the cap — so a check against it would say
-      // "not truncated" and the caller would never learn rows were dropped.
       expect(result.truncated).toBe(true);
-      expect(result.observations).toHaveLength(5000);
+      expect(result.observations).toHaveLength(50);
       expect(result.obsCount).toBe(5100);
     });
 
@@ -842,7 +840,8 @@ describe('Edge cases', () => {
       const ctx = createMockContext({ errors: eurostatQueryDataset.errors });
       const input = eurostatQueryDataset.input.parse({ dataset_code: 'nama_10_gdp' });
       await eurostatQueryDataset.handler(input, ctx);
-      expect(getEnrichment(ctx).notice).toContain('5,000');
+      expect(getEnrichment(ctx).notice).toContain('preview_limit=50');
+      expect(getEnrichment(ctx).notice).toContain('dimension filters');
     });
 
     it('sets truncated:false when observations <= 5000', async () => {
@@ -859,7 +858,7 @@ describe('Edge cases', () => {
       const truncatedResult = {
         ...minimalQueryResult,
         truncated: true,
-        observations: Array.from({ length: 5000 }, (_, i) => ({
+        observations: Array.from({ length: 50 }, (_, i) => ({
           dimensions: {
             geo: { code: `G${i}`, label: `C${i}` },
             time: { code: '2024', label: '2024' },
@@ -1024,6 +1023,7 @@ describe('Edge cases', () => {
         undefined,
         undefined,
         'EN',
+        50,
         ctx,
       );
     });
@@ -1047,6 +1047,7 @@ describe('Edge cases', () => {
         undefined,
         undefined,
         'EN',
+        50,
         ctx,
       );
     });
@@ -1086,6 +1087,7 @@ describe('Edge cases', () => {
         '2024',
         undefined,
         'EN',
+        50,
         ctx,
       );
     });

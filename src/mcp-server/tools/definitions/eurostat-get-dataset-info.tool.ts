@@ -37,7 +37,7 @@ export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
               .number()
               .optional()
               .describe(
-                'Number of distinct values in this dimension. For "time" this is the dataset\'s full period count; every other dimension is counted from the most recent period. Omitted when the value set could not be measured — only "time" can be, and an omitted count is unknown, not one. Call eurostat_get_dimension_values for that dimension to obtain it.',
+                'Number of dataset-available values in this dimension, taken from the dataset content constraint. For "time" this is the full period count. Omitted only when Eurostat does not supply a measurable value set.',
               ),
             sampleValues: z
               .array(
@@ -50,7 +50,7 @@ export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
               )
               .optional()
               .describe(
-                'First 10 dimension values for orientation. Use eurostat_get_dimension_values for the full list. Omitted alongside valuesCount when the value set could not be measured.',
+                'First 10 dataset-available values for orientation. Use eurostat_get_dimension_values for the full constrained list. Omitted alongside valuesCount when Eurostat does not supply a measurable value set.',
               ),
           })
           .describe('A dataset dimension with its valid values.'),

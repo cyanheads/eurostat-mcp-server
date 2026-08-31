@@ -31,6 +31,12 @@ export const eurostatGetDimensionValues = tool('eurostat_get_dimension_values', 
   output: z.object({
     dimensionCode: z.string().describe('The dimension code that was queried.'),
     dimensionLabel: z.string().describe('Human-readable dimension name.'),
+    geoLevel: z
+      .enum(GEO_LEVEL_VALUES)
+      .optional()
+      .describe(
+        'Effective NUTS hierarchy level for the geo value set. Present only for the geo dimension; country is reported when geo_level was omitted.',
+      ),
     values: z
       .array(
         z
@@ -44,8 +50,12 @@ export const eurostatGetDimensionValues = tool('eurostat_get_dimension_values', 
           })
           .describe('A dimension value code and label pair.'),
       )
-      .describe('All valid values for this dimension in the dataset.'),
-    totalCount: z.number().describe('Total number of distinct values returned.'),
+      .describe(
+        'All dataset-available values for this dimension. For geo, this is the subset at geoLevel.',
+      ),
+    totalCount: z
+      .number()
+      .describe('Total number of distinct values returned, after geoLevel filtering for geo.'),
   }),
   errors: [
     {
@@ -58,10 +68,16 @@ export const eurostatGetDimensionValues = tool('eurostat_get_dimension_values', 
     {
       reason: 'async_response',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Eurostat returned an async warning — the dimension query matched too many observations.',
+      when: 'Eurostat returned an asynchronous-response condition.',
       retryable: false,
       recovery:
         'Use eurostat_get_dataset_info for a sampled value set, or narrow the request with geo_level for the geo dimension.',
+    },
+    {
+      reason: 'no_results',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The dataset has no geo values at the effective geo_level.',
+      recovery: 'Choose a different geo_level. Omitted geo_level means country.',
     },
     {
       reason: 'conflicting_params',
@@ -88,6 +104,14 @@ export const eurostatGetDimensionValues = tool('eurostat_get_dimension_values', 
         throw ctx.fail('not_found', (err as Error).message, {
           recovery: {
             hint: `Verify the dataset code with eurostat_search_datasets and the dimension code for "${input.dataset_code}" with eurostat_get_dataset_info.`,
+          },
+        });
+      }
+      if (reason === 'no_results') {
+        const effectiveGeoLevel = input.geo_level ?? 'country';
+        throw ctx.fail('no_results', (err as Error).message, {
+          recovery: {
+            hint: `Dataset "${input.dataset_code}" has no "geo" values at the "${effectiveGeoLevel}" level. Choose another geo_level (aggregate, nuts1, nuts2, or nuts3); omitting geo_level requests country values.`,
           },
         });
       }
@@ -118,6 +142,7 @@ export const eurostatGetDimensionValues = tool('eurostat_get_dimension_values', 
   format: (result) => {
     const lines: string[] = [
       `**Dimension:** ${result.dimensionLabel} (\`${result.dimensionCode}\`)`,
+      ...(result.geoLevel ? [`**Geo level:** \`${result.geoLevel}\``] : []),
       `**Total values:** ${result.totalCount}\n`,
     ];
     for (const v of result.values) {

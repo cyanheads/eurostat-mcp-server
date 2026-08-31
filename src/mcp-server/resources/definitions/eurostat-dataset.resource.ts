@@ -27,7 +27,7 @@ export const eurostatDatasetResource = resource('eurostat://dataset/{dataset_cod
               .number()
               .optional()
               .describe(
-                'Number of distinct values — the dataset\'s full period count for "time", the most recent period\'s codelist otherwise. Omitted when the value set could not be measured — only "time" can be, and an omitted count is unknown, not one.',
+                'Number of dataset-available values from the content constraint, including the full period count for "time". Omitted only when Eurostat does not supply a measurable value set.',
               ),
             sampleValues: z
               .array(
@@ -40,7 +40,7 @@ export const eurostatDatasetResource = resource('eurostat://dataset/{dataset_cod
               )
               .optional()
               .describe(
-                'First 10 values for orientation. Omitted alongside valuesCount when the value set could not be measured.',
+                'First 10 dataset-available values for orientation. Omitted alongside valuesCount when Eurostat does not supply a measurable value set.',
               ),
           })
           .describe('A dataset dimension with its valid values.'),

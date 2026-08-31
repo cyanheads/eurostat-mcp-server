@@ -37,7 +37,7 @@ async function* teePreview(
 export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
   title: 'Download Eurostat Dataset',
   description:
-    'Download a Eurostat dataset in bulk through the SDMX 2.1 TSV endpoint and stage every observation as a SQL table on the dataframe canvas — the route to a whole dataset, where eurostat_query_dataset is the route to a slice of one. The TSV wire format is roughly half the bytes of the JSON-stat body eurostat_query_dataset reads, so it reaches datasets that would otherwise time out, and it is expanded here into one row per observation. Filters take the same dimension-code map eurostat_query_dataset uses and are applied server-side by Eurostat; call eurostat_get_dataset_info first for the dimension codes and eurostat_get_dimension_values for their values. Narrow with since_period/until_period rather than asking for the most recent N periods — the TSV layout keeps a column for every period whichever is requested, so a period range is what actually shrinks the response. Transfers are bounded by a byte budget enforced while streaming: when it is spent the download stops and budgetExceeded is set, leaving a prefix of the dataset rather than an error. Only preview_limit rows come back inline; the rest are reachable with eurostat_dataframe_query when this deployment runs a canvas, and are not retained when it does not.',
+    'Download a Eurostat dataset in bulk through the SDMX 2.1 TSV endpoint and stage every observation as a SQL table on the dataframe canvas — the route to a whole dataset, where eurostat_query_dataset is the route to a slice of one. The TSV wire format is roughly half the bytes of the JSON-stat body eurostat_query_dataset reads, so it reaches datasets that would otherwise time out, and it is expanded here into one row per observation. Filters take the same dimension-code map eurostat_query_dataset uses and are applied server-side by Eurostat; call eurostat_get_dataset_info first for the dimension codes and eurostat_get_dimension_values for their values. Narrow with since_period/until_period rather than asking for the most recent N periods — the TSV layout keeps a column for every period whichever is requested, so a period range is what actually shrinks the response. Transfers are bounded by a byte budget enforced while streaming: when it is spent the download stops and budgetExceeded is set, leaving a prefix of the dataset rather than an error. Only preview_limit rows come back inline. When a table is staged, call eurostat_dataframe_describe first to confirm its columns, then eurostat_dataframe_query; without a canvas, rows past the preview are not retained.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     dataset_code: z.string().min(1).describe('Dataset code (e.g., "nama_10_gdp"). Required.'),
@@ -142,7 +142,7 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
       .string()
       .optional()
       .describe(
-        'Canvas table holding every downloaded observation. Omitted when this deployment runs without a dataframe canvas, in which case only the inline preview survives the call.',
+        'Canvas table holding every downloaded observation. Call eurostat_dataframe_describe with canvasId first to confirm the table and columns, then eurostat_dataframe_query. Omitted when this deployment runs without a dataframe canvas, in which case only the inline preview survives the call.',
       ),
     stagedRowCount: z
       .number()
@@ -170,7 +170,7 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
       .string()
       .optional()
       .describe(
-        'Guidance when the download was cut short by the byte budget, when nothing could be staged, or when it returned no observations. Omitted otherwise.',
+        'Guidance for every staged result, including the required eurostat_dataframe_describe then eurostat_dataframe_query sequence, composed with byte-budget, no-canvas, or empty-result disclosure when applicable.',
       ),
   },
 
@@ -359,6 +359,10 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
       notices.push(
         `This deployment runs without a dataframe canvas, so nothing was staged: only the ${preview.length.toLocaleString()} observations returned inline are retained, and the other ${(stats.rowCount - preview.length).toLocaleString()} were counted and discarded. Set CANVAS_PROVIDER_TYPE=duckdb to keep the download, or use eurostat_query_dataset with dimension filters to fetch a slice small enough to return whole.`,
       );
+    } else {
+      notices.push(
+        `All ${staged.stagedRowCount.toLocaleString()} downloaded observations are staged as table "${staged.tableName}" on canvas "${staged.canvasId}". Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query.`,
+      );
     }
     if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
@@ -393,7 +397,7 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
     ];
     lines.push(
       result.tableName
-        ? `**Staged:** table \`${result.tableName}\` on canvas \`${result.canvasId}\` (stagedRowCount ${result.stagedRowCount}) — query it with eurostat_dataframe_query`
+        ? `**Staged:** table \`${result.tableName}\` on canvas \`${result.canvasId}\` (stagedRowCount ${result.stagedRowCount}) — inspect it with eurostat_dataframe_describe first, then query it with eurostat_dataframe_query`
         : '**Staged:** nothing — this deployment runs without a dataframe canvas, so only the rows below are retained',
     );
     lines.push('', `## First ${result.observations.length} observations`);

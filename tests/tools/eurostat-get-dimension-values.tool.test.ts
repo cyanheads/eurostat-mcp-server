@@ -3,7 +3,7 @@
  * @module tests/tools/eurostat-get-dimension-values.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { eurostatGetDimensionValues } from '@/mcp-server/tools/definitions/eurostat-get-dimension-values.tool.js';
 
@@ -27,6 +27,7 @@ const mockUnitResult = {
 const mockGeoResult = {
   dimensionCode: 'geo',
   dimensionLabel: 'Geopolitical entity (reporting)',
+  geoLevel: 'country' as const,
   values: [
     { code: 'DE', label: 'Germany' },
     { code: 'FR', label: 'France' },
@@ -144,6 +145,49 @@ describe('eurostatGetDimensionValues', () => {
         recovery: { hint: expect.stringContaining('unit') },
       },
     });
+  });
+
+  it('surfaces a level-specific no_results contract for an empty geo level (#38)', async () => {
+    vi.mocked(getEurostatDataService).mockReturnValue({
+      getDimensionValues: vi.fn().mockRejectedValue(
+        Object.assign(new Error('No country values'), {
+          data: { reason: 'no_results', geoLevel: 'country' },
+        }),
+      ),
+    } as never);
+    const result = await runToolContract(eurostatGetDimensionValues, {
+      dataset_code: 'tgs00010',
+      dimension: 'geo',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: {
+          reason: 'no_results',
+          recovery: { hint: expect.stringContaining('country') },
+        },
+      },
+    });
+    expect(result.content).toContainEqual(
+      expect.objectContaining({ text: expect.stringContaining('Recovery:') }),
+    );
+  });
+
+  it('carries the effective geo level through structuredContent and content', async () => {
+    vi.mocked(getEurostatDataService).mockReturnValue({
+      getDimensionValues: vi.fn().mockResolvedValue(mockGeoResult),
+    } as never);
+    const ctx = createMockContext({ errors: eurostatGetDimensionValues.errors });
+    const input = eurostatGetDimensionValues.input.parse({
+      dataset_code: 'earn_ses_annual',
+      dimension: 'geo',
+    });
+    const result = await eurostatGetDimensionValues.handler(input, ctx);
+    expect(eurostatGetDimensionValues.output.parse(result).geoLevel).toBe('country');
+    const text = eurostatGetDimensionValues.format!(result)
+      .map((block) => (block.type === 'text' ? block.text : ''))
+      .join('');
+    expect(text).toContain('country');
   });
 
   it('formats output with all values', () => {

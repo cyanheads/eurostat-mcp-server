@@ -1,6 +1,5 @@
 /**
- * @fileoverview Eurostat Data Service — HTTP client for the Statistics API (JSON-stat 2.0),
- * includes JSON-stat parsing and stride-based index decoding.
+ * @fileoverview Eurostat Data Service — Statistics API querying plus dataset-scoped SDMX metadata.
  * @module services/eurostat-data/eurostat-data-service
  */
 
@@ -25,9 +24,9 @@ import {
   OBS_FLAG_LABELS,
   OBS_VALUE_COLUMN,
 } from '@/services/eurostat-codelists.js';
+import { parseSdmxDatasetMetadata, type SdmxDatasetMetadata } from './sdmx-metadata.js';
 import {
   type DatasetMeta,
-  type DimensionInfo,
   type DimensionValuesResult,
   type GeoLevel,
   type JsonStatResponse,
@@ -104,6 +103,58 @@ export class EurostatDataService {
     return url;
   }
 
+  private buildSdmxUrl(resource: 'contentconstraint' | 'dataflow', datasetCode: string): URL {
+    const { baseUrl } = getServerConfig();
+    const url = new URL(
+      `${baseUrl}/sdmx/2.1/${resource}/ESTAT/${encodeURIComponent(datasetCode)}/1.0`,
+    );
+    if (resource === 'dataflow') {
+      url.searchParams.set('references', 'descendants');
+      url.searchParams.set('detail', 'referencepartial');
+    }
+    return url;
+  }
+
+  private fetchSdmxXml(url: URL, datasetCode: string, ctx: Context): Promise<string> {
+    const { requestTimeoutMs } = getServerConfig();
+    return withRetry(
+      async () => {
+        try {
+          const response = await fetchWithTimeout(url.toString(), requestTimeoutMs, ctx, {
+            signal: ctx.signal,
+            expectedStatuses: [404],
+          });
+          return await response.text();
+        } catch (error) {
+          const status = error instanceof McpError ? error.data?.status : undefined;
+          if (status === 404) {
+            throw notFound(
+              `Dataset "${datasetCode}" was not found in Eurostat's SDMX dataflows. Verify the code with eurostat_search_datasets or eurostat_browse_themes.`,
+              { reason: 'not_found', datasetCode },
+            );
+          }
+          throw error;
+        }
+      },
+      { operation: 'fetchSdmxMetadata', context: ctx, baseDelayMs: 1000, signal: ctx.signal },
+    );
+  }
+
+  private async getSdmxMetadata(datasetCode: string, ctx: Context): Promise<SdmxDatasetMetadata> {
+    const [dataflowXml, constraintXml] = await Promise.all([
+      this.fetchSdmxXml(this.buildSdmxUrl('dataflow', datasetCode), datasetCode, ctx),
+      this.fetchSdmxXml(this.buildSdmxUrl('contentconstraint', datasetCode), datasetCode, ctx),
+    ]);
+    try {
+      return parseSdmxDatasetMetadata(dataflowXml, constraintXml, datasetCode);
+    } catch (error) {
+      throw serviceUnavailable(
+        `Eurostat returned malformed SDMX metadata for dataset "${datasetCode}": ${error instanceof Error ? error.message : String(error)}`,
+        { reason: 'upstream_fault', datasetCode, retryable: false },
+      );
+    }
+  }
+
   private fetchJson(url: URL, ctx: Context): Promise<JsonStatResponse> {
     const { requestTimeoutMs } = getServerConfig();
     return withRetry(
@@ -163,9 +214,12 @@ export class EurostatDataService {
   }
 
   private checkResponseErrors(data: JsonStatResponse, url: string): void {
-    // Async response: query too large
-    if (data.warning?.status === 413) {
-      // Non-retryable: the same query re-run immediately just re-triggers the async warning.
+    const firstError = Array.isArray(data.error) ? data.error[0] : undefined;
+
+    // Async response: query too large. Eurostat emits both a warning object on HTTP 200 and
+    // an error-array item on HTTP 413; classify both before withRetry sees the error.
+    if (data.warning?.status === 413 || firstError?.status === 413) {
+      // Non-retryable: the same query re-run immediately just re-triggers the async response.
       // Fail fast so callers narrow the query instead of hammering the endpoint (matches the
       // async_response contract's retryable: false).
       throw serviceUnavailable(
@@ -175,10 +229,15 @@ export class EurostatDataService {
     }
 
     // Error responses
-    if (Array.isArray(data.error) && data.error.length > 0) {
-      const err = data.error[0];
-      if (!err) return; // noUncheckedIndexedAccess: length > 0 guarantees this, but guard for TS
-      if (err.status === 404 || err.id === 100) {
+    if (firstError) {
+      const err = firstError;
+      if (err.status === 200 && err.id === 100) {
+        throw notFound(
+          `Eurostat returned no observations for this query. Verify the dimension filters with eurostat_get_dimension_values and keep the period range inside the dataset's coverage.`,
+          { reason: 'no_results', eurostatError: err },
+        );
+      }
+      if (err.status === 404) {
         throw notFound(
           `Dataset not found. Eurostat error: ${err.label}. Verify the dataset code with eurostat_search_datasets or eurostat_browse_themes.`,
           { reason: 'not_found', eurostatError: err },
@@ -215,11 +274,11 @@ export class EurostatDataService {
   /**
    * Count the response's populated cells without decoding them.
    *
-   * `decodeObservations` stops at its row cap, so the totals reported alongside a capped
-   * result cannot be derived from the decoded array. This walks the `value`/`status` key
+   * `decodeObservations` stops at its preview bound, so the totals reported alongside a
+   * preview cannot be derived from the decoded array. This walks the `value`/`status` key
    * maps instead — one pass, no per-observation object — so the caller is told how large
    * the whole match is, how much of it is missing, and which periods it spans, whatever
-   * the cap. Cell membership matches the decoder exactly: a cell counts when it appears in
+   * the preview bound. Cell membership matches the decoder exactly: a cell counts when it appears in
    * either map at an in-range linear index, and counts as missing when no numeric value
    * accompanies it. `queryDataset` also reads `obsCount` reaching zero as the no-results
    * condition, so one count decides both what the response reports and whether there is a
@@ -278,7 +337,7 @@ export class EurostatDataService {
    * itself rather than reading from the upstream key order, so a given response
    * always yields the same rows in the same sequence. Being a generator, it
    * allocates one observation per pull and none in advance, which is what lets
-   * the same walk serve both a capped decode and an uncapped dataframe spill.
+   * the same walk serve both a bounded preview and an uncapped dataframe spill.
    *
    * This is the only place cell membership is decided: a cell is an observation
    * when its linear index appears in `value` or in `status`. `scanCells` counts
@@ -365,94 +424,10 @@ export class EurostatDataService {
     return data.extension?.annotation?.find((a) => a.type === type)?.[field];
   }
 
-  /**
-   * Build dataset metadata from a `lastTimePeriod=1` slice.
-   *
-   * `timeSlice`, when supplied, is a second response covering the dataset's full period
-   * range (see `getDatasetInfo`); the `time` dimension is read from it and from nowhere
-   * else. The one-period slice reports a single value for `time` whatever the dataset's
-   * real range, so with no usable `timeSlice` that dimension's `valuesCount`/`sampleValues`
-   * are omitted rather than taken from it — an unmeasured period count is not a count of 1.
-   *
-   * Annotation-derived fields are omitted when Eurostat does not report them — a missing
-   * observation count is not a zero, and a missing period bound is not an empty string.
-   */
-  private extractMetadata(
-    data: JsonStatResponse,
-    datasetCode: string,
-    timeSlice?: JsonStatResponse,
-  ): DatasetMeta {
-    const dims = data.id ?? [];
-    const dimension = data.dimension ?? {};
-
-    const dimensions: DimensionInfo[] = dims.map((dimCode) => {
-      const isTime = dimCode === 'time';
-      const cat = isTime ? timeSlice?.dimension?.[dimCode]?.category : dimension[dimCode]?.category;
-      const label = dimension[dimCode]?.label ?? dimCode;
-      if (isTime && !cat) return { code: dimCode, label };
-      const allValues = cat?.index ? Object.entries(cat.index).sort(([, a], [, b]) => a - b) : [];
-      return {
-        code: dimCode,
-        label,
-        valuesCount: allValues.length,
-        sampleValues: allValues.slice(0, 10).map(([code]) => ({
-          code,
-          label: cat?.label?.[code] ?? code,
-        })),
-      };
-    });
-
-    // An absent annotation and an unparseable one both land on NaN, and neither is a count.
-    const obsCount = Number.parseInt(this.extractAnnotation(data, 'OBS_COUNT', 'title') ?? '', 10);
-
-    const start = this.extractAnnotation(data, 'OBS_PERIOD_OVERALL_OLDEST', 'title');
-    const end = this.extractAnnotation(data, 'OBS_PERIOD_OVERALL_LATEST', 'title');
-    const lastUpdated = this.extractAnnotation(data, 'UPDATE_DATA', 'date');
-    const metadataUrl = this.extractAnnotation(data, 'ESMS_HTML', 'href');
-
-    return {
-      code: datasetCode,
-      label: data.label ?? datasetCode,
-      dimensions,
-      timeRange: { ...(start && { start }), ...(end && { end }) },
-      ...(!Number.isNaN(obsCount) && { obsCount }),
-      ...(lastUpdated && { lastUpdated }),
-      ...(metadataUrl && { metadataUrl }),
-    };
-  }
-
-  /**
-   * Fetch dataset metadata using a minimal `lastTimePeriod=1` query.
-   *
-   * That slice carries every dimension's full codelist except `time`, which it truncates to
-   * the single period it selects. A second bounded query — the same pin-and-probe
-   * `getDimensionValues` uses, with the first response serving as the probe — enumerates the
-   * real period set, so `time` reports its actual count instead of the filter's artifact.
-   * Cost: one extra round trip, bounded to |time| observations.
-   *
-   * That second request answers one dimension's value count; every other field comes from
-   * the first response. A failure on it therefore returns the metadata already in hand with
-   * `time`'s `valuesCount`/`sampleValues` omitted, rather than discarding the dataset label,
-   * dimension list, period range, observation count and metadata URL along with it.
-   */
+  /** Fetch complete dataset metadata from its scoped SDMX structure and content constraint. */
   async getDatasetInfo(datasetCode: string, ctx: Context): Promise<DatasetMeta> {
     ctx.log.info('Fetching dataset info', { datasetCode });
-    const data = await this.fetchJson(this.buildUrl(datasetCode, { lastTimePeriod: '1' }), ctx);
-    let timeSlice: JsonStatResponse | undefined;
-    if ((data.id ?? []).includes('time')) {
-      try {
-        timeSlice = await this.fetchJson(
-          this.buildUrl(datasetCode, this.pinDimensions(data, 'time')),
-          ctx,
-        );
-      } catch (error) {
-        ctx.log.warning('Time period enumeration failed — reporting metadata without it', {
-          datasetCode,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
-    return this.extractMetadata(data, datasetCode, timeSlice);
+    return (await this.getSdmxMetadata(datasetCode, ctx)).meta;
   }
 
   /**
@@ -477,43 +452,11 @@ export class EurostatDataService {
   }
 
   /**
-   * Build a filter that pins every dimension except `exceptDim` to its first (index 0)
-   * value, drawn from a probe response. Eurostat orders the primary/aggregate value first
-   * (e.g. an EU aggregate for `geo`), which typically carries the dataset's full time
-   * coverage — so pinning to it and leaving `exceptDim` unfiltered enumerates that
-   * dimension's complete value set with a minimal observation count.
-   */
-  private pinDimensions(data: JsonStatResponse, exceptDim: string): Record<string, string> {
-    const pins: Record<string, string> = {};
-    for (const dim of data.id ?? []) {
-      if (dim === exceptDim) continue;
-      const index = data.dimension?.[dim]?.category?.index;
-      if (!index) continue;
-      let firstCode: string | undefined;
-      let firstPos = Number.POSITIVE_INFINITY;
-      for (const [code, pos] of Object.entries(index)) {
-        if (pos < firstPos) {
-          firstPos = pos;
-          firstCode = code;
-        }
-      }
-      if (firstCode !== undefined) pins[dim] = firstCode;
-    }
-    return pins;
-  }
-
-  /**
    * Get all valid values for a specific dimension in a dataset.
    *
-   * `time` is the only dimension truncated by a `lastTimePeriod=1` slice, so it is enumerated
-   * by pinning the other dimensions to a single value each (from a cheap probe) and leaving
-   * `time` unfiltered — returning the full period range while keeping the query bounded to
-   * |time| observations (avoiding the async 413 an unfiltered query risks on large datasets).
-   * Every other dimension's full codelist is present in any single period, so `lastTimePeriod=1`
-   * is both complete and cheap; for `geo` the NUTS level is applied, defaulting to `country`.
-   *
-   * `geoLevel` is a NUTS filter and only applies to `geo`; pairing it with any other dimension
-   * is rejected rather than accepted and ignored.
+   * Values come from the dataset's content constraint, not from a populated observation
+   * slice. For `geo`, the requested hierarchy level is applied locally and defaults to
+   * `country`; the effective level is returned so an omitted default is still visible.
    */
   async getDimensionValues(
     datasetCode: string,
@@ -530,49 +473,48 @@ export class EurostatDataService {
       );
     }
 
-    let data: JsonStatResponse;
-    if (dimension === 'time') {
-      const probe = await this.fetchJson(this.buildUrl(datasetCode, { lastTimePeriod: '1' }), ctx);
-      data = await this.fetchJson(
-        this.buildUrl(datasetCode, this.pinDimensions(probe, 'time')),
-        ctx,
-      );
-    } else {
-      const params: Record<string, string | string[]> = { lastTimePeriod: '1' };
-      if (dimension === 'geo') params.geoLevel = geoLevel ?? 'country';
-      data = await this.fetchJson(this.buildUrl(datasetCode, params), ctx);
-    }
-
-    const dimDef = data.dimension?.[dimension];
-    if (!dimDef) {
+    const metadata = await this.getSdmxMetadata(datasetCode, ctx);
+    const dimDef = metadata.meta.dimensions.find(({ code }) => code === dimension);
+    const values = metadata.valuesByDimension[dimension];
+    if (!dimDef || !values) {
       throw notFound(
         `Dimension "${dimension}" not found in dataset "${datasetCode}". Use eurostat_get_dataset_info to see valid dimensions.`,
         { reason: 'not_found', datasetCode, dimension },
       );
     }
 
-    const cat = dimDef.category;
-    const allValues = cat?.index
-      ? Object.entries(cat.index)
-          .sort(([, a], [, b]) => a - b)
-          .map(([code]) => ({ code, label: cat.label?.[code] ?? code }))
-      : [];
+    const effectiveGeoLevel = dimension === 'geo' ? (geoLevel ?? 'country') : undefined;
+    const filteredValues = effectiveGeoLevel
+      ? values.filter(({ code }) => metadata.geoLevelsByCode[code] === effectiveGeoLevel)
+      : values;
+    if (effectiveGeoLevel && filteredValues.length === 0) {
+      throw notFound(
+        `Dataset "${datasetCode}" has no "geo" values at the "${effectiveGeoLevel}" level. Choose a different geo_level or omit geo_level only when country values are wanted.`,
+        {
+          reason: 'no_results',
+          datasetCode,
+          dimension,
+          geoLevel: effectiveGeoLevel,
+        },
+      );
+    }
 
     return {
       dimensionCode: dimension,
-      dimensionLabel: dimDef.label ?? dimension,
-      values: allValues,
-      totalCount: allValues.length,
+      dimensionLabel: dimDef.label,
+      ...(effectiveGeoLevel && { geoLevel: effectiveGeoLevel }),
+      values: filteredValues,
+      totalCount: filteredValues.length,
     };
   }
 
   /**
    * Query dataset observations with dimension filters.
    *
-   * Returns the capped observation list alongside `rows()`, a lazy generator
-   * over the whole match. Both read the same response body — already in memory
-   * before decoding starts — so reaching the rows past the cap costs no
-   * additional upstream request.
+   * Returns the requested observation preview alongside `rows()`, a lazy
+   * generator over the whole match. Both read the same response body — already
+   * in memory before decoding starts — so reaching rows outside the preview
+   * costs no additional upstream request.
    */
   async queryDataset(
     datasetCode: string,
@@ -582,6 +524,7 @@ export class EurostatDataService {
     untilP: string | undefined,
     lastN: number | undefined,
     lang: string,
+    previewLimit: number,
     ctx: Context,
   ): Promise<QueryExecution> {
     // A zero-length filter array places no restriction on the request. Drop those entries once,
@@ -645,7 +588,7 @@ export class EurostatDataService {
       );
     }
 
-    const observations = this.decodeObservations(data, OBS_CAP);
+    const observations = this.decodeObservations(data, Math.min(previewLimit, OBS_CAP));
 
     // Compute timeRange from the actual time dimension values in the response.
     // Fall back to dataset-wide annotations only when no time dimension is present, and omit

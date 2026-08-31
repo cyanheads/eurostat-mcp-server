@@ -71,7 +71,7 @@ export interface Observation {
 export type ObservationRow = Record<string, string | number | null>;
 
 /**
- * Metadata about a dataset extracted from a JSON-stat response.
+ * Metadata about a dataset extracted from its dataset-scoped SDMX structures.
  *
  * Annotation-derived fields are absent when Eurostat does not report them, rather than
  * defaulted — a missing count is not a zero, and a missing period bound is not an empty string.
@@ -89,11 +89,10 @@ export interface DatasetMeta {
 /**
  * One dimension of a dataset.
  *
- * `valuesCount`/`sampleValues` are absent when the dimension's value set could not be
- * measured. That happens for `time`, whose real period range takes a second request the
- * rest of the metadata does not depend on: when that request fails, the fields are omitted
- * rather than filled from the one-period slice, which would report a period count of 1 for
- * every dataset.
+ * `valuesCount`/`sampleValues` describe the values the dataset-scoped SDMX content
+ * constraint permits. They are absent when that constraint does not enumerate the
+ * dimension, rather than inferred from an observation slice that may cover only part of
+ * the dataset.
  */
 export interface DimensionInfo {
   code: string;
@@ -101,8 +100,9 @@ export interface DimensionInfo {
   /** First 10 values as orientation. Absent when the value set was not measured. */
   sampleValues?: Array<{ code: string; label: string }>;
   /**
-   * Distinct values for this dimension: the dataset's full period set for `time`, the most
-   * recent period's codelist otherwise. Absent when the value set was not measured.
+   * Distinct values permitted by the dataset-scoped content constraint, falling back to the
+   * referenced codelist when the constraint omits the dimension. Absent when neither source
+   * supplies a measurable value set.
    */
   valuesCount?: number;
 }
@@ -110,6 +110,8 @@ export interface DimensionInfo {
 export interface DimensionValuesResult {
   dimensionCode: string;
   dimensionLabel: string;
+  /** Effective hierarchy level for `geo`, including the omitted-input default. */
+  geoLevel?: GeoLevel;
   totalCount: number;
   values: Array<{ code: string; label: string }>;
 }
@@ -117,10 +119,10 @@ export interface DimensionValuesResult {
 /**
  * A decoded query result.
  *
- * `observations` is capped at `OBS_CAP`; `obsCount`, `missingObsCount` and `timeRange`
- * describe the whole match, so `obsCount` and `observations.length` diverge whenever the
- * cap bites. They are counted from the response's cell keys rather than from the decoded
- * array, so capping never changes what they report.
+ * `observations` is the caller-bounded deterministic prefix; `obsCount`,
+ * `missingObsCount` and `timeRange` describe the whole match. They are counted from the
+ * response's cell keys rather than from the decoded array, so previewing never changes
+ * what they report.
  *
  * `timeRange` bounds are absent when neither the returned observations nor the dataset-wide
  * annotations report them — an unknown bound is not an empty period.
@@ -133,9 +135,9 @@ export interface QueryResult {
   dimensionsUsed: string[];
   /** Observations with no value across the whole match, not just the decoded page. */
   missingObsCount: number;
-  /** Observations matched upstream, before the `OBS_CAP` decode cap. */
+  /** Observations matched upstream, before the inline preview bound. */
   obsCount: number;
-  /** Decoded observations, capped at `OBS_CAP` — the first cap rows in linear-index order. */
+  /** Decoded observations — the requested prefix in linear-index order. */
   observations: Observation[];
   timeRange: { start?: string; end?: string };
 }
@@ -143,8 +145,8 @@ export interface QueryResult {
 /**
  * A query result plus a lazy row source over everything it matched.
  *
- * `observations` stops at `OBS_CAP`; `rows()` does not. Both read the same
- * single walk of the response, so the capped list is always a prefix of the row
+ * `observations` stops at the requested preview bound; `rows()` does not. Both
+ * read the same response, so the preview is always a prefix of the row
  * source rather than a separately-derived set that can drift from it.
  */
 export interface QueryExecution extends QueryResult {
@@ -158,10 +160,10 @@ export interface QueryExecution extends QueryResult {
 }
 
 /**
- * Upper bound on decoded observations returned for one query.
+ * Decode safety limit and threshold for staging a full matched result.
  *
- * Applied inside the decoder, so an oversized match never materializes as observation
- * objects. The totals alongside `observations` stay honest about the full match.
+ * The public preview limit is lower, but the decoder still enforces this ceiling. Matches
+ * above it are the only ones eligible for Canvas staging; totals remain uncapped.
  */
 export const OBS_CAP = 5_000;
 

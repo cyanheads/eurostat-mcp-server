@@ -23,6 +23,11 @@ import {
   type Observation,
   type ObservationRow,
 } from '@/services/eurostat-data/types.js';
+import {
+  SDMX_CONSTRAINT_WITHOUT_COUNTRIES_XML,
+  SDMX_CONSTRAINT_XML,
+  SDMX_DATAFLOW_XML,
+} from '../fixtures/eurostat-sdmx-metadata.js';
 
 /** Minimal mock AppConfig and StorageService — service ignores both */
 const mockConfig = {} as never;
@@ -407,6 +412,36 @@ describe('EurostatDataService — checkResponseErrors', () => {
     ).toThrow();
   });
 
+  it('classifies HTTP-200 error id 100 as no_results rather than a missing dataset (#37)', () => {
+    const data: JsonStatResponse = {
+      error: [{ status: 200, id: 100, label: 'NO_RESULTS' }],
+    };
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (svc as any).checkResponseErrors(data, 'https://example.com');
+      throw new Error('Expected checkResponseErrors to throw');
+    } catch (err) {
+      expect((err as McpError).data).toMatchObject({ reason: 'no_results' });
+      expect((err as Error).message).not.toContain('Dataset not found');
+    }
+  });
+
+  it('classifies an error-array status 413 as non-retryable async_response (#44)', () => {
+    const data: JsonStatResponse = {
+      error: [{ status: 413, id: 413, label: 'ASYNCHRONOUS_RESPONSE' }],
+    };
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (svc as any).checkResponseErrors(data, 'https://example.com');
+      throw new Error('Expected checkResponseErrors to throw');
+    } catch (err) {
+      expect((err as McpError).data).toMatchObject({
+        reason: 'async_response',
+        retryable: false,
+      });
+    }
+  });
+
   it('throws invalid_dimension on error id 150', () => {
     const data: JsonStatResponse = {
       error: [{ status: 400, id: 150, label: 'Invalid dimension' }],
@@ -451,235 +486,6 @@ describe('EurostatDataService — checkResponseErrors', () => {
 });
 
 // ---------------------------------------------------------------------------
-// extractMetadata
-// ---------------------------------------------------------------------------
-
-describe('EurostatDataService — extractMetadata', () => {
-  let svc: EurostatDataService;
-
-  beforeEach(() => {
-    svc = new EurostatDataService(mockConfig, mockStorage);
-  });
-
-  it('extracts label, timeRange, obsCount, and metadataUrl from annotations', () => {
-    const data: JsonStatResponse = {
-      label: 'GDP and main components',
-      id: ['unit', 'geo'],
-      size: [2, 3],
-      dimension: {
-        unit: {
-          label: 'Unit',
-          category: {
-            index: { CP_MEUR: 0, CLV10_MEUR: 1 },
-            label: { CP_MEUR: 'Current prices', CLV10_MEUR: 'Chain volumes' },
-          },
-        },
-        geo: {
-          label: 'Geography',
-          category: {
-            index: { DE: 0, FR: 1, IT: 2 },
-            label: { DE: 'Germany', FR: 'France', IT: 'Italy' },
-          },
-        },
-      },
-      extension: {
-        annotation: [
-          { type: 'OBS_COUNT', title: '1100000' },
-          { type: 'OBS_PERIOD_OVERALL_OLDEST', title: '1975' },
-          { type: 'OBS_PERIOD_OVERALL_LATEST', title: '2024' },
-          { type: 'UPDATE_DATA', date: '2026-05-01T00:00:00Z' },
-          {
-            type: 'ESMS_HTML',
-            href: 'https://ec.europa.eu/eurostat/cache/metadata/en/nama_10_gdp_esms.htm',
-          },
-        ],
-      },
-    };
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const meta = (svc as any).extractMetadata(data, 'nama_10_gdp');
-    expect(meta.code).toBe('nama_10_gdp');
-    expect(meta.label).toBe('GDP and main components');
-    expect(meta.obsCount).toBe(1_100_000);
-    expect(meta.timeRange.start).toBe('1975');
-    expect(meta.timeRange.end).toBe('2024');
-    expect(meta.lastUpdated).toBe('2026-05-01T00:00:00Z');
-    expect(meta.metadataUrl).toBe(
-      'https://ec.europa.eu/eurostat/cache/metadata/en/nama_10_gdp_esms.htm',
-    );
-  });
-
-  it('omits metadataUrl when ESMS_HTML annotation is absent', () => {
-    const data: JsonStatResponse = {
-      label: 'Dataset',
-      id: ['geo'],
-      size: [1],
-      dimension: {
-        geo: { label: 'Geo', category: { index: { DE: 0 }, label: { DE: 'Germany' } } },
-      },
-      extension: {
-        annotation: [
-          { type: 'OBS_COUNT', title: '100' },
-          { type: 'OBS_PERIOD_OVERALL_OLDEST', title: '2020' },
-          { type: 'OBS_PERIOD_OVERALL_LATEST', title: '2024' },
-          { type: 'UPDATE_DATA', date: '2025-01-01T00:00:00Z' },
-        ],
-      },
-    };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const meta = (svc as any).extractMetadata(data, 'xyz');
-    expect(meta.metadataUrl).toBeUndefined();
-  });
-
-  it('omits obsCount, timeRange bounds, and lastUpdated when their annotations are absent', () => {
-    const data: JsonStatResponse = {
-      label: 'Dataset',
-      id: ['geo'],
-      size: [1],
-      dimension: {
-        geo: { label: 'Geo', category: { index: { DE: 0 }, label: {} } },
-      },
-    };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const meta = (svc as any).extractMetadata(data, 'xyz');
-    // Previously defaulted to 0 / '' / '', which a caller could not tell apart from a real
-    // zero count or a known-empty period. Absent upstream metadata is now absent here too.
-    expect(meta.obsCount).toBeUndefined();
-    expect(meta.timeRange.start).toBeUndefined();
-    expect(meta.timeRange.end).toBeUndefined();
-    expect(meta.lastUpdated).toBeUndefined();
-    expect('obsCount' in meta).toBe(false);
-    expect('lastUpdated' in meta).toBe(false);
-  });
-
-  it('keeps a genuinely reported zero obsCount distinct from an absent one', () => {
-    const data: JsonStatResponse = {
-      label: 'Dataset',
-      id: ['geo'],
-      size: [1],
-      dimension: { geo: { label: 'Geo', category: { index: { DE: 0 }, label: {} } } },
-      extension: { annotation: [{ type: 'OBS_COUNT', title: '0' }] },
-    };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const meta = (svc as any).extractMetadata(data, 'xyz');
-    expect(meta.obsCount).toBe(0);
-  });
-
-  it('omits obsCount when the annotation is present but unparseable', () => {
-    const data: JsonStatResponse = {
-      label: 'Dataset',
-      id: ['geo'],
-      size: [1],
-      dimension: { geo: { label: 'Geo', category: { index: { DE: 0 }, label: {} } } },
-      extension: { annotation: [{ type: 'OBS_COUNT', title: 'not-a-number' }] },
-    };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const meta = (svc as any).extractMetadata(data, 'xyz');
-    expect(meta.obsCount).toBeUndefined();
-  });
-
-  it('carries one period bound when only the other annotation is absent', () => {
-    const data: JsonStatResponse = {
-      label: 'Dataset',
-      id: ['geo'],
-      size: [1],
-      dimension: { geo: { label: 'Geo', category: { index: { DE: 0 }, label: {} } } },
-      extension: { annotation: [{ type: 'OBS_PERIOD_OVERALL_OLDEST', title: '1975' }] },
-    };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const meta = (svc as any).extractMetadata(data, 'xyz');
-    expect(meta.timeRange.start).toBe('1975');
-    expect(meta.timeRange.end).toBeUndefined();
-  });
-
-  it('counts time from the full-range slice instead of the one-period slice', () => {
-    // The lastTimePeriod=1 response every metadata call starts from: time truncated to one value.
-    const onePeriod: JsonStatResponse = {
-      label: 'Dataset',
-      id: ['geo', 'time'],
-      size: [2, 1],
-      dimension: {
-        geo: { label: 'Geo', category: { index: { EU27_2020: 0, DE: 1 }, label: {} } },
-        time: { label: 'Time', category: { index: { '2025': 0 }, label: { '2025': '2025' } } },
-      },
-    };
-    const fullRange: JsonStatResponse = {
-      label: 'Dataset',
-      id: ['geo', 'time'],
-      size: [1, 3],
-      dimension: {
-        geo: { label: 'Geo', category: { index: { EU27_2020: 0 }, label: {} } },
-        time: {
-          label: 'Time',
-          category: {
-            index: { '2023': 0, '2024': 1, '2025': 2 },
-            label: { '2023': '2023', '2024': '2024', '2025': '2025' },
-          },
-        },
-      },
-    };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const meta = (svc as any).extractMetadata(onePeriod, 'xyz', fullRange);
-    const time = meta.dimensions.find((d: { code: string }) => d.code === 'time');
-    expect(time.valuesCount).toBe(3);
-    expect(time.sampleValues.map((v: { code: string }) => v.code)).toEqual([
-      '2023',
-      '2024',
-      '2025',
-    ]);
-    // Every other dimension still comes from the one-period slice, which carries the full codelist.
-    const geo = meta.dimensions.find((d: { code: string }) => d.code === 'geo');
-    expect(geo.valuesCount).toBe(2);
-  });
-
-  it('omits the time value count when no full-range slice was supplied (#34)', () => {
-    // The one-period slice reports a single period for `time` whatever the dataset covers.
-    // With no slice to read the real range from, the count is omitted — not taken from here.
-    const onePeriod: JsonStatResponse = {
-      label: 'Dataset',
-      id: ['geo', 'time'],
-      size: [2, 1],
-      dimension: {
-        geo: { label: 'Geo', category: { index: { EU27_2020: 0, DE: 1 }, label: {} } },
-        time: { label: 'Time', category: { index: { '2025': 0 }, label: { '2025': '2025' } } },
-      },
-    };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const meta = (svc as any).extractMetadata(onePeriod, 'xyz');
-    const time = meta.dimensions.find((d: { code: string }) => d.code === 'time');
-    expect(time.valuesCount).toBeUndefined();
-    expect(time.sampleValues).toBeUndefined();
-    expect('valuesCount' in time).toBe(false);
-    // The pre-#21 defect this omission exists to avoid.
-    expect(time.valuesCount).not.toBe(1);
-    // The dimension is still listed, with its label, and every other dimension is intact.
-    expect(time.label).toBe('Time');
-    expect(meta.dimensions.find((d: { code: string }) => d.code === 'geo').valuesCount).toBe(2);
-  });
-
-  it('samples at most 10 values per dimension', () => {
-    const manyValues: Record<string, number> = {};
-    const manyLabels: Record<string, string> = {};
-    for (let i = 0; i < 15; i++) {
-      manyValues[`V${i}`] = i;
-      manyLabels[`V${i}`] = `Value ${i}`;
-    }
-    const data: JsonStatResponse = {
-      label: 'Dataset',
-      id: ['unit'],
-      size: [15],
-      dimension: {
-        unit: { label: 'Unit', category: { index: manyValues, label: manyLabels } },
-      },
-    };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const meta = (svc as any).extractMetadata(data, 'xyz');
-    expect(meta.dimensions[0].valuesCount).toBe(15);
-    expect(meta.dimensions[0].sampleValues).toHaveLength(10);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // queryDataset — conflicting param validation (pure logic, no HTTP)
 // ---------------------------------------------------------------------------
 
@@ -696,6 +502,7 @@ describe('EurostatDataService — queryDataset param validation', () => {
         undefined,
         undefined,
         'EN',
+        50,
         ctx,
       ),
     ).rejects.toMatchObject({ data: { reason: 'conflicting_params' } });
@@ -705,7 +512,7 @@ describe('EurostatDataService — queryDataset param validation', () => {
     const svc = new EurostatDataService(mockConfig, mockStorage);
     const ctx = createMockContext();
     await expect(
-      svc.queryDataset('nama_10_gdp', {}, undefined, '2020', undefined, 5, 'EN', ctx),
+      svc.queryDataset('nama_10_gdp', {}, undefined, '2020', undefined, 5, 'EN', 50, ctx),
     ).rejects.toMatchObject({ data: { reason: 'conflicting_params' } });
   });
 
@@ -713,7 +520,7 @@ describe('EurostatDataService — queryDataset param validation', () => {
     const svc = new EurostatDataService(mockConfig, mockStorage);
     const ctx = createMockContext();
     await expect(
-      svc.queryDataset('nama_10_gdp', {}, undefined, undefined, '2024', 3, 'EN', ctx),
+      svc.queryDataset('nama_10_gdp', {}, undefined, undefined, '2024', 3, 'EN', 50, ctx),
     ).rejects.toMatchObject({ data: { reason: 'conflicting_params' } });
   });
 });
@@ -752,6 +559,13 @@ function okResponse(body: object): Response {
 function errorResponse(status: number, body: string): Response {
   return new Response(body, { status, statusText: status === 404 ? 'Not Found' : 'Bad Request' });
 }
+/** A 200 SDMX-XML Response. */
+function xmlResponse(body: string): Response {
+  return new Response(body, {
+    status: 200,
+    headers: { 'content-type': 'application/vnd.sdmx.structure+xml;version=2.1' },
+  });
+}
 /** Build a minimal JSON-stat body enumerating each dimension → its ordered codes. */
 function jsonStat(dims: Record<string, string[]>): JsonStatResponse {
   const id = Object.keys(dims);
@@ -775,6 +589,138 @@ function jsonStat(dims: Record<string, string[]>): JsonStatResponse {
   };
 }
 
+function sdmxMetadataResponse(input: string | URL, constraintXml = SDMX_CONSTRAINT_XML): Response {
+  const url = new URL(String(input));
+  const datasetCode = url.pathname.split('/').at(-2)?.toUpperCase() ?? 'EARN_SES_ANNUAL';
+  if (url.pathname.includes('/sdmx/2.1/dataflow/')) {
+    return xmlResponse(SDMX_DATAFLOW_XML.replaceAll('EARN_SES_ANNUAL', datasetCode));
+  }
+  if (url.pathname.includes('/sdmx/2.1/contentconstraint/')) return xmlResponse(constraintXml);
+  throw new Error(`Unexpected metadata URL: ${url}`);
+}
+
+describe('EurostatDataService — dataset-scoped SDMX metadata (#44)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    fetchMock = vi
+      .fn()
+      .mockImplementation(async (input: string | URL) => sdmxMetadataResponse(input));
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const svc = () => new EurostatDataService(mockConfig, mockStorage);
+
+  it('builds DatasetMeta from the dataflow descendants plus content constraint', async () => {
+    const meta = await svc().getDatasetInfo('earn_ses_annual', createMockContext());
+
+    expect(meta.label).toBe('Structure of earnings survey: annual earnings');
+    expect(meta.dimensions.map(({ code }) => code)).toEqual(['freq', 'unit', 'geo', 'time']);
+    expect(
+      meta.dimensions.find(({ code }) => code === 'time')?.sampleValues?.map(({ code }) => code),
+    ).toEqual(['2002', '2006', '2010', '2014', '2018', '2022']);
+    expect(meta.obsCount).toBe(6_160_543);
+    expect(meta.timeRange).toEqual({ start: '2002', end: '2022' });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const urls = fetchMock.mock.calls.map(([input]) => new URL(String(input)));
+    const dataflow = urls.find(({ pathname }) => pathname.includes('/dataflow/'));
+    const constraint = urls.find(({ pathname }) => pathname.includes('/contentconstraint/'));
+    expect(dataflow?.pathname).toContain('/sdmx/2.1/dataflow/ESTAT/earn_ses_annual/1.0');
+    expect(dataflow?.searchParams.get('references')).toBe('descendants');
+    expect(dataflow?.searchParams.get('detail')).toBe('referencepartial');
+    expect(constraint?.pathname).toContain('/sdmx/2.1/contentconstraint/ESTAT/earn_ses_annual/1.0');
+  });
+
+  it('returns every constrained time value without an observation query', async () => {
+    const result = await svc().getDimensionValues(
+      'earn_ses_annual',
+      'time',
+      undefined,
+      createMockContext(),
+    );
+    expect(result.values.map(({ code }) => code)).toEqual([
+      '2002',
+      '2006',
+      '2010',
+      '2014',
+      '2018',
+      '2022',
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.every(([input]) => !String(input).includes('/statistics/'))).toBe(
+      true,
+    );
+  });
+
+  it('keeps country as the omitted geo_level default and exposes the effective level (#38)', async () => {
+    const result = await svc().getDimensionValues(
+      'earn_ses_annual',
+      'geo',
+      undefined,
+      createMockContext(),
+    );
+    expect(result.geoLevel).toBe('country');
+    expect(result.values).toEqual([
+      { code: 'DE', label: 'Germany' },
+      { code: 'FR', label: 'France' },
+    ]);
+  });
+
+  it('filters an explicit geo hierarchy level and reports it', async () => {
+    const result = await svc().getDimensionValues(
+      'earn_ses_annual',
+      'geo',
+      'nuts2',
+      createMockContext(),
+    );
+    expect(result.geoLevel).toBe('nuts2');
+    expect(result.values).toEqual([{ code: 'DE11', label: 'Stuttgart' }]);
+  });
+
+  it('returns the full constrained value set for a non-geo dimension', async () => {
+    const result = await svc().getDimensionValues(
+      'earn_ses_annual',
+      'unit',
+      undefined,
+      createMockContext(),
+    );
+    expect(result.geoLevel).toBeUndefined();
+    expect(result.totalCount).toBe(11);
+    expect(result.values.at(-1)).toEqual({ code: 'U11', label: 'Unit 11' });
+  });
+
+  it('rejects geo_level paired with a non-geo dimension before requesting metadata', async () => {
+    await expect(
+      svc().getDimensionValues('earn_ses_annual', 'unit', 'nuts3', createMockContext()),
+    ).rejects.toMatchObject({ data: { reason: 'conflicting_params' } });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('reports an empty default geo level as no_results, not a missing dataset (#38)', async () => {
+    fetchMock.mockImplementation(async (input: string | URL) =>
+      sdmxMetadataResponse(input, SDMX_CONSTRAINT_WITHOUT_COUNTRIES_XML),
+    );
+    await expect(
+      svc().getDimensionValues('tgs00010', 'geo', undefined, createMockContext()),
+    ).rejects.toMatchObject({
+      data: { reason: 'no_results', geoLevel: 'country' },
+      message: expect.not.stringContaining('Dataset not found'),
+    });
+  });
+
+  it('preserves unknown datasets as not_found', async () => {
+    fetchMock.mockImplementation(async () =>
+      errorResponse(404, '<mes:ErrorMessage>Not found</mes:ErrorMessage>'),
+    );
+    await expect(
+      svc().getDatasetInfo('nonexistent_xyz', createMockContext()),
+    ).rejects.toMatchObject({ data: { reason: 'not_found' } });
+  });
+});
+
 describe('EurostatDataService — getDimensionValues param building', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
   beforeEach(() => {
@@ -786,80 +732,57 @@ describe('EurostatDataService — getDimensionValues param building', () => {
   });
 
   const svc = () => new EurostatDataService(mockConfig, mockStorage);
-  const paramsOf = (callIndex: number): URLSearchParams =>
-    new URL(String(fetchMock.mock.calls[callIndex]?.[0])).searchParams;
 
-  it('geo without geo_level applies the documented geoLevel=country default', async () => {
-    fetchMock.mockResolvedValue(okResponse(jsonStat({ geo: ['BE', 'BG', 'CZ'] })));
+  it('geo without geo_level applies the documented country default', async () => {
+    fetchMock.mockImplementation(async (input: string | URL) => sdmxMetadataResponse(input));
     const res = await svc().getDimensionValues(
-      'nama_10_gdp',
+      'earn_ses_annual',
       'geo',
       undefined,
       createMockContext(),
     );
-    expect(res.totalCount).toBe(3);
-    const p = paramsOf(0);
-    expect(p.get('geoLevel')).toBe('country');
-    expect(p.get('lastTimePeriod')).toBe('1');
+    expect(res.geoLevel).toBe('country');
+    expect(res.values.map(({ code }) => code)).toEqual(['DE', 'FR']);
   });
 
   it('geo with an explicit geo_level uses that value', async () => {
-    fetchMock.mockResolvedValue(okResponse(jsonStat({ geo: ['EU27_2020', 'EA'] })));
-    await svc().getDimensionValues('nama_10_gdp', 'geo', 'aggregate', createMockContext());
-    expect(paramsOf(0).get('geoLevel')).toBe('aggregate');
+    fetchMock.mockImplementation(async (input: string | URL) => sdmxMetadataResponse(input));
+    const result = await svc().getDimensionValues(
+      'earn_ses_annual',
+      'geo',
+      'aggregate',
+      createMockContext(),
+    );
+    expect(result.geoLevel).toBe('aggregate');
+    expect(result.values.map(({ code }) => code)).toEqual(['EU27_2020', 'EA20']);
   });
 
-  it('a non-time categorical dimension uses a bounded lastTimePeriod=1 slice', async () => {
-    fetchMock.mockResolvedValue(okResponse(jsonStat({ unit: ['CP_MEUR', 'CLV_I20'] })));
+  it('a non-time categorical dimension uses its full content-constraint set', async () => {
+    fetchMock.mockImplementation(async (input: string | URL) => sdmxMetadataResponse(input));
     const res = await svc().getDimensionValues(
-      'nama_10_gdp',
+      'earn_ses_annual',
       'unit',
       undefined,
       createMockContext(),
     );
-    expect(res.totalCount).toBe(2);
-    const p = paramsOf(0);
-    expect(p.get('lastTimePeriod')).toBe('1');
-    expect(p.has('geoLevel')).toBe(false);
+    expect(res.totalCount).toBe(11);
+    expect(res.geoLevel).toBeUndefined();
+    expect(fetchMock.mock.calls.every(([input]) => !String(input).includes('/statistics/'))).toBe(
+      true,
+    );
   });
 
-  it('time enumerates the full range by pinning other dims and leaving time unfiltered', async () => {
-    const probe = jsonStat({
-      freq: ['A'],
-      unit: ['CP_MEUR', 'CLV_I20'],
-      geo: ['EU27_2020', 'DE'],
-      time: ['2025'],
-    });
-    const fullRange = jsonStat({
-      freq: ['A'],
-      unit: ['CP_MEUR'],
-      geo: ['EU27_2020'],
-      time: ['2020', '2021', '2022', '2023', '2024', '2025'],
-    });
-    // The probe carries lastTimePeriod=1; the bounded query carries the pinned dims.
-    fetchMock.mockImplementation(async (input: string | URL) =>
-      okResponse(
-        new URL(String(input)).searchParams.get('lastTimePeriod') === '1' ? probe : fullRange,
-      ),
-    );
+  it('time enumerates the full constraint rather than an observation slice', async () => {
+    fetchMock.mockImplementation(async (input: string | URL) => sdmxMetadataResponse(input));
     const res = await svc().getDimensionValues(
-      'nama_10_gdp',
+      'earn_ses_annual',
       'time',
       undefined,
       createMockContext(),
     );
-    // Full period range — not just the latest slice (the bug was totalCount=1, [2025]).
     expect(res.totalCount).toBe(6);
-    expect(res.values[0]?.code).toBe('2020');
-    expect(res.values.at(-1)?.code).toBe('2025');
-    // The bounded (second) query pins every other dim to its first value and does NOT
-    // restrict time — this is what removes the lastTimePeriod=1 truncation.
-    const bounded = paramsOf(1);
-    expect(bounded.has('lastTimePeriod')).toBe(false);
-    expect(bounded.has('time')).toBe(false);
-    expect(bounded.get('freq')).toBe('A');
-    expect(bounded.get('unit')).toBe('CP_MEUR');
-    expect(bounded.get('geo')).toBe('EU27_2020');
+    expect(res.values[0]?.code).toBe('2002');
+    expect(res.values.at(-1)?.code).toBe('2022');
   });
 
   it('rejects geo_level paired with a non-geo dimension instead of ignoring it', async () => {
@@ -871,20 +794,16 @@ describe('EurostatDataService — getDimensionValues param building', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('surfaces async_response (non-retryable) when a dimension query matches too many rows', async () => {
-    fetchMock.mockResolvedValue(
-      okResponse({ warning: { status: 413, label: 'ASYNCHRONOUS_RESPONSE' } }),
-    );
+  it('surfaces malformed structure metadata as a non-retryable upstream fault', async () => {
+    fetchMock.mockImplementation(async () => xmlResponse('<m:Structure/>'));
     await expect(
       svc().getDimensionValues('nama_10_gdp', 'unit', undefined, createMockContext()),
-    ).rejects.toMatchObject({ data: { reason: 'async_response', retryable: false } });
-    // retryable:false fails fast — no retry storm against an oversized query.
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    ).rejects.toMatchObject({ data: { reason: 'upstream_fault', retryable: false } });
   });
 });
 
 // ---------------------------------------------------------------------------
-// getDatasetInfo — time coverage (fetch-stubbed, exercises the two-request path)
+// getDatasetInfo — public metadata contract over the two SDMX structure requests
 // ---------------------------------------------------------------------------
 
 describe('EurostatDataService — getDatasetInfo time coverage', () => {
@@ -898,97 +817,30 @@ describe('EurostatDataService — getDatasetInfo time coverage', () => {
   });
 
   const svc = () => new EurostatDataService(mockConfig, mockStorage);
-  const paramsOf = (callIndex: number): URLSearchParams =>
-    new URL(String(fetchMock.mock.calls[callIndex]?.[0])).searchParams;
+  it('reports the dataset-wide period count from the content constraint', async () => {
+    fetchMock.mockImplementation(async (input: string | URL) => sdmxMetadataResponse(input));
 
-  it('reports the dataset-wide period count for time, not the one-period slice', async () => {
-    const onePeriod = jsonStat({
-      freq: ['A'],
-      geo: ['EU27_2020', 'DE'],
-      time: ['2025'],
-    });
-    const fullRange = jsonStat({
-      freq: ['A'],
-      geo: ['EU27_2020'],
-      time: ['2020', '2021', '2022', '2023', '2024', '2025'],
-    });
-    fetchMock.mockImplementation(async (input: string | URL) =>
-      okResponse(
-        new URL(String(input)).searchParams.get('lastTimePeriod') === '1' ? onePeriod : fullRange,
-      ),
-    );
+    const meta = await svc().getDatasetInfo('earn_ses_annual', createMockContext());
 
-    const meta = await svc().getDatasetInfo('nama_10_gdp', createMockContext());
-
-    // What a caller reads: the real period count, not the 1 the metadata filter produced.
     const time = meta.dimensions.find((d) => d.code === 'time');
     expect(time?.valuesCount).toBe(6);
-    expect(time?.sampleValues?.[0]?.code).toBe('2020');
-    // Other dimensions still come from the cheap one-period slice.
-    expect(meta.dimensions.find((d) => d.code === 'geo')?.valuesCount).toBe(2);
-
-    // Exactly one extra round trip, bounded by pinning every other dimension.
+    expect(time?.sampleValues?.[0]?.code).toBe('2002');
+    expect(meta.dimensions.find((d) => d.code === 'geo')?.valuesCount).toBe(7);
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    const bounded = paramsOf(1);
-    expect(bounded.has('lastTimePeriod')).toBe(false);
-    expect(bounded.has('time')).toBe(false);
-    expect(bounded.get('freq')).toBe('A');
-    expect(bounded.get('geo')).toBe('EU27_2020');
   });
 
-  it('makes no second request for a dataset with no time dimension', async () => {
-    fetchMock.mockResolvedValue(okResponse(jsonStat({ geo: ['DE', 'FR'] })));
-    const meta = await svc().getDatasetInfo('xyz', createMockContext());
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(meta.dimensions.map((d) => d.code)).toEqual(['geo']);
+  it('preserves annotation-backed fields in the public DatasetMeta contract', async () => {
+    fetchMock.mockImplementation(async (input: string | URL) => sdmxMetadataResponse(input));
+    const meta = await svc().getDatasetInfo('earn_ses_annual', createMockContext());
+    expect(meta.label).toBe('Structure of earnings survey: annual earnings');
+    expect(meta.obsCount).toBe(6_160_543);
+    expect(meta.timeRange).toEqual({ start: '2002', end: '2022' });
+    expect(meta.lastUpdated).toBe('2026-02-09T23:00:00+0100');
+    expect(meta.metadataUrl).toBe('https://example.test/earn_ses_esms.htm');
   });
 
-  it('keeps the metadata it retrieved when the time enumeration fails (#34)', async () => {
-    const onePeriod = {
-      ...jsonStat({ freq: ['A'], geo: ['EU27_2020', 'DE'], time: ['2025'] }),
-      label: 'GDP and main components',
-      extension: {
-        annotation: [
-          { type: 'OBS_COUNT', title: '1100000' },
-          { type: 'OBS_PERIOD_OVERALL_OLDEST', title: '1975' },
-          { type: 'OBS_PERIOD_OVERALL_LATEST', title: '2025' },
-          { type: 'UPDATE_DATA', date: '2026-05-01T00:00:00Z' },
-          { type: 'ESMS_HTML', href: 'https://example.org/nama_10_gdp_esms.htm' },
-        ],
-      },
-    };
-    // The primary slice succeeds; the pinned follow-up comes back as Eurostat's async warning.
-    fetchMock.mockImplementation(async (input: string | URL) =>
-      okResponse(
-        new URL(String(input)).searchParams.get('lastTimePeriod') === '1'
-          ? onePeriod
-          : { warning: { status: 413, label: 'ASYNCHRONOUS_RESPONSE' } },
-      ),
-    );
-
-    const meta = await svc().getDatasetInfo('nama_10_gdp', createMockContext());
-
-    // Everything the first response carried survives — previously the whole call threw.
-    expect(meta.label).toBe('GDP and main components');
-    expect(meta.obsCount).toBe(1_100_000);
-    expect(meta.timeRange).toEqual({ start: '1975', end: '2025' });
-    expect(meta.lastUpdated).toBe('2026-05-01T00:00:00Z');
-    expect(meta.metadataUrl).toBe('https://example.org/nama_10_gdp_esms.htm');
-    expect(meta.dimensions.map((d) => d.code)).toEqual(['freq', 'geo', 'time']);
-    expect(meta.dimensions.find((d) => d.code === 'geo')?.valuesCount).toBe(2);
-
-    // Only the unmeasured dimension loses its count — and it is omitted, not reported as 1.
-    const time = meta.dimensions.find((d) => d.code === 'time');
-    expect(time?.valuesCount).toBeUndefined();
-    expect(time?.sampleValues).toBeUndefined();
-  });
-
-  it('still fails when the primary metadata request fails (#34)', async () => {
-    // The graceful path covers the secondary request only — a dataset that does not exist
-    // must stay an error rather than resolve to a shell of a payload.
-    fetchMock.mockResolvedValue(
-      okResponse({ error: [{ status: 404, id: 100, label: 'ERR_NOT_FOUND_4' }] }),
-    );
+  it('still fails when the primary metadata source reports an unknown dataset', async () => {
+    fetchMock.mockImplementation(async () => errorResponse(404, 'not found'));
     await expect(
       svc().getDatasetInfo('nonexistent_xyz', createMockContext()),
     ).rejects.toMatchObject({ data: { reason: 'not_found' } });
@@ -1028,6 +880,7 @@ describe('EurostatDataService — queryDataset filter normalization', () => {
       undefined,
       1,
       'EN',
+      50,
       createMockContext(),
     );
     const p = paramsOf(0);
@@ -1047,6 +900,7 @@ describe('EurostatDataService — queryDataset filter normalization', () => {
       undefined,
       1,
       'EN',
+      50,
       createMockContext(),
     );
     // geo: [] places no restriction, so it cannot conflict with geo_level.
@@ -1085,6 +939,7 @@ describe('EurostatDataService — queryDataset time coverage', () => {
       undefined,
       undefined,
       'EN',
+      50,
       createMockContext(),
     );
 
@@ -1186,6 +1041,7 @@ describe('EurostatDataService — queryDataset row cap (#27)', () => {
       undefined,
       undefined,
       'EN',
+      OBS_CAP,
       createMockContext(),
     );
 
@@ -1271,6 +1127,7 @@ describe('EurostatDataService — dataframe row source (#8)', () => {
       undefined,
       undefined,
       'EN',
+      OBS_CAP,
       createMockContext(),
     );
 
@@ -1441,6 +1298,7 @@ describe('EurostatDataService — no-results guard (#36)', () => {
       '2023-06',
       undefined,
       'EN',
+      50,
       createMockContext(),
     );
 
@@ -1495,6 +1353,7 @@ describe('EurostatDataService — no-results guard (#36)', () => {
         '1975-06',
         undefined,
         'EN',
+        50,
         createMockContext(),
       ),
     ).rejects.toMatchObject({
@@ -1527,6 +1386,7 @@ describe('EurostatDataService — fetchJson error classification', () => {
       undefined,
       1,
       'EN',
+      50,
       createMockContext(),
     );
 
@@ -1558,6 +1418,33 @@ describe('EurostatDataService — fetchJson error classification', () => {
       code: JsonRpcErrorCode.NotFound,
       data: { reason: 'not_found' },
     });
+  });
+
+  it('maps HTTP-200 id 100 to no_results without claiming the dataset is absent (#37)', async () => {
+    fetchMock.mockResolvedValue(
+      okResponse({ error: [{ status: 200, id: 100, label: 'NO_RESULTS' }] }),
+    );
+    await expect(query('nama_10_gdp', { geo: ['ZZ'] })).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'no_results' },
+      message: expect.not.stringContaining('Dataset not found'),
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('normalizes a live HTTP 413 error array before retry and makes one attempt (#44)', async () => {
+    fetchMock.mockResolvedValue(
+      errorResponse(
+        413,
+        '{ "error": [{"status": 413,"id": 413,"label": "ASYNCHRONOUS_RESPONSE"}]}',
+      ),
+    );
+    await expect(query('nama_10_gdp', {})).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { reason: 'async_response', retryable: false },
+      message: expect.not.stringContaining('failed after 4 attempts'),
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('rethrows the raw HTTP error when a truncated error body is not valid JSON', async () => {

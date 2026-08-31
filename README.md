@@ -9,7 +9,7 @@
 
 
 
-[![Version](https://img.shields.io/badge/Version-0.6.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/eurostat-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/eurostat-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/eurostat-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.6.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/eurostat-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/eurostat-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/eurostat-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -39,7 +39,7 @@
 | `eurostat_browse_themes` | Navigate the Eurostat theme hierarchy — list root themes or drill into subthemes and datasets |
 | `eurostat_get_dataset_info` | Fetch metadata for a dataset: dimensions with sample values, time range, observation count, and last-update date |
 | `eurostat_get_dimension_values` | List all valid codes for a specific dimension (e.g., all geo codes, all unit codes); supports NUTS hierarchy filtering |
-| `eurostat_query_dataset` | Fetch decoded statistical observations with dimension filters, NUTS geo-level, and time-range controls |
+| `eurostat_query_dataset` | Fetch a deterministic preview of decoded statistical observations with dimension filters, NUTS geo-level, and time-range controls |
 | `eurostat_download_dataset` | Download a whole dataset through the SDMX 2.1 TSV bulk endpoint and stage every observation on the dataframe canvas |
 | `eurostat_dataframe_describe` | List the tables staged on a dataframe canvas with their row counts and column types — canvas only |
 | `eurostat_dataframe_query` | Run a read-only SQL SELECT across staged tables — canvas only |
@@ -77,7 +77,7 @@ Fetch metadata for a Eurostat dataset before querying it.
 
 - Returns all dimensions with their codes, labels, and up to 10 sample values each
 - Reports overall time range and total observation count across all periods, each omitted when Eurostat does not report it
-- Uses a minimal Statistics API call (most recent period only), plus one bounded follow-up to count the dataset's periods when it has a `time` dimension. If that follow-up fails, the call still returns everything the first request produced, with the `time` dimension's value count omitted rather than reported as 1
+- Combines the dataset-scoped SDMX dataflow descendants with its content constraint, so every dimension — including `time` — is described from the full dataset-available value set rather than from a populated observation slice
 - For dimensions with more than 10 values, use `eurostat_get_dimension_values` for the full list
 - Provides a link to the ESMS metadata page when available
 
@@ -87,8 +87,8 @@ Fetch metadata for a Eurostat dataset before querying it.
 
 List all valid values for a specific dataset dimension.
 
-- Retrieves the complete set of valid codes and labels for any dimension (unit, na_item, geo, etc.)
-- For the `geo` dimension, supports NUTS hierarchy filtering: `aggregate` (EU/EA totals), `country` (41 states), `nuts1` (127 major regions), `nuts2` (309 basic regions), `nuts3` (1,343 small regions). Pairing it with any other dimension is rejected rather than ignored
+- Retrieves the complete dataset-available set of codes and labels for any dimension (`unit`, `na_item`, `geo`, `time`, etc.) from the same SDMX content constraint used by dataset metadata
+- For the `geo` dimension, supports NUTS hierarchy filtering: `aggregate` (EU/EA totals), `country` (the default when omitted), `nuts1`, `nuts2`, and `nuts3`. The response reports the effective level; an empty level is `no_results`, not a claim that the dataset is missing. Pairing `geo_level` with any other dimension is rejected rather than ignored
 - Prevents silent no-data returns — invalid dimension values in `eurostat_query_dataset` return nothing without error; verify codes here first
 
 ---
@@ -100,10 +100,11 @@ Fetch statistical data from a Eurostat dataset.
 - Accepts dimension filters as a map of `{dimension_code: [value1, value2, ...]}`
 - NUTS geo-level filter (`aggregate`, `country`, `nuts1`, `nuts2`, `nuts3`) — mutually exclusive with a non-empty `geo` entry in filters; an empty array is treated as no filter and dropped
 - Time range via `since_period`/`until_period` (e.g., `"2020"`, `"2023-Q1"`) or `last_n_periods` for the N most recent
+- `preview_limit` controls the deterministic inline prefix (default 50, max 500). It does not change the match, totals, period coverage, or staged rows; filters and period controls reduce the match itself. There is deliberately no cursor or offset
 - Returns decoded observations with dimension codes and labels, numeric values, an `OBS_FLAG` status (`p` = provisional, `e` = estimated, etc.) and a separate `CONF_STATUS` confidentiality marker (`C` = confidential, usually the reason a value is null)
 - Reports total observation count, missing value count, and the effective time range of the result, each period bound omitted when neither the observations nor Eurostat report it
-- Inline rows are capped at 5,000, applied while decoding so a broad query never builds the rest; `obsCount`, `missingObsCount` and `timeRange` still describe the whole match, and `truncated` flags when the cap bit. Filter the query to shrink what Eurostat sends — the cap bounds the decode, not the transfer
-- With the dataframe canvas enabled, a match past the cap is also staged whole as a SQL table and the response returns `canvasId` / `tableName` / `stagedRowCount`; the rows are streamed into the table one at a time from the response body already in memory, so nothing extra is fetched and the match is never materialized as an array. Without a canvas those fields are absent and narrowing the query is the way to the rest
+- `obsCount`, `missingObsCount`, and `timeRange` always describe the full match. `truncated` is independent of `preview_limit` and is true only when the match crosses the 5,000-observation staging threshold
+- With the dataframe canvas enabled, only a match above 5,000 observations is staged whole as a SQL table and the response returns `canvasId` / `tableName` / `stagedRowCount`; matches at or below 5,000 are never staged. The rows stream into the table one at a time from the response body already in memory, so nothing extra is fetched and the match is never materialized as an array. Call `eurostat_dataframe_describe` before `eurostat_dataframe_query`. Without a canvas those fields and tool guidance are absent, and narrowing the query is the way to the rest
 - Pass `canvas_id` from an earlier response to stage several results side by side and join across them
 - Async-response detection — large unfiltered queries return an actionable, non-retryable error with filter guidance rather than silently timing out
 - Fetches a *slice*. When the target is a whole dataset, `eurostat_download_dataset` reads the SDMX bulk endpoint instead, at roughly half the bytes
@@ -121,7 +122,7 @@ Download a whole dataset through the SDMX 2.1 TSV bulk endpoint (`/sdmx/2.1/data
 - **gzip is sniffed off the stream, not read from headers.** Eurostat compresses large bodies with no `Content-Encoding` header; the only header-level tell is a `.tsv.gz` filename on `Content-Disposition`, and the switch does not track dataset size, so the magic bytes are what decide
 - **The asynchronous queue envelope is detected explicitly.** When an extraction is too costly to serve inline Eurostat answers HTTP 200 with a SOAP `syncResponse` ticket instead of data; read as TSV that yields a header row of XML and no observations, so it is classified up front as a non-retryable error naming what to narrow
 - Errors arrive as XML SOAP faults, not JSON: faultcode 100 → `not_found`, 140 → `filter_arity`, 150 → `invalid_dimension` (which also covers a period range outside the dataset's coverage). Each maps to a typed reason with a recovery hint naming the tool to call next
-- With the dataframe canvas enabled, every observation is staged as a SQL table and the response returns `canvasId` / `tableName` / `stagedRowCount`; rows stream into the table one at a time, so a multi-million-row download never materializes as an array. Only `preview_limit` rows (default 50, max 500) come back inline, and they are the leading rows of the staged table
+- With the dataframe canvas enabled, every observation is staged as a SQL table and the response returns `canvasId` / `tableName` / `stagedRowCount`; rows stream into the table one at a time, so a multi-million-row download never materializes as an array. Only `preview_limit` rows (default 50, max 500) come back inline, and they are the leading rows of the staged table. Call `eurostat_dataframe_describe` before `eurostat_dataframe_query`
 - Without a canvas the download still runs so `rowCount`, `missingCount` and `periodRange` describe it, but only the preview is retained — the response says so plainly instead of implying the rest is reachable
 
 ---
@@ -157,10 +158,11 @@ Eurostat-specific:
 
 - TTL-bounded in-memory cache for the TOC file — reused across all search and browse calls, refreshed on the first call past its 12-hour lifetime, with the last loaded copy served if a refresh fails
 - JSON-stat 2.0 stride-based decoder for the Statistics API response format
-- Async-response detection — Eurostat returns a warning object rather than an error for over-limit queries; the server intercepts it and returns an actionable error with filter guidance
+- Dataset-scoped SDMX metadata parsing — dataflow descendants supply labels, annotations, concepts, and partial codelists; the content constraint supplies the actual available positions, including every period
+- Async-response detection — Eurostat returns over-limit queries as either an HTTP-200 warning object or an HTTP-413 error array; both fail once with actionable filter guidance
 - NUTS hierarchy geo-level filtering across query and dimension-value tools
 - Status decoding against both published codelists — the `OBS_FLAG` observation flag (provisional, estimated, definition differs) and the `CONF_STATUS` confidentiality marker, each in its own field. JSON-stat folds the two into one string and SDMX TSV into one cell; both are split on their separator, so a given observation reads the same whichever endpoint served it
-- Optional DuckDB dataframe canvas — a query matching more than the inline cap is streamed row by row into a SQL table, reaching the observations the cap drops without a second request to Eurostat
+- Optional DuckDB dataframe canvas — a query matching more than 5,000 observations is streamed row by row into a SQL table, reaching the rows outside the inline preview without a second request to Eurostat
 - SDMX 2.1 TSV bulk downloads with streaming gzip detection, a mid-transfer byte budget, wide-to-long expansion, and SOAP fault classification — the whole-dataset counterpart to the per-query path
 
 Agent-friendly output:
@@ -289,7 +291,7 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `EUROSTAT_TOC_CACHE_TTL_MS` | Catalogue TOC cache lifetime in ms — the first search or browse call past this age refreshes it | `43200000` (12 hours) |
 | `EUROSTAT_BULK_TIMEOUT_MS` | HTTP timeout for one `eurostat_download_dataset` transfer in ms — held separate because a bulk body streams for minutes | `120000` (2 minutes) |
 | `EUROSTAT_BULK_MAX_BYTES` | Byte budget for one bulk download, counted on the decoded TSV and enforced while streaming | `52428800` (50 MiB) |
-| `CANVAS_PROVIDER_TYPE` | `duckdb` enables the dataframe canvas: lists the two dataframe tools, lets `eurostat_query_dataset` stage a match past its inline cap, and lets `eurostat_download_dataset` retain a bulk download | `none` |
+| `CANVAS_PROVIDER_TYPE` | `duckdb` enables the dataframe canvas: lists the two dataframe tools, lets `eurostat_query_dataset` stage a match above 5,000 observations, and lets `eurostat_download_dataset` retain a bulk download | `none` |
 | `CANVAS_TEMP_PATH` | Directory DuckDB writes canvas spill files to. Must be writable by the server process | `<os tmpdir>/mcp-canvas` |
 | `CANVAS_TTL_MS` | Sliding lifetime of a staged canvas in ms; every call against it extends the window | `86400000` (24 hours) |
 | `CANVAS_DEFAULT_ROW_LIMIT` | Max rows one `eurostat_dataframe_query` returns before reporting `truncated` | `10000` |
@@ -324,7 +326,7 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Six tools for discovery and data access, plus two canvas-gated dataframe tools. |
 | `src/mcp-server/resources` | Resource definitions. Dataset metadata resource. |
 | `src/services/eurostat-catalogue` | Catalogue service — fetches and parses the Eurostat TOC TXT file; TTL-bounded in-memory cache. |
-| `src/services/eurostat-data` | Data service — Statistics API HTTP client, JSON-stat 2.0 decoder, async-response detection, dataframe row source. |
+| `src/services/eurostat-data` | Data service — dataset-scoped SDMX metadata parser plus Statistics API querying, JSON-stat 2.0 decoding, async-response detection, and dataframe row source. |
 | `src/services/canvas-accessor.ts` | Module-level accessor for the optional DataCanvas, plus the acquire helper that names the misconfigured path on a permission failure. |
 | `src/config` | Server-specific environment variable parsing and validation with Zod. |
 | `tests/` | Unit and integration tests, mirroring the `src/` structure. |

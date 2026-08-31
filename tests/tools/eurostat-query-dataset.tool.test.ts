@@ -3,9 +3,10 @@
  * @module tests/tools/eurostat-query-dataset.tool.test
  */
 
+import type { z } from '@cyanheads/mcp-ts-core';
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eurostatQueryDataset } from '@/mcp-server/tools/definitions/eurostat-query-dataset.tool.js';
 import { setCanvas } from '@/services/canvas-accessor.js';
@@ -120,10 +121,26 @@ describe('eurostatQueryDataset', () => {
     expect(result).not.toHaveProperty('appliedFilters');
   });
 
-  it('applies default empty filters and EN language', () => {
+  it('applies default empty filters, a 50-row preview, and EN language', () => {
     const input = eurostatQueryDataset.input.parse({ dataset_code: 'nama_10_gdp' });
     expect(input.filters).toEqual({});
+    expect(input.preview_limit).toBe(50);
     expect(input.lang).toBe('EN');
+  });
+
+  it('accepts preview_limit boundaries and rejects invalid values without adding an offset', () => {
+    expect(
+      eurostatQueryDataset.input.parse({ dataset_code: 'x', preview_limit: 1 }).preview_limit,
+    ).toBe(1);
+    expect(
+      eurostatQueryDataset.input.parse({ dataset_code: 'x', preview_limit: 500 }).preview_limit,
+    ).toBe(500);
+    for (const preview_limit of [0, -1, 1.5, 501]) {
+      expect(() =>
+        eurostatQueryDataset.input.parse({ dataset_code: 'x', preview_limit }),
+      ).toThrow();
+    }
+    expect(eurostatQueryDataset.input.shape).not.toHaveProperty('offset');
   });
 
   it('throws conflicting_params when geo filter and geo_level are both set', async () => {
@@ -144,6 +161,51 @@ describe('eurostatQueryDataset', () => {
       data: { reason: 'conflicting_params' },
     });
   });
+
+  const conflictingInputs: Array<[string, z.input<typeof eurostatQueryDataset.input>]> = [
+    [
+      'geo plus geo_level',
+      { dataset_code: 'nama_10_gdp', filters: { geo: ['DE'] }, geo_level: 'country' },
+    ],
+    [
+      'since_period plus last_n_periods',
+      { dataset_code: 'nama_10_gdp', since_period: '2020', last_n_periods: 5 },
+    ],
+    [
+      'until_period plus last_n_periods',
+      { dataset_code: 'nama_10_gdp', until_period: '2024', last_n_periods: 3 },
+    ],
+  ];
+  for (const [label, input] of conflictingInputs) {
+    it(`renders contract recovery for ${label} before any request`, async () => {
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+      vi.mocked(getEurostatDataService).mockReturnValue(
+        new EurostatDataService({} as never, {} as never),
+      );
+
+      try {
+        const result = await runToolContract(eurostatQueryDataset, input);
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          error: {
+            code: JsonRpcErrorCode.ValidationError,
+            message: expect.any(String),
+            data: {
+              reason: 'conflicting_params',
+              recovery: { hint: expect.stringContaining('not both') },
+            },
+          },
+        });
+        expect(result.content).toContainEqual(
+          expect.objectContaining({ text: expect.stringContaining('Recovery:') }),
+        );
+        expect(fetchMock).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+  }
 
   it('throws not_found for an unknown dataset code', async () => {
     vi.mocked(getEurostatDataService).mockReturnValue({
@@ -168,17 +230,24 @@ describe('eurostatQueryDataset', () => {
           Object.assign(new Error('no results'), { data: { reason: 'no_results' } }),
         ),
     } as never);
-    const ctx = createMockContext({ errors: eurostatQueryDataset.errors });
-    const input = eurostatQueryDataset.input.parse({
+    const result = await runToolContract(eurostatQueryDataset, {
       dataset_code: 'nama_10_gdp',
       filters: { geo: ['NONEXISTENT'] },
     });
-    await expect(eurostatQueryDataset.handler(input, ctx)).rejects.toMatchObject({
-      data: {
-        reason: 'no_results',
-        recovery: { hint: expect.stringContaining('nama_10_gdp') },
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: {
+          reason: 'no_results',
+          recovery: {
+            hint: expect.stringMatching(/dimension values.*nama_10_gdp.*period range/i),
+          },
+        },
       },
     });
+    expect(result.content).toContainEqual(
+      expect.objectContaining({ text: expect.stringContaining('Recovery:') }),
+    );
   });
 
   it('throws async_response with dataset-contextual recovery hint', async () => {
@@ -239,6 +308,7 @@ describe('eurostatQueryDataset', () => {
       undefined,
       5,
       'EN',
+      50,
       ctx,
     );
   });
@@ -426,8 +496,12 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
       headers: { 'content-type': 'application/json' },
     });
 
-  /** 6,000 cells — 1,000 past the inline cap. */
+  /** 6,000 cells — 1,000 past the staging threshold. */
   const oversized = () => jsonStatBody(PERIODS, GEOS, 6000);
+  /** Exactly the staging threshold. */
+  const atCap = () => jsonStatBody(PERIODS.slice(0, 50), GEOS, 5000);
+  /** The smallest match that crosses the staging threshold. */
+  const pastCap = () => jsonStatBody(PERIODS.slice(0, 51), GEOS, 5001);
   /** 100 cells — comfortably inside the cap. */
   const small = () => jsonStatBody(PERIODS.slice(0, 10), GEOS.slice(0, 10), 100);
 
@@ -461,17 +535,94 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
   });
 
   describe('with a canvas', () => {
+    for (const [label, matchSize, previewLimit, expectedInline] of [
+      ['shorter than the match', 5, 3, 3],
+      ['equal to the match', 5, 5, 5],
+      ['longer than the match', 5, 8, 5],
+    ] as const) {
+      it(`returns a deterministic preview ${label} without staging an under-cap match`, async () => {
+        const acquire = vi.spyOn(canvas, 'acquire');
+        fetchMock.mockImplementation(async () =>
+          okResponse(jsonStatBody(['2023'], GEOS.slice(0, matchSize), matchSize)),
+        );
+
+        const result = await run({ preview_limit: previewLimit });
+
+        expect(result.observations).toHaveLength(expectedInline);
+        expect(result.obsCount).toBe(matchSize);
+        expect(result.truncated).toBe(false);
+        expect(result.tableName).toBeUndefined();
+        expect(acquire).not.toHaveBeenCalled();
+      });
+    }
+
     it('stages the whole match and names it in the response', async () => {
       fetchMock.mockImplementation(async () => okResponse(oversized()));
       const result = await run();
 
       expect(result.truncated).toBe(true);
-      expect(result.observations).toHaveLength(5000);
+      expect(result.observations).toHaveLength(50);
       expect(result.obsCount).toBe(6000);
-      // The rows past the inline cap are reachable, which is the whole point.
+      // The rows outside the inline preview are reachable, which is the whole point.
       expect(result.stagedRowCount).toBe(6000);
       expect(result.tableName).toMatch(/^df_[0-9a-f]{8}$/);
       expect(result.canvasId).toBeTypeOf('string');
+    });
+
+    it('does not stage exactly 5,000 matches even when preview_limit returns only a prefix', async () => {
+      const acquire = vi.spyOn(canvas, 'acquire');
+      fetchMock.mockImplementation(async () => okResponse(atCap()));
+      const c = ctx();
+
+      const result = await eurostatQueryDataset.handler(
+        eurostatQueryDataset.input.parse({
+          dataset_code: 'nama_10_gdp',
+          preview_limit: 50,
+        }),
+        c,
+      );
+
+      expect(result.obsCount).toBe(5000);
+      expect(result.observations).toHaveLength(50);
+      expect(result.truncated).toBe(false);
+      expect(result.tableName).toBeUndefined();
+      expect(acquire).not.toHaveBeenCalled();
+      expect(getEnrichment(c).notice).toMatch(/preview_limit.*filters/i);
+    });
+
+    it('stages the full 5,001-row match while preview_limit bounds only the inline prefix', async () => {
+      fetchMock.mockImplementation(async () => okResponse(pastCap()));
+      const result = await run({ preview_limit: 7 });
+
+      expect(result.obsCount).toBe(5001);
+      expect(result.observations).toHaveLength(7);
+      expect(result.truncated).toBe(true);
+      expect(result.stagedRowCount).toBe(5001);
+    });
+
+    it('keeps structuredContent and the full content array aligned on preview and staged guidance', async () => {
+      fetchMock.mockImplementation(async () => okResponse(pastCap()));
+
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'nama_10_gdp',
+        preview_limit: 3,
+      });
+
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        obsCount: 5001,
+        truncated: true,
+        stagedRowCount: 5001,
+        observations: expect.arrayContaining([expect.any(Object)]),
+        notice: expect.stringMatching(/eurostat_dataframe_describe.*eurostat_dataframe_query/i),
+      });
+      expect((result.structuredContent as { observations: unknown[] }).observations).toHaveLength(
+        3,
+      );
+      const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+      expect(text.split('\n').filter((line) => line.includes('→'))).toHaveLength(3);
+      expect(text).toMatch(/eurostat_dataframe_describe.*eurostat_dataframe_query/is);
+      expect(text).toContain('df_');
     });
 
     it('stages exactly what the inline rows show, in the same order', async () => {
@@ -496,7 +647,7 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
       });
       expect(staged.rows).toEqual(inline);
 
-      // …and the table carries periods the capped inline list never reaches.
+      // …and the table carries periods the inline preview never reaches.
       const beyond = await instance.query(
         `SELECT DISTINCT time FROM ${result.tableName} WHERE time > '2049' ORDER BY time`,
       );
@@ -533,14 +684,14 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
       expect(notice).toContain('eurostat_dataframe_query');
     });
 
-    it('stages nothing when the result fits inline', async () => {
+    it('stages nothing when the match stays below the threshold', async () => {
       const acquire = vi.spyOn(canvas, 'acquire');
       fetchMock.mockImplementation(async () => okResponse(small()));
       const result = await run();
 
       expect(result.truncated).toBe(false);
-      expect(result.observations).toHaveLength(100);
-      // No canvas is minted for a result the caller already holds in full.
+      expect(result.observations).toHaveLength(50);
+      // No canvas is minted because the full match stays below the 5,000-row threshold.
       expect(acquire).not.toHaveBeenCalled();
       expect(result.canvasId).toBeUndefined();
       expect(result.tableName).toBeUndefined();
@@ -575,15 +726,15 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
       setCanvas(undefined);
     });
 
-    it('returns the capped result unchanged, with no canvas fields at all', async () => {
+    it('returns the preview with no canvas fields at all', async () => {
       fetchMock.mockImplementation(async () => okResponse(oversized()));
       const result = await run();
 
       expect(result.truncated).toBe(true);
-      expect(result.observations).toHaveLength(5000);
+      expect(result.observations).toHaveLength(50);
       expect(result.obsCount).toBe(6000);
       // Every added field is optional and absent — not null, not an empty string — so a
-      // caller on this deployment sees exactly the payload it saw before spillover existed.
+      // caller on this deployment can distinguish an absent Canvas from an empty handle.
       expect('canvasId' in result).toBe(false);
       expect('tableName' in result).toBe(false);
       expect('stagedRowCount' in result).toBe(false);
@@ -599,7 +750,25 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
       const notice = getEnrichment(c).notice ?? '';
       expect(notice).toContain('dimension filters');
       // Naming a tool this deployment does not list would send the agent nowhere.
+      expect(notice).not.toContain('eurostat_dataframe_describe');
       expect(notice).not.toContain('eurostat_dataframe_query');
+    });
+
+    it('does not advertise dataframe tools in either response surface', async () => {
+      fetchMock.mockImplementation(async () => okResponse(pastCap()));
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'nama_10_gdp',
+        preview_limit: 3,
+      });
+      expect(result.structuredContent).not.toHaveProperty('tableName');
+      const structuredText = JSON.stringify(result.structuredContent);
+      const contentText = result.content
+        .map((block) => ('text' in block ? block.text : ''))
+        .join('\n');
+      expect(structuredText).not.toContain('eurostat_dataframe_describe');
+      expect(structuredText).not.toContain('eurostat_dataframe_query');
+      expect(contentText).not.toContain('eurostat_dataframe_describe');
+      expect(contentText).not.toContain('eurostat_dataframe_query');
     });
 
     it('ignores a canvas_id it cannot honour instead of failing the query', async () => {
@@ -649,6 +818,7 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
     expect(text).toContain('df_abcd1234');
     expect(text).toContain('cnv0000001');
     expect(text).toContain('6000');
+    expect(text).toContain('eurostat_dataframe_describe');
     expect(text).toContain('eurostat_dataframe_query');
     // The truncation banner itself changes when there is a table — it must not keep telling
     // the reader that narrowing the query is the way to the rest.
