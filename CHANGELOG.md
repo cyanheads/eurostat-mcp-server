@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.4](changelog/0.6.x/0.6.4.md) — 2026-09-16
+
+Adopts mcp-ts-core 0.13.2: the server declares stateless session mode in source, tool argument rejections carry a structured InvalidParams envelope, and the development skill tree moves from skills/ to framework-skills/ so plugin installs no longer receive it.
+
 ## [0.6.3](changelog/0.6.x/0.6.3.md) — 2026-08-30
 
 Distinguishes known dataset and table browse codes from codes absent from the Eurostat catalogue.
