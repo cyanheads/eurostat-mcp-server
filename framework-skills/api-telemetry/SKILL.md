@@ -4,7 +4,7 @@ description: >
   Catalog of OpenTelemetry instrumentation built into framework `@cyanheads/mcp-ts-core` — spans, metrics, completion logs, env config, runtime caveats, custom instrumentation patterns, and cardinality rules. Use when enabling OTel export, adding custom spans or metrics in services, debugging missing telemetry, looking up attribute names, or deciding what's safe to put on a metric attribute vs. a span.
 metadata:
   author: cyanheads
-  version: "1.7"
+  version: "1.9"
   audience: external
   type: reference
 ---
@@ -59,18 +59,21 @@ Cloud platform detection auto-populates resource attributes:
 
 ## Flush at exit
 
-Spans batch and metrics push on a 15-second cycle, so a process that exits between cycles takes its telemetry with it. `ServerHandle.shutdown()` is the drain: it stops the transport, then force-flushes traces and metrics through the OTLP exporters and closes the logger.
+Spans batch and metrics push on a 15-second cycle, so a process that exits between cycles takes its telemetry with it. `ServerHandle.shutdown()` is the drain: it stops the transport, runs the `teardown` hook, then force-flushes traces and metrics through the OTLP exporters and closes the logger.
 
-| Trigger | Path |
-|:--------|:-----|
-| `SIGTERM` / `SIGINT` | `shutdown(signal)` |
-| `uncaughtException` / `unhandledRejection` | `shutdown(signal)`, then `process.exit(1)` |
-| stdin EOF, stdio transport | `shutdown('STDIN_EOF')`, then `process.exit(0)` |
-| `ServerHandle.shutdown()` called directly | the same drain, no exit |
+| Trigger | Path | Exit |
+|:--------|:-----|:-----|
+| `SIGTERM` / `SIGINT` | `shutdown(signal)`, then an explicit exit | `0`, or `1` when the backstop fires |
+| `uncaughtException` / `unhandledRejection` | `shutdown(signal)`, then an explicit exit | `1` |
+| stdin EOF, stdio transport | `shutdown('STDIN_EOF')`, then an explicit exit | `0`, backstop or not |
+| a second signal during shutdown | none — the handlers are already detached | the OS default (`143` / `130`) |
+| `ServerHandle.shutdown()` called directly | the same drain | none — exit-free by contract |
 
-**Stdin EOF is a disconnect.** A stdio host closing the pipe runs the cleanup a signal runs, exactly once — the shutdown detaches the signal handlers and the EOF watcher as it starts, so neither can re-enter it — and the process then exits explicitly instead of waiting to run out of handles. Two things follow: the OTLP export leaves the process, and a `setInterval` a service registered without `unref()` can no longer keep the server resident after its client is gone. The path writes nothing to stdout.
+**A signal ends the process.** Every exit-bearing path runs the cleanup exactly once — shutdown detaches the signal handlers and the EOF watcher as it starts, so neither can re-enter it — and then exits explicitly instead of waiting to run out of handles. Two things follow: the OTLP export leaves the process, and a handle registered outside framework teardown (a recursive `fs.watch`, a `setInterval` without `unref()`) can no longer keep the server resident. A second signal arriving mid-shutdown reaches no handler, so the default disposition terminates immediately — the operator's force-kill escape hatch. Neither path writes to stdout.
 
-**The drain is bounded.** Shutdown-on-exit races a 10-second backstop, so a cleanup step that never settles still terminates the process. The logger bounds its own flush separately, per pino instance: a completing callback is awaited in full, and a runtime whose callback never arrives releases shutdown rather than hanging it.
+**The drain is bounded.** Shutdown-on-exit races a 10-second backstop that bounds the shutdown as a whole, not any single await: a step that settles inside the ceiling is never truncated, and only one that never settles is cut. A signal cut exits 1 after a warning naming that step; a stdin-EOF cut exits 0 without one. The logger bounds its own flush separately, per pino instance: a completing callback is awaited in full, and a runtime whose callback never arrives releases shutdown rather than hanging it.
+
+**Release what the framework cannot see.** `createApp({ teardown })` is the `setup` counterpart: it runs after the transport stops and before the logger closes, on every shutdown path, with `CoreServices` still alive. Close a watcher, socket, or poller there rather than leaving it for the backstop, which cuts a ref'd handle rather than closing it. An error it raises is logged and never blocks the exit; a hook that never settles is what the ceiling then bounds. Node/Bun only — `createWorkerHandler` does not accept it.
 
 Workers has no `ServerHandle` and no `NodeSDK` — flush whatever exporter you wired there yourself, via `ctx.waitUntil()`.
 
@@ -227,7 +230,7 @@ export async function doWork() {
 }
 ```
 
-Span context propagates automatically — `withSpan` calls inside a `tool_execution:*` span appear as children. `runInContext(ctx, fn)` carries the active OTel context across async boundaries (`setTimeout`, `queueMicrotask`).
+Span context propagates automatically — `withSpan` calls inside a `tool_execution:*` span appear as children. `runInContext(ctx, fn)` re-establishes the span `ctx` names as the active one across async boundaries (`setTimeout`, `queueMicrotask`), so spans opened inside `fn` parent to the request's span.
 
 For attribute keys, prefer the `ATTR_*` constants exported from `@cyanheads/mcp-ts-core/utils` (telemetry/attributes) over hand-typed strings — keeps you in step with framework conventions and avoids typos. Standard OTel semantic conventions (HTTP, cloud, service, network, etc.) are NOT re-exported — import those directly from `@opentelemetry/semantic-conventions`.
 

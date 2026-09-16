@@ -4,7 +4,7 @@ description: >
   Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, its `RequestContext` base, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.requestInput`, `ctx.inputs`, `ctx.enrich`, `ctx.content`), and when to use each.
 metadata:
   author: cyanheads
-  version: "2.1"
+  version: "2.4"
   audience: external
   type: reference
 ---
@@ -326,6 +326,10 @@ Always present, on every transport and both protocol eras. A handler that needs 
 
 One code path serves both eras. A 2026-07-28 client fulfils the embedded requests and retries the call; for a 2025-era session the SDK's legacy shim fulfils the same returns by issuing real `elicitation/create` / `sampling/createMessage` / `roots/list` round trips and re-entering the handler itself.
 
+**`MCP_SESSION_MODE` decides whether that second leg exists.** Under `stateful` / `auto` the shim has the session it needs. Under `stateless` each 2025-era request is served by a fresh instance that never saw `initialize`, so its client-capability view is empty and the round trip is refused rather than attempted — fail-closed, but the handler never gets its answer. Ship `stateless` on a server whose destructive tools gate on `ctx.requestInput` and those tools become unusable for v1 HTTP clients. 2026-07-28 clients are unaffected in either mode: that revision has no server→client request channel at all, which is precisely why `input_required` exists. stdio is unaffected in either mode.
+
+**Declare the requirement rather than documenting it.** `createApp({ sessionMode: { default: 'stateful', require: 'stateful' } })` seeds the mode from code and refuses to start over HTTP when the resolved mode is `stateless`, so the incompatibility surfaces at boot instead of at the first refused confirmation. `MCP_SESSION_MODE` still wins over the default; the requirement is what an operator cannot silently override. Nothing derives this from handler code — `ctx.requestInput` is present on every transport and both eras, so whether a server needs a live session is a decision its author makes. Full precedence and error shape: `api-config` § Session mode.
+
 ### The shape of a multi-round-trip handler
 
 Read `ctx.inputs` first, request only what is still missing, and write the call in return position so TypeScript narrows the line below it.
@@ -592,7 +596,7 @@ async handler(input, ctx) {
 }
 ```
 
-The contract is opt-in. See `skills/api-errors/SKILL.md` for the full type-driven pattern, lint rules, and baseline-codes guidance.
+The contract is opt-in. See `framework-skills/api-errors/SKILL.md` for the full type-driven pattern, lint rules, and baseline-codes guidance.
 
 ---
 
@@ -735,7 +739,7 @@ async handler(input, ctx) {
 
 The `capped-list-no-truncation` lint rule fires when a cap-like input + array output shape is present without any of: `truncated` or `totalCount` in the declared `enrichment`, or `truncated` or `totalCount` in `output`. Using `ctx.enrich.total(n)` (writes `totalCount`) is also recognized as honest disclosure.
 
-See `add-tool`'s **Tool Response Design** and `skills/api-linter` (`enrichment-*` rules) for the full pattern. Test enrichment with `getEnrichment(ctx)` from `@cyanheads/mcp-ts-core/testing`.
+See `add-tool`'s **Tool Response Design** and `framework-skills/api-linter` (`enrichment-*` rules) for the full pattern. Test enrichment with `getEnrichment(ctx)` from `@cyanheads/mcp-ts-core/testing`.
 
 ---
 

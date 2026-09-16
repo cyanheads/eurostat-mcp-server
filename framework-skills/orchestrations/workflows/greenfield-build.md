@@ -4,7 +4,7 @@ description: >
   Workflow: scaffold one or more new MCP server projects from `bunx @cyanheads/mcp-ts-core init` through design → build → polish → first public release. Each phase invokes a foundational skill end-to-end; this file is the sequencing and gates, not the procedural detail. Read `../SKILL.md` first for the universal rules and sub-agent strategy.
 metadata:
   author: cyanheads
-  version: "1.0"
+  version: "1.1"
   audience: external
   type: workflow
 ---
@@ -35,18 +35,18 @@ Everything stays at **v0.1.0** through the build. Intermediate commits don't bum
 
 | Phase | Tier 1 skill(s) |
 |:---|:---|
-| Scaffold (1) | `skills/setup/SKILL.md` |
-| Initial commit, design commit, build commit, pre-launch commit (2, 5, 10, 16) | `skills/git-wrapup/SKILL.md` (commit + tag, no push) |
-| Design + validation (3, 4) | `skills/design-mcp-server/SKILL.md` |
-| Build (6) | `skills/add-tool/SKILL.md`, `skills/add-app-tool/SKILL.md`, `skills/add-resource/SKILL.md`, `skills/add-prompt/SKILL.md`, `skills/add-service/SKILL.md` |
-| Tool-def audit (7) | `skills/tool-defs-analysis/SKILL.md` |
-| Test coverage (8) | `skills/add-test/SKILL.md` |
+| Scaffold (1) | `framework-skills/setup/SKILL.md` |
+| Initial commit, design commit, build commit, pre-launch commit (2, 5, 10, 16) | `framework-skills/git-wrapup/SKILL.md` (commit + tag, no push) |
+| Design + validation (3, 4) | `framework-skills/design-mcp-server/SKILL.md` |
+| Build (6) | `framework-skills/add-tool/SKILL.md`, `framework-skills/add-app-tool/SKILL.md`, `framework-skills/add-resource/SKILL.md`, `framework-skills/add-prompt/SKILL.md`, `framework-skills/add-service/SKILL.md` |
+| Tool-def audit (7) | `framework-skills/tool-defs-analysis/SKILL.md` |
+| Test coverage (8) | `framework-skills/add-test/SKILL.md` |
 | Field-test loop (11) | → `workflows/field-test-fix.md` as a sub-loop (see Phase 11 note) |
-| Simplify (12) | `skills/code-simplifier/SKILL.md` |
-| Polish docs/meta (13) | `skills/polish-docs-meta/SKILL.md` |
-| Security pass (14) | `skills/security-pass/SKILL.md` |
-| Final wrap-up (17) | `skills/git-wrapup/SKILL.md` |
-| Release (18) | `skills/release-and-publish/SKILL.md` |
+| Simplify (12) | `framework-skills/code-simplifier/SKILL.md` |
+| Polish docs/meta (13) | `framework-skills/polish-docs-meta/SKILL.md` |
+| Security pass (14) | `framework-skills/security-pass/SKILL.md` |
+| Final wrap-up (17) | `framework-skills/git-wrapup/SKILL.md` |
+| Release (18) | `framework-skills/release-and-publish/SKILL.md` |
 
 ## Phases
 
@@ -80,7 +80,7 @@ Phase 11 is optional. Phase 12 is the last phase that modifies source code — e
 Only phases with orchestration overrides or non-obvious instructions appear below. Other phases run their foundational skill end-to-end.
 
 ### Phase 1: Scaffold + repo
-Sub-agent runs `bunx @cyanheads/mcp-ts-core init <name>`, follows the `setup` skill, then creates a **private** GitHub repo (`gh repo create --private`). Override the `setup` skill's commit step — **do NOT commit**; Phase 2 is the commit. Copy `LICENSE` from `node_modules/@cyanheads/mcp-ts-core/LICENSE` if not already present.
+Sub-agent runs `bunx @cyanheads/mcp-ts-core init <name>`, follows the `setup` skill, then creates a **private** GitHub repo (`gh repo create --private`) and immediately runs `gh repo edit --enable-squash-merge=false --enable-rebase-merge=false` — release PRs land by local fast-forward, so the GitHub UI must not be able to squash or rewrite a stack. Override the `setup` skill's commit step — **do NOT commit**; Phase 2 is the commit. Copy `LICENSE` from `node_modules/@cyanheads/mcp-ts-core/LICENSE` if not already present.
 
 ### Phase 2: Initial commit
 Sub-agent verifies `gh repo view --json visibility` returns `PRIVATE` (or has explicit user authorization for public) before push. Tag is `v0.1.0`.

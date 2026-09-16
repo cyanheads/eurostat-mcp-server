@@ -2,6 +2,20 @@
 
 Structure and content guide for creating or updating a README for an MCP server built on `@cyanheads/mcp-ts-core`. If a README already exists, use this as a reference to audit and improve it — don't blindly rewrite sections that are already accurate.
 
+The reference implementation is the `pubmed-mcp-server` README — https://github.com/cyanheads/pubmed-mcp-server/blob/main/README.md. Read it in full before writing, mirror its structure, reuse its non-server-specific content, and treat it as authoritative wherever this file lags behind it.
+
+## Concision
+
+A README is read once by a human deciding whether and how to use the server. It is not the changelog, not the schema, and not a proof that a feature works. Apply these on every pass, including re-runs over a README that is already accurate — accuracy is the floor, not the finish.
+
+**Keep, always:** canonical identifiers (tool, resource, prompt, field, env var, and enum names, exactly as the code spells them); per-call caps and limits; input alternatives and which are required; the fields a caller branches on (discriminators, typed reasons, status values); feature flags and the env var that controls each; anything a caller must know before the first call. Brevity never earns semantic loss — if cutting a clause drops a fact from this list, the clause stays.
+
+**Cut:** narration of how a guarantee is implemented ("so a value stays under the header it belongs to"); restated `.describe()` semantics — the schema carries them at call time; edge-case walkthroughs; the distinction between two similar values when the names already carry it; release-note accretion (a bullet that exists because a version added it, not because a reader needs it); marketing adjectives; a heading's intro sentence that repeats its Overview row.
+
+**The test, per bullet:** would a reader lose a fact they need before their first call? If not, cut or merge. If a bullet needs more than two sentences, it is describing mechanism — keep the contract, drop the mechanism.
+
+**Validate what stays.** Condensing is where wrong facts creep in — a merged bullet can silently combine two tools' limits or promote a default to a rule. Every identifier, cap, enum value, and default that survives the pass is checked against the definition file before the run ends. Never condense from memory of what the tool does; condense from the schema.
+
 ## Structure
 
 Use this section order. Omit sections that don't apply (e.g., skip Docker/Workers if the server doesn't deploy there).
@@ -13,14 +27,15 @@ Install badges                          ← one centered row — Claude Desktop,
 Framework badge                         ← solo spotlight row — `Built on @cyanheads/mcp-ts-core` (cyan-300 #67E8F9)
 [Public hosted callout if present]      ← centered HTML block, directly under the Framework badge
 ---
-## Tools                                ← grouping sentence → summary table → per-tool subsections
-## Resources and prompts (if any)       ← single combined table (Type / Name / Description)
-## Features                             ← framework bullets + domain-specific bullets
+## Overview                             ← short description paragraph → `### Tools` / `### Resources` / `### Prompts` two-column tables
+## Capability reference                 ← one `###` entry per primitive, heading tagged `<sub>tool|resource|prompt</sub>`, contract-shaped bullets
+## Features                             ← one-sentence framework line + domain-specific bullets + agent-friendly output bullets
 ## Getting started                      ← hosted (if any), bunx/npx/docker configs, HTTP one-liner, prerequisites, install
 ## Configuration                        ← env var table + `.env.example` pointer
 ## Running the server                   ← dev, production, Workers/Docker
 ## Project structure                    ← directory/purpose table
 ## Development guide                    ← link to CLAUDE.md/AGENTS.md, key rules
+## Contributing                         ← issues only
 ## License                              ← one line
 ```
 
@@ -40,7 +55,7 @@ Centered HTML. The `<h1>` is the server name — use the scoped package name if 
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-1.0.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/my-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/my-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/my-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-1.0.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/my-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/my-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/my-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -108,106 +123,94 @@ If a public hosted instance is available, **promote it to a top-level callout** 
 
 Keep the full connection-config JSON block inside a `### Public Hosted Instance` subsection under Getting Started (covered below). This callout is just the visibility pointer.
 
+No hosted instance → omit the callout, the Getting Started subsection, and any hosted mention in the Overview. Never state the absence ("no public hosted instance"); self-hosting is the default a reader already assumes.
+
+### Overview
+
+The first section after the header rule. Two parts: a short description paragraph, then one two-column table per primitive type. This is what a visitor reads to decide whether the server is for them, so it must scan in one screen.
+
+**Description paragraph:** two or three sentences — what the server sits on top of (the upstream APIs), what a user can do with it (the headline workflows, action verbs), and how it runs (transports, plus the hosted endpoint when one exists). Not a count.
+
+The opening sentence names the subject, not the container. The reader is already on an MCP server's repo page — the `<h1>`, the badge row, and the framework line all say so — so an opener that restates it ("An MCP server over…", "An MCP calculator…", "An MCP server that…") spends the most-read sentence on nothing. Lead with the domain or the upstream as a noun phrase, article optional: "Calculator powered by math.js.", "Seismic data from USGS ComCat and the EMSC SeismicPortal.", "The Acme v2 API — projects, tasks, and team activity.", "Read, write, and search Obsidian vault notes over the Local REST API plugin." The words "MCP server" appear at most once in the paragraph, and never as its first noun.
+
+**Primitive tables:** a `### Tools` table, then `### Resources` and `### Prompts` tables when the server has any. Omit a heading whose table would be empty, but keep a one-row table rather than folding it into another. Two columns, Name/Description, one-line descriptions — the detail lives in the Capability reference.
+
+```markdown
+## Overview
+
+Project management over the Acme v2 API. Search projects, manage tasks, and track team activity from any MCP client. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+
 ### Tools
 
-This is the most important section — it tells humans and LLMs exactly what the server exposes. Three layers: a **grouping framing sentence**, a summary table, then per-tool subsections for tools with non-trivial behavior.
+| Tool | Description |
+|:---|:---|
+| `acme_search_projects` | Search projects by name, status, or team, with pagination and field selection |
+| `acme_get_task` | Fetch one or more tasks by ID, with full or summary data |
 
-**Grouping framing sentence:** Lead with one sentence that explains how the tool surface is organized. Richer than a bare count — tells the reader what mental model to apply. Examples:
+### Resources
 
-- "Seventeen tools grouped by shape — workflow helpers orchestrate common flows end-to-end, primitive tools expose fine-grained CRUD, and the instruction tool returns procedural guidance merged with live account state."
-- "Nine tools for working with PubMed and NCBI data:"
-- "Five tools covering project lifecycle — discovery, task CRUD, and team analytics."
+| Resource | Description |
+|:---|:---|
+| `acme://projects/{projectId}` | Project details by ID |
 
-If the tools aren't meaningfully grouped, a single sentence count ("Seven tools for working with Acme data:") is acceptable.
+### Prompts
 
-**Summary table:**
-
-```markdown
-## Tools
-
-Seven tools for working with Acme data:
-
-| Tool Name | Description |
-|:----------|:------------|
-| `acme_search_projects` | Search projects by name, status, or team. |
-| `acme_create_task` | Create a new task in a project. |
-| `acme_get_task` | Fetch one or more tasks by ID, with full or summary data. |
+| Prompt | Description |
+|:---|:---|
+| `project_summary` | Summarize a project's status and open tasks |
 ```
 
-**Per-tool subsections:**
+Derive every row from the actual definitions — real names and descriptions from the Zod schemas.
 
-Below the table, add a `### tool_name` subsection for each tool that has meaningful detail beyond its one-line description. Include:
+If resource data is also reachable through tools, say so in one line under the Resources table; many MCP clients are tool-only and never surface resources. If a prompt has a design doc, link it in one line under the Prompts table.
 
-- Bullet list of key capabilities (what inputs it accepts, what filtering/pagination it supports, edge cases it handles)
-- Link to example file if one exists: `[View detailed examples](./examples/tool_name.md)`
-- Separate subsections with `---` horizontal rules
+### Capability reference
+
+One `###` entry per primitive — every tool, resource, and prompt, in the same order as the Overview tables — with the heading tagged by type in a `<sub>` so a reader scanning headings can tell them apart without a section break. Entries are separated by `---` rules. No intro sentence under the heading — the Overview row already said what it does — go straight to bullets.
+
+**Bullet density is contract shape, not changelog narration.** Three to six bullets covering: accepted inputs and per-call caps; the output's discriminating fields; the failure shape (typed reasons, per-item status); the knobs (filters, budgets, feature flags). Behavior a caller discovers from the schema at call time — field-by-field semantics, edge-case handling, the mechanism behind a guarantee — belongs in the definition's `.describe()` text, not here. An entry running past six bullets has started transcribing release notes.
 
 ```markdown
-### `acme_search_projects`
+## Capability reference
 
-Search for projects using free-text queries and filters.
+### `acme_search_projects` <sub>tool</sub>
 
-- Full-text search plus typed status/phase filters
-- Geographic proximity filtering by coordinates and distance
-- Pagination (up to 100 per page) and sorting
-- Field selection to limit response size
-
-[View detailed examples](./examples/acme_search_projects.md)
+- Free-text query plus typed `status` / `phase` filters; up to 100 per page, offset pagination
+- Optional `fields` selection to trim the response
+- Results carry `source` and `fetchedAt` so callers can reason about freshness
 
 ---
 
-### `acme_get_task`
+### `acme_get_task` <sub>tool</sub>
 
-Fetch one or more tasks by ID, with full data or concise summaries.
+- Up to 5 task IDs per call; `detail: "full"` adds subtasks, comments, attachments, and history
+- Per-item `status` rows — a partial batch returns the resolved tasks alongside typed errors for the rest
 
-- Batch fetch up to 5 tasks at once
-- Full data includes subtasks, comments, attachments, and history
-- Partial success reporting when some tasks in a batch fail
+---
+
+### `acme://projects/{projectId}` <sub>resource</sub>
+
+- Project record as `application/json` — name, status, owners, open task count
+- `projectId` comes from `acme_search_projects`
+
+---
+
+### `project_summary` <sub>prompt</sub>
+
+- Arguments: `projectId` required; `includeClosed` (`"true"` / `"false"`) optional
+- Returns two messages — an assistant framing message and a user message carrying the summary request
 ```
 
-Skip the per-tool subsection for simple tools where the table description says everything (e.g., an `acme_get_field_values` lookup tool).
-
-### Resources and Prompts (combined)
-
-**Use a single combined table with a `Type` column** rather than separate `## Resources` and `## Prompts` sections. This is the shipping convention — it scales better when a server has only 1 or 2 of each, and co-locates related content.
-
-```markdown
-## Resources and prompts
-
-| Type | Name | Description |
-|:---|:---|:---|
-| Resource | `acme://projects/{projectId}` | Project details by ID |
-| Resource | `acme://tasks/{taskId}` | Task details by ID |
-| Prompt | `project_summary` | Summarize a project's status and open tasks |
-```
-
-Use singular ("Resource and prompt") if there's only one of each.
-
-**Always include the tool-coverage note** directly under the table. Many MCP clients are tool-only and don't surface resources — this tells both the reader and downstream agents that the data is still reachable:
-
-```markdown
-All resource data is also reachable via tools. Large collections (`projects`, `tasks`) are not exposed as resources — use the `list` operation on the corresponding tool instead.
-```
-
-If a prompt has an associated design doc or reference, link it in the same paragraph: `Design reference for the prompt: [\`docs/email-design-playbook.md\`](./docs/email-design-playbook.md).`
-
-Derive all tool/resource/prompt rows directly from the actual definitions. Use the real names and descriptions from the Zod schemas.
+Link an examples file from an entry when one exists: `[View detailed examples](./examples/acme_search_projects.md)`.
 
 ### Features
 
-Three subsection groups: framework capabilities, domain-specific capabilities, then agent-friendly output design. Bullet lists, not prose.
+The framework line below, verbatim — it names what a user gets from the framework (transports, auth, storage, observability), so it replaces any framework-feature bullets; contributor facts about code organization belong in the Development guide. Then two labeled bullet groups, both always present: `<Upstream>-specific:` (3–5 bullets on the server's own integration), then `Agent-friendly output:`.
 
 ```markdown
 ## Features
 
-Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp-ts-core):
-
-- Declarative tool, resource, and prompt definitions — single file per primitive, framework handles registration and validation
-- Unified error handling — handlers throw, framework catches, classifies, and formats
-- Pluggable auth: `none`, `jwt`, `oauth`
-- Swappable storage backends: `in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`
-- Structured logging with optional OpenTelemetry tracing
-- STDIO and Streamable HTTP transports
+Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): stdio and Streamable HTTP transports, pluggable auth (`none` / `jwt` / `oauth`), swappable storage (`in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`), structured logging with optional OpenTelemetry tracing.
 
 Acme-specific:
 
@@ -222,7 +225,7 @@ Agent-friendly output:
 - Discriminated output contracts — typed status and source fields let callers branch on data, not string parsing
 ```
 
-The **Agent-friendly output** subsection documents output-design choices that make the server work well as an AI-agent backend. Include it when the server exhibits at least two of these patterns. Write bullets grounded in the server's actual behavior — not aspirational framework capabilities. Examples of what fits:
+The **Agent-friendly output** subsection documents output-design choices that make the server work well as an AI-agent backend. Always include it, with 2–4 bullets in the "Pattern — concrete detail" form, each naming fields or behavior verified in the server's source — not aspirational framework capabilities. Drop a pattern the server doesn't have (no batch tools → no partial-failure bullet) rather than claiming it. Examples of what fits:
 
 - Provenance: source labels (`viaSource`, `source`), license/access-level fields, effective-query echo, best-effort warnings on lossy tiers
 - Partial failure: per-item status in batch operations, structured error rows alongside successes, recovery hints ("Next Step" text)
@@ -333,7 +336,7 @@ A public instance is available at `https://my-server.example.com/mcp` — no ins
 ```markdown
 ### Prerequisites
 
-- [Bun v1.3.0](https://bun.sh/) or higher (or Node.js v24+).
+- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
 - An Acme API key — see [`docs/api-key.md`](./docs/api-key.md) for how to generate one.
 ```
 
@@ -435,10 +438,10 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 
 ### Cloudflare Workers
 
-1. **Build the Worker bundle:**
+1. **Run locally under wrangler:**
 
 \`\`\`sh
-bun run build:worker
+bun run deploy:dev
 \`\`\`
 
 2. **Deploy:**
@@ -448,7 +451,7 @@ bun run deploy:prod
 \`\`\`
 ```
 
-Include the Docker or Workers subsection only if the server supports it. The Docker trailing paragraph (log directory, OTEL build arg) is important — it documents Dockerfile behavior that isn't obvious from the build command.
+Include the Docker subsection only if the server ships a Dockerfile, and the Workers subsection only if it ships a `src/worker.ts` entry. The Docker trailing paragraph (log directory, OTEL build arg) is important — it documents Dockerfile behavior that isn't obvious from the build command.
 
 ### Project Structure
 
@@ -483,6 +486,21 @@ See [`CLAUDE.md`/`AGENTS.md`](./CLAUDE.md) for development guidelines and archit
 - Wrap external API calls: validate raw → normalize to domain type → return output schema; never fabricate missing fields
 ```
 
+### Contributing
+
+Issues only. Never write "pull requests are welcome" or any PR invitation — contributions arrive as issues, and `.github/CONTRIBUTING.md` says the same.
+
+```markdown
+## Contributing
+
+Issues are welcome. Run checks and tests before submitting:
+
+\`\`\`sh
+bun run devcheck
+bun run test
+\`\`\`
+```
+
 ### License
 
 One line referencing the LICENSE file.
@@ -495,11 +513,13 @@ Apache-2.0 — see [LICENSE](LICENSE) for details.
 
 ## Principles
 
+- **Gold standard first.** The `pubmed-mcp-server` README is the reference implementation; where it and this file disagree, the README wins.
 - **Accuracy over aspiration.** Only document what exists. Don't describe planned features as if they're implemented.
-- **Tools first.** The tool surface is the most important content. Lead with it.
+- **Surface first.** The primitives are the most important content. The Overview leads with them.
 - **Tables over prose** for structured data (tools, config, directories). Scannable and diff-friendly.
-- **Two-layer tool docs.** Grouping sentence + summary table for quick scanning, per-tool subsections for detail. Skip subsections for trivial tools.
-- **Combined resources + prompts.** Single table with a `Type` column, not separate sections.
+- **Overview + reference.** Overview tables for scanning; a Capability reference entry for every primitive, none skipped, with contract-shaped bullets rather than release-note narration.
+- **Concise on every pass.** Re-runs tighten as well as correct; see § *Concision* for what survives a cut and what doesn't, and validate everything that survives.
+- **One two-column table per primitive type.** Tools, resources, and prompts each get a small heading and a Name/Description table, even when a table has one row. No `Type` column — most servers are tool-heavy and many have no resources or prompts.
 - **Promote hosted instances.** If there's a public URL, put it in a top-level callout under the badges — not buried in Getting Started.
 - **Three install configs.** `bunx`, `npx`, `docker run` in that order. Each as a complete MCP-client JSON block.
 - **Real names from code.** Tool names, env vars, and URIs must match the source exactly. Copy from the definitions, don't paraphrase.

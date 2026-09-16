@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.20"
+  version: "2.26"
   audience: external
   type: reference
 ---
@@ -26,9 +26,9 @@ Tools use the `tool()` builder from `@cyanheads/mcp-ts-core`. Each tool lives in
 
 Tools use lowercase snake_case with a canonical server/domain prefix: `{server}_{verb}_{noun}` — 3 words.
 
-Examples: `pubmed_search_articles`, `pubmed_fetch_fulltext`, `clinicaltrials_find_studies`.
+Examples: `pubmed_search_articles`, `pubmed_fetch_fulltext`, `clinicaltrials_find_eligible`.
 
-The server prefix uses the canonical platform/brand name, not an abbreviation (`patentsview_` not `patents_`, `clinicaltrials_` not `ct_`). When a name resists the schema — can't pick a verb, noun feels generic, wants 4+ segments — that's usually a signal the scope is fuzzy; split the tool, rename, or reconsider.
+The server prefix is judged on clarity, not length: the brand name or the plain well-known word for the domain both pass (`pubmed_`, `patents_`); an abbreviation fails only when it reads as something else out of context (`loc_`, `ct_`). A fourth segment is fine when the noun is inherently two words (`openfda_search_device_clearances`). When a name resists the schema — can't pick a verb, noun feels generic, the *verb* wants a second word — that's usually a signal the scope is fuzzy; split the tool, rename, or reconsider.
 
 For shape selection (Workflow or Instruction variants — standard single-action tools are the default), see the `design-mcp-server` skill's Tool shapes section.
 
@@ -131,7 +131,7 @@ export const {{TOOL_EXPORT}} = tool('{{tool_name}}', {
 
 ### Multi-round-trip variant
 
-A handler that needs something the caller didn't supply returns `ctx.requestInput(...)` and is re-entered with the answers on `ctx.inputs`. There is no mid-handler `await` for user input, and no capability check — the surface is always present, on every transport and both protocol eras.
+A handler that needs something the caller didn't supply returns `ctx.requestInput(...)` and is re-entered with the answers on `ctx.inputs`. There is no mid-handler `await` for user input, and no capability check — the surface is always present, on every transport and both protocol eras. Whether the caller can *answer* is a separate question — a 2025-era HTTP client cannot when the server runs `MCP_SESSION_MODE=stateless`, which a server needing that leg declares with `createApp({ sessionMode: { require: 'stateful' } })` rather than leaving to a deployment (`api-context` § `ctx.requestInput`). Treat an unanswered round as terminal, never as consent.
 
 ```typescript
 import { inputRequired, tool, z } from '@cyanheads/mcp-ts-core';
@@ -169,7 +169,7 @@ export const {{TOOL_EXPORT}} = tool('{{tool_name}}', {
 });
 ```
 
-Write it as `return ctx.requestInput(...)` — the `never` return type makes it valid in return position for any output, and it is what lets TypeScript narrow the line below. Full reference (`inputRequired.elicitUrl` / `.createMessage` / `.listRoots`, `requestState`, decline handling): `skills/api-context`.
+Write it as `return ctx.requestInput(...)` — the `never` return type makes it valid in return position for any output, and it is what lets TypeScript narrow the line below. Full reference (`inputRequired.elicitUrl` / `.createMessage` / `.listRoots`, `requestState`, decline handling): `framework-skills/api-context`.
 
 ### Registration
 
@@ -221,10 +221,41 @@ export const submitObservations = getServerConfig().enableWrites
 | Surface | Disabled tools? |
 |:---|:---|
 | `tools/list` (MCP protocol — what clients call) | **No** — disabled tools are skipped at registration |
-| `/.well-known/mcp.json` `definitions.tools` (Server Card) | **Yes**, with `disabled` field — discovery agents see them as present-but-uncallable |
-| `/` (HTML landing page) | **Yes**, in a 4th muted bucket after `read \| write \| destructive` |
+| `/.well-known/mcp.json` (Server Card) | **No** — the card carries no per-tool entries at all, so a discovery agent reading it cannot see a disabled tool |
+| `/` (HTML landing page) | **Yes**, in a 4th muted bucket after `read \| write \| destructive` — the only surface where a disabled tool is visible |
 
 The wrapper preserves all original definition fields (handler, schemas, auth scopes, error contracts) — when re-enabled, the tool already conforms to every lint rule.
+
+#### Audit what still names the tool
+
+Gating a tool removes it from `tools/list`, but nothing rewrites the rest of the server. Every reference that survives points a client at a name it cannot call. Sweep for the tool's name across three surfaces and fix what the gate makes wrong:
+
+| Surface | What the gate requires |
+|:---|:---|
+| **Static prose** — server `instructions`, tool descriptions, field `.describe()` text | Do not describe a disabled tool as currently callable. |
+| **Recovery text** — `errors[].recovery`, `ctx.fail` hints, `ctx.enrich` notices, service summaries | Offer an available next step, or say the capability is unavailable in this deployment. |
+| **Structured suggestions** — `nextToolSuggestions`, or any `{ toolName, args }` entry a client executes | Emit a suggestion only when its target is enabled under the same configuration. |
+
+A suggestion is executable; prose is not. When no callable alternative exists, prose may still explain the limitation — but the executable entry goes:
+
+```typescript
+const { enableWrites } = getServerConfig();
+
+// The suggestion is emitted only under the config that registers its target.
+const nextToolSuggestions = enableWrites
+  ? [{ toolName: 'brapi_submit_observations', args: { studyDbId } }]
+  : [];
+
+return {
+  observations,
+  nextToolSuggestions,
+  ...(enableWrites
+    ? {}
+    : { notice: 'Submitting observations is turned off in this deployment.' }),
+};
+```
+
+The same audit applies to a tool's own `errors[].recovery`: a hint naming a tool that this deployment gates off sends the agent to a dead end at exactly the moment it is recovering from a failure.
 
 ## Schemas: what the framework stores vs. what clients see
 
@@ -382,7 +413,7 @@ async handler(input, ctx) {
 },
 ```
 
-The alternative — declaring `previewData: z.string()` in `output` and emitting the block from `format()` — ships the bytes twice (once in `structuredContent`, once in the block). Reserve `output` for data the agent reasons over; route raw media through `ctx.content`. Test with `getContentBlocks(ctx)`. Full reference: `skills/api-context` § `ctx.content`.
+The alternative — declaring `previewData: z.string()` in `output` and emitting the block from `format()` — ships the bytes twice (once in `structuredContent`, once in the block). Reserve `output` for data the agent reasons over; route raw media through `ctx.content`. Test with `getContentBlocks(ctx)`. Full reference: `framework-skills/api-context` § `ctx.content`.
 
 ### Capped lists must disclose truncation
 
@@ -683,7 +714,7 @@ throw invalidParams(
 );
 ```
 
-**Error messages are recovery instructions.** Name what went wrong, why, and what action to take. The message is the agent's only signal — a bare "Not found" is a dead end. See `skills/api-errors/SKILL.md` for the full contract pattern, factories list, auto-classification table, and error-path parity (how `data.recovery.hint` reaches both client surfaces).
+**Error messages are recovery instructions.** Name what went wrong, why, and what action to take. The message is the agent's only signal — a bare "Not found" is a dead end. See `framework-skills/api-errors/SKILL.md` for the full contract pattern, factories list, auto-classification table, and error-path parity (how `data.recovery.hint` reaches both client surfaces).
 
 ### Include operational metadata
 
@@ -743,7 +774,7 @@ Large payloads burn the agent's context window. Default to curated summaries; of
 - **Lists**: Return top N with a total count and pagination cursor, not unbounded arrays
 - **Large objects**: Return key fields by default; accept a `fields` or `verbose` parameter for full data
 - **Binary/blob content**: Return metadata and a reference, not the raw content
-- **Analytical working sets**: When upstream returns more *analytical* rows (data an agent would SQL — aggregate, group, join) than fit in context, `DataCanvas` (`ctx.core.canvas?`, Tier 3 — opt-in via `CANVAS_PROVIDER_TYPE=duckdb`) lets you register the rows and return the `canvas_id` plus a preview so the agent can run SQL to slice down without a re-fetch. The `spillover()` helper (`@cyanheads/mcp-ts-core/canvas`) automates the overflow case: drain rows up to a character budget for the inline preview, auto-register the full source on overflow, return both as a discriminated union. **Two gates:** it must be analytical, not a discovery/search surface of categorical metadata (those don't earn a canvas regardless of row count — use MCP-side list filtering or pagination); and a tool emitting a `canvas_id` MUST be paired with a registered `dataframe_query` tool, or the handle is unreachable. Compute distributions or refinement hints across the full result — not the preview — so the agent gets honest aggregate signal on the rows it didn't read. See `api-canvas` for the register / query / export pattern and the spillover flow.
+- **Analytical working sets**: When upstream returns more *analytical* rows (data an agent would SQL — aggregate, group, join) than fit in context, `DataCanvas` (`core.canvas`, wired in `setup()` via `setCanvas`; Tier 3 — opt-in via `CANVAS_PROVIDER_TYPE=duckdb`) lets you register the rows and return the `canvas_id` plus a preview so the agent can run SQL to slice down without a re-fetch. The `spillover()` helper (`@cyanheads/mcp-ts-core/canvas`) automates the overflow case: drain rows up to a character budget for the inline preview, auto-register the full source on overflow, return both as a discriminated union. **Two gates:** it must be analytical, not a discovery/search surface of categorical metadata (those don't earn a canvas regardless of row count — use MCP-side list filtering or pagination); and a tool emitting a `canvas_id` MUST be paired with a registered `dataframe_query` tool, or the handle is unreachable. Compute distributions or refinement hints across the full result — not the preview — so the agent gets honest aggregate signal on the rows it didn't read. See `api-canvas` for the register / query / export pattern and the spillover flow.
 - **One large document**: When a single call returns one document-shaped record (not a row set) that can overflow context, return a section *outline* — top-level keys + per-section byte size — and let the agent re-call with `sections: [...]` for only what it needs, instead of truncating one surface. `outlineOnOverflow()` with `OUTLINE_VARIANT` / `selectSections()` / `formatOutline()` (`@cyanheads/mcp-ts-core/utils`) measures the payload and returns a `full | outline` result. Declare the tool's `output` as a flat `z.object` with a `kind` discriminator and presence-based optional arms (fold in `OUTLINE_VARIANT.shape.sections` / `.notice`) — `tool()` rejects a `z.discriminatedUnion` output — and render each arm on field presence in `format()` so parity holds. Pure measure + key-slice — Workers-portable, unlike canvas `spillover()`. Use for one fat record; use `spillover()` for a row collection. See the `techniques` skill's `outline-on-overflow` reference.
 
 ## MCP-side list filtering
@@ -796,6 +827,7 @@ return { items: hits };
 - [ ] If tool returns unbounded arrays: pagination with total count, or `spillover()` / DataCanvas for *analytical* working sets (an agent would SQL them — not a discovery/search surface). If any tool emits a `canvas_id`, a `dataframe_query` tool is registered in the same server — a token with no query tool is dead output
 - [ ] If tool returns one large *document* (not a row set) that can overflow context: `outlineOnOverflow()` returns a `full | outline` union so the agent re-calls with `sections: [...]` — not one-sided truncation
 - [ ] If tool is feature-gated: evaluated whether `disabledTool()` wrapper is appropriate (present in manifest but uncallable)
+- [ ] If a tool is gated off: swept the server for its name — no prose calls it available, no recovery hint routes to it, and every structured suggestion naming it is emitted only under the config that registers it
 - [ ] If the tool filters a bounded list locally (no upstream search): a distinct local param (`filter`/`nameContains`, not `query`), filters the full set (not one page), strict token match by default
 - [ ] Registered in the project's existing `createApp()` tool list (directly or via barrel)
 - [ ] Test file created via `add-test` skill, or handler tested directly with `createMockContext()`
