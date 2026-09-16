@@ -1,13 +1,27 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "eurostat-mcp-server",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "Search and query the Eurostat catalogue — EU economy, demography, trade, health, and NUTS regional data via MCP. STDIO or Streamable HTTP.",
   "author": {
-    "name": "cyanheads"
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads/eurostat-mcp-server#readme"
   },
   "homepage": "https://github.com/cyanheads/eurostat-mcp-server#readme",
   "repository": "https://github.com/cyanheads/eurostat-mcp-server",
   "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "bun",
+    "eurostat",
+    "eu",
+    "statistics",
+    "open-data"
+  ],
   "mcpServers": {
     "eurostat-mcp-server": {
       "command": "npx",
