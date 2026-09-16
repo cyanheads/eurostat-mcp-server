@@ -37,6 +37,12 @@ const CANVAS_OFF = {
 await createApp({
   name: 'eurostat-mcp-server',
   title: 'eurostat-mcp-server',
+  /**
+   * No tool gates on `ctx.requestInput`, so nothing here needs a durable
+   * session. Declaring it in source keeps the posture with the code rather than
+   * the deployment; `MCP_SESSION_MODE` still wins when it is set.
+   */
+  sessionMode: 'stateless',
   tools: [
     eurostatSearchDatasets,
     eurostatBrowseThemes,
