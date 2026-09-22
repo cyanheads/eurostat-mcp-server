@@ -1,5 +1,18 @@
 # ==============================================================================
 # Build Stage
+#
+# This stage installs all dependencies (including dev), builds the TypeScript
+# source code into JavaScript, and prepares the production assets.
+#
+# Pinned to $BUILDPLATFORM rather than the target platform: `bun run build` emits
+# JavaScript, and only `dist/` crosses into the production stage, which runs its
+# own target-arch install. Built for the target instead, the non-native leg of a
+# `--platform linux/amd64,linux/arm64` build runs under QEMU, where bun >= 1.4
+# aborts with a JavaScriptCore allocator assertion and fails the multi-arch push.
+#
+# The constraint this assumes: the build stage produces platform-independent
+# output. A stage that compiles a native addon needs the target-arch toolchain
+# and cannot cross-compile this way — drop the flag there.
 # ==============================================================================
 FROM --platform=$BUILDPLATFORM oven/bun:1.4.0 AS build
 
@@ -47,16 +60,22 @@ LABEL org.opencontainers.image.source="https://github.com/cyanheads/eurostat-mcp
 COPY package.json bun.lock ./
 
 # Install only production dependencies, ignoring any lifecycle scripts (like 'prepare')
-# that are not needed in the final production image. This installs every direct
-# runtime dependency, including the @duckdb/node-api binding that backs DataCanvas —
-# the canvas is gated at runtime by CANVAS_PROVIDER_TYPE, not at build time, so the
-# image always carries the binding and a deployment turns the feature on with an env var.
+# that are not needed in the final production image.
+# `--omit=peer` drops the framework's optional peer tiers (test runner, service
+# SDKs, parsers) that Bun would otherwise auto-install. Anything this server
+# actually imports belongs in its own `dependencies`, so nothing needed at
+# runtime is lost. The OTEL step below carries the same flag — without it, that
+# install re-resolves the graph and pulls every optional peer back in.
+# The @duckdb/node-api binding that backs DataCanvas is one of this server's own
+# dependencies, so it survives the flag: the canvas is gated at runtime by
+# CANVAS_PROVIDER_TYPE, not at build time, so the image always carries the binding
+# and a deployment turns the feature on with an env var.
 RUN --mount=type=cache,target=/root/.bun/install/cache \
     bun install --production --omit=peer --frozen-lockfile --ignore-scripts
 
 # Conditionally install OpenTelemetry optional peer dependencies (Tier 3).
-# These are not bundled by default to keep the base image lean. Enable at build time
-# with: docker build --build-arg OTEL_ENABLED=true
+# Installed by default. Omit them for a leaner image at build time
+# with: docker build --build-arg OTEL_ENABLED=false
 ARG OTEL_ENABLED=true
 RUN --mount=type=cache,target=/root/.bun/install/cache \
     if [ "$OTEL_ENABLED" = "true" ]; then \
