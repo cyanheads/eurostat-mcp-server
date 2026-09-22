@@ -1,6 +1,6 @@
 # eurostat-mcp-server - Directory Structure
 
-Generated on: 2026-09-16 09:14:40
+Generated on: 2026-09-22 04:59:54
 
 ```text
 eurostat-mcp-server/
@@ -14,6 +14,8 @@ eurostat-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── workflows/
+│   │   └── codeql.yml
 │   ├── CODE_OF_CONDUCT.md
 │   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
@@ -176,6 +178,8 @@ eurostat-mcp-server/
 │   │   └── sts-inpr-m-ie-empty.json
 │   ├── helpers/
 │   │   └── real-canvas.ts
+│   ├── integration/
+│   │   └── session-mode.int.test.ts
 │   ├── prompts/
 │   ├── resources/
 │   │   └── eurostat-dataset.resource.test.ts

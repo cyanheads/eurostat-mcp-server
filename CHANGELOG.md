@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.5](changelog/0.6.x/0.6.5.md) — 2026-09-21
+
+Adopts mcp-ts-core 0.13.6: canvas_id on the DataCanvas tools now enforces the framework's minted-id shape at argument validation, and tool error responses carry the framework's structured reason and recovery details.
+
 ## [0.6.4](changelog/0.6.x/0.6.4.md) — 2026-09-16
 
 Adopts mcp-ts-core 0.13.2: the server declares stateless session mode in source, tool argument rejections carry a structured InvalidParams envelope, and the development skill tree moves from skills/ to framework-skills/ so plugin installs no longer receive it.
