@@ -26,6 +26,9 @@ interface RunningServer {
 
 let logsDir: string;
 
+/** Every server this suite spawned, so `afterAll` can stop one a timed-out test never reached. */
+const children = new Set<ChildProcess>();
+
 beforeAll(() => {
   if (!existsSync(DIST_INDEX)) {
     throw new Error(`Built server not found at ${DIST_INDEX}. Run "bun run rebuild" first.`);
@@ -33,7 +36,8 @@ beforeAll(() => {
   logsDir = mkdtempSync(join(tmpdir(), 'eurostat-session-mode-'));
 });
 
-afterAll(() => {
+afterAll(async () => {
+  await Promise.all([...children].map(stopProcess));
   rmSync(logsDir, { recursive: true, force: true });
 });
 
@@ -73,11 +77,15 @@ async function startServer(sessionMode?: string): Promise<RunningServer> {
   const port = await freePort();
   const { MCP_SESSION_MODE: _inherited, ...inherited } = process.env;
   const child = spawn(process.execPath, [DIST_INDEX], {
+    // The framework loads `.env` from the working directory; an empty one keeps a local file out.
+    cwd: logsDir,
     env: {
       ...inherited,
       MCP_TRANSPORT_TYPE: 'http',
       MCP_HTTP_HOST: '127.0.0.1',
       MCP_HTTP_PORT: String(port),
+      // A port taken since freePort() fails the boot instead of moving the server to port+1.
+      MCP_HTTP_MAX_PORT_RETRIES: '0',
       MCP_LOG_LEVEL: 'error',
       LOGS_DIR: logsDir,
       // Nothing here should reach upstream; a stray call fails against a closed local port.
@@ -86,6 +94,7 @@ async function startServer(sessionMode?: string): Promise<RunningServer> {
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  children.add(child);
 
   let output = '';
   child.stdout?.on('data', (chunk: Buffer) => {
@@ -100,7 +109,9 @@ async function startServer(sessionMode?: string): Promise<RunningServer> {
     if (child.exitCode !== null) {
       throw new Error(`Server exited with code ${child.exitCode}: ${output.slice(-500)}`);
     }
-    const healthy = await fetch(`http://127.0.0.1:${port}/healthz`)
+    const healthy = await fetch(`http://127.0.0.1:${port}/healthz`, {
+      signal: AbortSignal.timeout(1_000),
+    })
       .then((res) => res.ok)
       .catch(() => false);
     if (healthy) return { port, stop: () => stopProcess(child) };
