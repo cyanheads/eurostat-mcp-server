@@ -4,6 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { acquireCanvas, getCanvas } from '@/services/canvas-accessor.js';
 
@@ -13,12 +14,9 @@ export const eurostatDataframeDescribe = tool('eurostat_dataframe_describe', {
     'List the tables staged on a Eurostat dataframe canvas, with their row counts and column names and types. Call this before eurostat_dataframe_query to learn the table and column names to write SQL against. The canvas_id comes from a eurostat_query_dataset or eurostat_download_dataset response that reported a staged table. Every observation column is flat, but the two stagers write different dimension columns, so read the columns reported here rather than assuming: eurostat_query_dataset gives each dimension a code column named after the dimension (e.g. "geo") plus a label companion (e.g. "geo_label"); eurostat_download_dataset gives code columns only — the bulk endpoint carries no labels — plus a "time" column. Both write the same five measure columns — obs_value, obs_flag, obs_flag_label, conf_status, conf_status_label — carrying the same codes for the same observation, so tables from the two stagers join on dimension codes and time and compare like with like.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({
-    canvas_id: z
-      .string()
-      .min(1)
-      .describe(
-        'Canvas identifier returned as canvasId by eurostat_query_dataset or eurostat_download_dataset. Identifies the workspace holding the staged tables.',
-      ),
+    canvas_id: CanvasIdSchema.describe(
+      'Canvas identifier returned as canvasId by eurostat_query_dataset or eurostat_download_dataset. Identifies the workspace holding the staged tables.',
+    ),
   }),
   output: z.object({
     canvasId: z.string().describe('Canvas identifier the tables were read from.'),
@@ -82,6 +80,7 @@ export const eurostatDataframeDescribe = tool('eurostat_dataframe_describe', {
       when: 'The canvas_id is unknown or its lifetime has elapsed.',
       recovery:
         'Re-run eurostat_query_dataset to stage the data again and use the canvasId it returns.',
+      thrownBy: 'service',
     },
   ],
 

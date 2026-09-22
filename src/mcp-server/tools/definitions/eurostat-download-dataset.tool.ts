@@ -5,6 +5,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { acquireCanvas, getCanvas, newTableName } from '@/services/canvas-accessor.js';
 import {
@@ -68,12 +69,9 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
       .describe(
         'How many observations to echo inline, from the start of the download. Caps at 500. The full download is on the canvas table when one was staged; this is orientation, not the result set.',
       ),
-    canvas_id: z
-      .string()
-      .optional()
-      .describe(
-        'Reuse an existing dataframe canvas so this download lands beside earlier results and can be joined against them. Pass a canvasId from a previous response; omit to start a fresh canvas. Ignored on deployments without a dataframe canvas.',
-      ),
+    canvas_id: CanvasIdSchema.optional().describe(
+      'Reuse an existing dataframe canvas so this download lands beside earlier results and can be joined against them. Pass the canvasId a previous eurostat_download_dataset or eurostat_query_dataset response returned; omit to start a fresh canvas. Ignored on deployments without a dataframe canvas.',
+    ),
   }),
   output: z.object({
     datasetCode: z.string().describe('Dataset code as provided.'),
@@ -200,6 +198,7 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
       when: 'The dataset code is not available for dissemination (HTTP 404, SDMX faultcode 100).',
       recovery:
         'Use eurostat_search_datasets or eurostat_browse_themes to find a valid dataset code.',
+      thrownBy: 'service',
     },
     {
       reason: 'invalid_dimension',
@@ -207,6 +206,7 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
       when: 'A filter names a dimension the dataset does not have, or a value or period range Eurostat rejects (SDMX faultcode 150).',
       recovery:
         'Check dimension codes with eurostat_get_dataset_info and their values with eurostat_get_dimension_values, and keep the period range inside the dataset coverage.',
+      thrownBy: 'service',
     },
     {
       reason: 'filter_arity',
@@ -214,6 +214,7 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
       when: 'Eurostat rejected the positional dimension key because it carried the wrong number of positions (SDMX faultcode 140), meaning the dataset structure has changed since the metadata call.',
       recovery:
         'Retry without filters to download the whole dataset, or re-read the dimensions with eurostat_get_dataset_info.',
+      thrownBy: 'service',
     },
     {
       reason: 'async_queued',
@@ -222,6 +223,7 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
       retryable: false,
       recovery:
         'Add dimension filters or a period range so Eurostat serves the extraction inline; the queued result cannot be collected here.',
+      thrownBy: 'service',
     },
     {
       reason: 'no_results',
@@ -235,12 +237,14 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'The SDMX endpoint returned a fault this server does not model, or a body that is not a TSV table.',
       recovery: 'Retry in a few minutes, or narrow the request with dimension filters.',
+      thrownBy: 'service',
     },
     {
       reason: 'canvas_not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'A canvas_id was supplied for staging but is unknown or its lifetime has elapsed.',
       recovery: 'Omit canvas_id so the download starts a fresh canvas and returns its canvasId.',
+      thrownBy: 'service',
     },
   ],
 

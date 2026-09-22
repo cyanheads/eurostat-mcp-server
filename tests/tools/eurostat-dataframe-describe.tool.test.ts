@@ -6,7 +6,7 @@
 
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eurostatDataframeDescribe } from '@/mcp-server/tools/definitions/eurostat-dataframe-describe.tool.js';
 import { setCanvas } from '@/services/canvas-accessor.js';
@@ -90,6 +90,19 @@ describe('eurostatDataframeDescribe', () => {
       code: JsonRpcErrorCode.NotFound,
       data: { reason: 'canvas_not_found' },
     });
+  });
+
+  it('rejects a malformed canvas_id at argument validation, before any canvas lookup', async () => {
+    const result = await runToolContract(eurostatDataframeDescribe, { canvas_id: 'not-an-id' });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.InvalidParams,
+        data: { reason: 'invalid_arguments' },
+      },
+    });
+    const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+    expect(text).toContain('canvas_id');
   });
 
   it('fails with an actionable error when the deployment has no canvas', async () => {

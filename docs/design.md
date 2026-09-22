@@ -395,7 +395,7 @@ Without a canvas the three fields are absent — not null, not empty — and bot
 - `async_response` (ServiceUnavailable, non-retryable): query too large; add dimension filters to reduce result set
 - `invalid_dimension` (ValidationError): dimension *code* is not defined in this dataset's structure (HTTP 400, Eurostat error id 150). Note: invalid dimension *values* do not produce an error — they silently return `no_results`.
 - `conflicting_params` (ValidationError): mutually exclusive parameters combined — a non-empty `geo` filter with `geo_level`, or `since_period`/`until_period` with `last_n_periods`. Both are rejected locally, before the request reaches Eurostat.
-- `canvas_not_found` (NotFound): a `canvas_id` was supplied for staging but is unknown or expired. Only reachable on a deployment with a canvas; without one the parameter is ignored rather than validated.
+- `canvas_not_found` (NotFound): a well-formed `canvas_id` was supplied for staging but is unknown or expired. Only reachable on a deployment with a canvas; without one a well-formed id is ignored rather than looked up. A malformed id never gets this far: `CanvasIdSchema` rejects it at argument validation on every deployment.
 
 ### `eurostat_download_dataset`
 
@@ -422,7 +422,7 @@ Overspend truncates rather than throws. The caller has already paid for everythi
 - `filters: Record<string, string[]>` (default `{}`)
 - `since_period?` / `until_period?: string` → `startPeriod` / `endPeriod`
 - `preview_limit: number` (1–500, default 50) — inline rows
-- `canvas_id?: string`
+- `canvas_id?: string` — `CanvasIdSchema`, the minted 10-character id
 
 **Output:** `datasetCode`, `dimensionsUsed` (read from the TSV header), `rowCount`, `missingCount`, `periodRange`, `bytesRead`, `compressed`, `budgetExceeded`, `observations[]` (the preview), and `canvasId` / `tableName` / `stagedRowCount` when something was staged.
 
@@ -437,7 +437,7 @@ The SQL surface over what `query_dataset` and `download_dataset` stage. Both are
 `dataframe_query` passes caller SQL straight to the canvas. It is not pre-filtered here: the framework's gate rejects anything that is not a single `SELECT` (statement count, statement type, an EXPLAIN-plan operator allowlist, and a table-function deny-list covering file and external-data readers), and each rejection carries a typed reason. A second, weaker string filter in front of that would only shadow those reasons with a vaguer message. `denySystemCatalogs` is left off because `dataframe_describe` already exposes the catalog deliberately.
 
 **Input:**
-- `canvas_id: string` — the `canvasId` from a `query_dataset` or `download_dataset` response
+- `canvas_id: string` — the `canvasId` from a `query_dataset` or `download_dataset` response, declared with `CanvasIdSchema`
 - `sql: string` (query only) — a single read-only `SELECT`
 
 **Output:** `describe` returns `canvas_id`, `expires_at`, and `tables[]` (`name`, `kind`, `row_count`, `expires_at?`, `columns[]`). `query` returns `canvas_id`, `columns[]`, `rows[]`, `row_count`, `truncated`. 64-bit integer results come back as strings — the framework's JSON-safe row shape — so `COUNT(*)` is a string unless cast.
@@ -601,3 +601,4 @@ The SQL surface over what `query_dataset` and `download_dataset` stage. Both are
 | 2026-08-04 | Give the bulk path its own timeout, and no retry | A bulk body streams for minutes where a metadata call answers in seconds, so sharing `EUROSTAT_REQUEST_TIMEOUT_MS` would either time out every download or loosen every metadata call. Retry is omitted for the same reason inverted: re-running the most expensive request this server makes, on a transient failure, costs the caller another full transfer. |
 | 2026-05-23 | 5 tools, no prompts, 1 resource | Domain is read-only data retrieval with a natural tool workflow (discover → inspect → query). Prompts add no value over well-designed tool descriptions. Resource for `eurostat://dataset/{dataset_code}` provides cache-injectable context without requiring a full query. |
 | 2026-05-23 | Exclude SDMX codelist tool | Global codelists (4,292 geo entries) are unhelpful without dataset scoping. `get_dimension_values` is dataset-scoped and returns actionable values. |
+| 2026-09-21 | Declare every `canvas_id` input with the framework's `CanvasIdSchema` | The minted 10-character shape then reaches `inputSchema`, so a caller sees it before calling, and an impossible id fails argument validation instead of a registry lookup. The accepted cost is on the two staging tools: a malformed id is now rejected even where a well-formed one would be ignored (no canvas, or a match at or below 5,000). |

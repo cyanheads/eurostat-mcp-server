@@ -4,6 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { acquireCanvas, getCanvas, newTableName } from '@/services/canvas-accessor.js';
 import {
@@ -67,12 +68,9 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       .enum(['EN', 'FR', 'DE'])
       .default('EN')
       .describe('Language for labels in the response. Default is "EN". Options: "EN", "FR", "DE".'),
-    canvas_id: z
-      .string()
-      .optional()
-      .describe(
-        'Reuse an existing dataframe canvas, so a result staged by this call lands beside earlier ones and can be joined against them. Pass a canvasId from a previous response; omit to start a fresh canvas. Ignored on deployments without a dataframe canvas and when the match is at or below 5,000 observations.',
-      ),
+    canvas_id: CanvasIdSchema.optional().describe(
+      'Reuse an existing dataframe canvas, so a result staged by this call lands beside earlier ones and can be joined against them. Pass the canvasId a previous eurostat_query_dataset or eurostat_download_dataset response returned; omit to start a fresh canvas. Ignored on deployments without a dataframe canvas and when the match is at or below 5,000 observations.',
+    ),
   }),
   output: z.object({
     datasetCode: z.string().describe('Dataset code as provided.'),
@@ -267,6 +265,7 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       code: JsonRpcErrorCode.NotFound,
       when: 'A canvas_id was supplied for staging but is unknown or its lifetime has elapsed.',
       recovery: 'Omit canvas_id so the response starts a fresh canvas and returns its canvasId.',
+      thrownBy: 'service',
     },
   ],
 

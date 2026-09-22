@@ -265,6 +265,20 @@ describe('Input validation', () => {
         }),
       ).toThrow();
     });
+
+    it('rejects a malformed canvas_id and accepts a well-formed one', () => {
+      for (const canvas_id of ['', 'abc', "'; DROP TABLE t; --"]) {
+        expect(() =>
+          eurostatDownloadDataset.input.parse({ dataset_code: 'nama_10_gdp', canvas_id }),
+        ).toThrow();
+      }
+      expect(() =>
+        eurostatDownloadDataset.input.parse({
+          dataset_code: 'nama_10_gdp',
+          canvas_id: 'aB3_-xY9zQ',
+        }),
+      ).not.toThrow();
+    });
   });
 
   describe('eurostatQueryDataset', () => {
@@ -296,6 +310,17 @@ describe('Input validation', () => {
           eurostatQueryDataset.input.parse({ dataset_code: 'nama_10_gdp', lang }),
         ).not.toThrow();
       }
+    });
+
+    it('rejects a malformed canvas_id and accepts a well-formed one', () => {
+      for (const canvas_id of ['', 'abc', "'; DROP TABLE t; --"]) {
+        expect(() =>
+          eurostatQueryDataset.input.parse({ dataset_code: 'nama_10_gdp', canvas_id }),
+        ).toThrow();
+      }
+      expect(() =>
+        eurostatQueryDataset.input.parse({ dataset_code: 'nama_10_gdp', canvas_id: 'aB3_-xY9zQ' }),
+      ).not.toThrow();
     });
   });
 });
@@ -1262,6 +1287,12 @@ describe('eurostat_dataframe_query — SQL injection resistance', () => {
       ).toThrow();
     });
 
+    it('rejects a malformed canvas_id at the schema boundary', () => {
+      for (const canvas_id of ['abc', "'; DROP TABLE t; --", `${canvasId}x`]) {
+        expect(() => eurostatDataframeQuery.input.parse({ canvas_id, sql: 'SELECT 1' })).toThrow();
+      }
+    });
+
     it('rejects a 10,000-character predicate without crashing', async () => {
       await expectRejected(`SELECT * FROM ${TABLE} WHERE geo = '${'A'.repeat(10_000)}`);
     });
@@ -1296,11 +1327,21 @@ describe('eurostat_dataframe_describe — input validation', () => {
     expect(() => eurostatDataframeDescribe.input.parse({ canvas_id: '' })).toThrow();
   });
 
-  it('accepts an injection-shaped canvas_id at the schema and rejects it at the canvas', () => {
-    // The id is opaque, so the schema only checks it is non-empty; the lookup is what
-    // refuses it. Nothing interpolates it into SQL.
+  it('rejects an injection-shaped canvas_id at the schema, before any canvas lookup', () => {
+    // CanvasIdSchema pins the minted 10-character shape, so a value that could never be
+    // an id fails argument validation and the handler never runs.
     expect(() =>
       eurostatDataframeDescribe.input.parse({ canvas_id: "'; DROP TABLE t; --" }),
-    ).not.toThrow();
+    ).toThrow();
+  });
+
+  it('rejects a canvas_id of the wrong length or alphabet', () => {
+    for (const canvas_id of ['abc', 'zzzzzzzzzzz', 'zzzz zzzzz', 'zzzzzzzzz.']) {
+      expect(() => eurostatDataframeDescribe.input.parse({ canvas_id })).toThrow();
+    }
+  });
+
+  it('accepts a well-formed canvas_id', () => {
+    expect(() => eurostatDataframeDescribe.input.parse({ canvas_id: 'aB3_-xY9zQ' })).not.toThrow();
   });
 });
