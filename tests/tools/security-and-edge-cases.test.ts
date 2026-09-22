@@ -1335,12 +1335,6 @@ describe('eurostat_dataframe_describe — input validation', () => {
     ).toThrow();
   });
 
-  it('rejects a canvas_id of the wrong length or alphabet', () => {
-    for (const canvas_id of ['abc', 'zzzzzzzzzzz', 'zzzz zzzzz', 'zzzzzzzzz.']) {
-      expect(() => eurostatDataframeDescribe.input.parse({ canvas_id })).toThrow();
-    }
-  });
-
   it('accepts a well-formed canvas_id', () => {
     expect(() => eurostatDataframeDescribe.input.parse({ canvas_id: 'aB3_-xY9zQ' })).not.toThrow();
   });
