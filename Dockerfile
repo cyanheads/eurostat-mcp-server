@@ -14,7 +14,7 @@
 # output. A stage that compiles a native addon needs the target-arch toolchain
 # and cannot cross-compile this way — drop the flag there.
 # ==============================================================================
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.0 AS build
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.2 AS build
 
 WORKDIR /usr/src/app
 
@@ -40,7 +40,7 @@ RUN bun run build
 # application. It uses a slim base image and only includes production
 # dependencies and build artifacts.
 # ==============================================================================
-FROM oven/bun:1.4.0-slim AS production
+FROM oven/bun:1.4.2-slim AS production
 
 WORKDIR /usr/src/app
 
