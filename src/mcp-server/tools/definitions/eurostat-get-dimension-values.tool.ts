@@ -11,7 +11,7 @@ import { GEO_LEVEL_VALUES } from '@/services/eurostat-data/types.js';
 export const eurostatGetDimensionValues = tool('eurostat_get_dimension_values', {
   title: 'Get Eurostat Dimension Values',
   description:
-    'List all valid values for a specific dimension in a Eurostat dataset (e.g., all unit codes for nama_10_gdp, all geo codes for a regional dataset). Use this when eurostat_get_dataset_info returns more values than the 10-item sample, or to confirm exact codes before querying. For the "geo" dimension, use geo_level to filter by NUTS hierarchy (country, nuts1, nuts2, nuts3). An invalid code returns no data from eurostat_query_dataset, which names it as unmatched rather than failing, and is rejected by Eurostat as a fault on eurostat_download_dataset; use this tool to verify codes first.',
+    'List all valid values for a specific dimension in a Eurostat dataset (e.g., all unit codes for nama_10_gdp, all geo codes for a regional dataset). Use this when eurostat_get_dataset_info returns more values than the 10-item sample, or to confirm exact codes before querying. For the "geo" dimension, use geo_level to filter by NUTS hierarchy (country, nuts1, nuts2, nuts3). An invalid code matches nothing: eurostat_query_dataset names it in unmatchedValues, or in its no_results error when the query matched nothing at all, and Eurostat rejects it as a fault on eurostat_download_dataset; use this tool to verify codes first.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     dataset_code: z.string().min(1).describe('Dataset code (e.g., "nama_10_gdp").'),
