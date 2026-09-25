@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.0](changelog/0.7.x/0.7.0.md) — 2026-09-25 · ⚠️ Breaking
+
+Both data tools now reject malformed, non-existent, and inverted period ranges as invalid_period before any request; eurostat_query_dataset explains an empty match and names filter values that matched nothing; eurostat_download_dataset reports totalCount instead of truncated.
+
 ## [0.6.5](changelog/0.6.x/0.6.5.md) — 2026-09-21
 
 Adopts mcp-ts-core 0.13.6: canvas_id on the DataCanvas tools now enforces the framework's minted-id shape at argument validation, and tool error responses carry the framework's structured reason and recovery details.
