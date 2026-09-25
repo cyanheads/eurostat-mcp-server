@@ -59,7 +59,7 @@ export const eurostatDataframeQuery = tool('eurostat_dataframe_query', {
       code: JsonRpcErrorCode.NotFound,
       when: 'The canvas_id is unknown or its lifetime has elapsed.',
       recovery:
-        'Re-run eurostat_query_dataset to stage the data again and use the canvasId it returns.',
+        'Re-run the tool that staged it (eurostat_query_dataset or eurostat_download_dataset) and use the canvasId it returns.',
       thrownBy: 'service',
     },
     {
@@ -67,7 +67,7 @@ export const eurostatDataframeQuery = tool('eurostat_dataframe_query', {
       code: JsonRpcErrorCode.NotFound,
       when: 'The SQL names a table that is not staged on this canvas, or that has expired.',
       recovery:
-        'Call eurostat_dataframe_describe for the staged table names, or re-run eurostat_query_dataset to stage them again.',
+        'Call eurostat_dataframe_describe for the staged table names, or re-run the tool that staged them (eurostat_query_dataset or eurostat_download_dataset).',
       thrownBy: 'service',
     },
   ],

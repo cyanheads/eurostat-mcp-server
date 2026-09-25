@@ -79,7 +79,7 @@ export const eurostatDataframeDescribe = tool('eurostat_dataframe_describe', {
       code: JsonRpcErrorCode.NotFound,
       when: 'The canvas_id is unknown or its lifetime has elapsed.',
       recovery:
-        'Re-run eurostat_query_dataset to stage the data again and use the canvasId it returns.',
+        'Re-run the tool that staged it (eurostat_query_dataset or eurostat_download_dataset) and use the canvasId it returns.',
       thrownBy: 'service',
     },
   ],
