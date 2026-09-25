@@ -10,7 +10,7 @@ import { getEurostatCatalogueService } from '@/services/eurostat-catalogue/euros
 export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
   title: 'Search Eurostat Datasets',
   description:
-    'Search the Eurostat catalogue by keyword. Returns matching datasets with codes, descriptions, period coverage, and theme breadcrumbs. Use this to discover dataset codes before calling eurostat_get_dataset_info, then eurostat_query_dataset for a slice of a dataset or eurostat_download_dataset for the whole of one. Results are limited to datasets and predefined tables — folders are excluded.',
+    'Search the Eurostat catalogue by keyword. Returns matching datasets with codes, descriptions, period coverage, and theme breadcrumbs. Use this to discover dataset codes before calling eurostat_get_dataset_info, then eurostat_query_dataset for a slice of a dataset or eurostat_download_dataset for the whole of one. Results are limited to datasets and predefined tables — folders are excluded. The catalogue joins two sources: the dissemination table of contents, and the Comext host\'s dataflow list, which adds the DS-* collections — detailed trade by CN8, HS, SITC, BEC and CPA, and PRODCOM — filed under "International trade in goods - detailed data (Comext)" and "Statistics on the production of manufactured goods (PRODCOM)". Comext entries report a last-update date but no period coverage or observation count. A collection on neither list, such as the legacy PRODCOM DS-056120, is not disseminated and cannot be reached through this server.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     query: z
@@ -116,9 +116,9 @@ export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
     {
       reason: 'no_match',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No datasets matched the query string.',
+      when: 'No datasets matched the query string — including a query naming a DS-* code that neither the dissemination table of contents nor the Comext dataflow list carries, which is a collection Eurostat does not disseminate.',
       recovery:
-        'Try a broader or different search term. Use eurostat_browse_themes to explore themes without text search.',
+        'Try a broader or different search term, or eurostat_browse_themes to explore without text search. A DS-* code on neither list is not disseminated, so search for its subject (e.g. "prodcom", "CN8") to find the collections that are.',
     },
     {
       reason: 'invalid_cursor',
@@ -144,14 +144,31 @@ export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
       }
       throw err;
     }
-    const { datasets, totalMatches, nextCursor } = found;
+    const { datasets, totalMatches, nextCursor, undisseminatedCodes, comextListMissing } = found;
 
     if (datasets.length === 0) {
-      throw ctx.fail('no_match', `No datasets matched "${input.query}".`, {
-        recovery: {
-          hint: `Try a broader term or use eurostat_browse_themes to explore themes without text search.`,
+      /**
+       * A DS-* code on neither list is absent by design, so broadening cannot find it.
+       * While the Comext list is not merged, its absence proves nothing — the code is
+       * checked directly instead.
+       */
+      const codes = undisseminatedCodes?.join(', ');
+      const plural = (undisseminatedCodes?.length ?? 0) > 1;
+      throw ctx.fail(
+        'no_match',
+        codes && !comextListMissing
+          ? `No datasets matched "${input.query}": ${codes} ${plural ? 'are' : 'is'} on neither the Eurostat dissemination catalogue nor the Comext dataflow list, so Eurostat does not disseminate ${plural ? 'them' : 'it'} through this API.`
+          : `No datasets matched "${input.query}".`,
+        {
+          recovery: {
+            hint: !codes
+              ? 'Try a broader term or use eurostat_browse_themes to explore themes without text search.'
+              : comextListMissing
+                ? `The Comext dataflow list could not be loaded, so ${codes} could not be checked against it. Call eurostat_get_dataset_info with the code to check it directly.`
+                : `Broadening will not find ${codes}: a collection on neither list is not disseminated. Search for its subject instead — "prodcom" or "CN8", for example — to find the DS-* collections Eurostat does disseminate.`,
+          },
         },
-      });
+      );
     }
 
     const hasMore = nextCursor !== undefined;

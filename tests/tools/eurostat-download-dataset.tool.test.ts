@@ -30,7 +30,14 @@ import {
   getEurostatBulkService,
 } from '@/services/eurostat-bulk/eurostat-bulk-service.js';
 import type { BulkDownload, BulkRow } from '@/services/eurostat-bulk/types.js';
-import { getEurostatDataService } from '@/services/eurostat-data/eurostat-data-service.js';
+import {
+  EurostatDataService,
+  getEurostatDataService,
+} from '@/services/eurostat-data/eurostat-data-service.js';
+import {
+  EARN_SES_ANNUAL_DIMENSIONS,
+  sdmxDataStructureXml,
+} from '../fixtures/eurostat-sdmx-metadata.js';
 
 const DIMENSIONS = ['freq', 'unit', 'na_item', 'geo'];
 const PERIODS = ['2022', '2023', '2024'];
@@ -74,6 +81,7 @@ function stubDownload(
   const download: BulkDownload = {
     header: { dimensions: DIMENSIONS, periods: PERIODS },
     url: 'https://ec.europa.eu/eurostat/api/dissemination/sdmx/2.1/data/nama_10_gdp?format=TSV',
+    valueText: false,
     stats: {
       bytesRead: 0,
       budgetExceeded: false,
@@ -995,6 +1003,45 @@ describe('eurostatDownloadDataset — period inputs and SDMX faults (real bulk s
     });
   });
 
+  it('runs a filtered download when the unfiltered latest-period slice exceeds the extraction limit (#57)', async () => {
+    vi.mocked(getEurostatDataService).mockReturnValue(
+      new EurostatDataService({} as never, {} as never),
+    );
+    const EARN_TSV =
+      'freq,nace_r2,isco08,worktime,age,sex,indic_se,geo\\TIME_PERIOD\t2018 \t2022 \r\n' +
+      'A,B-S_X_O,TOTAL,FT,TOTAL,T,MEAN_E_EUR,DE\t48000 \t53000 \r\n';
+    fetchMock.mockImplementation(async (input: unknown) => {
+      const url = new URL(String(input));
+      if (url.pathname.includes('/statistics/1.0/data/')) {
+        return new Response(
+          '{ "error": [{"status": 413,"id": 413,"label": "EXTRACTION_TOO_BIG: The requested extraction is too big"}]}',
+          { status: 413 },
+        );
+      }
+      if (url.pathname.includes('/sdmx/2.1/datastructure/')) {
+        return new Response(sdmxDataStructureXml(), { status: 200 });
+      }
+      if (url.pathname.includes('/sdmx/2.1/data/')) return new Response(EARN_TSV, { status: 200 });
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+
+    const result = await runToolContract(eurostatDownloadDataset, {
+      dataset_code: 'earn_ses_annual',
+      filters: { geo: ['DE'] },
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      rowCount: 2,
+      dimensionsUsed: EARN_SES_ANNUAL_DIMENSIONS,
+    });
+    const dataUrl = fetchMock.mock.calls
+      .map(([input]) => new URL(String(input)))
+      .find(({ pathname }) => pathname.includes('/sdmx/2.1/data/'));
+    // Eight positions, the filter on the last: the key the structure definition orders.
+    expect(dataUrl?.pathname).toMatch(/\/earn_ses_annual\/\.\.\.\.\.\.\.DE$/);
+  });
+
   it('maps fault 140 INVALID_QUERY_NB_FILTERS to filter_arity', async () => {
     fetchMock.mockImplementationOnce(
       async () =>
@@ -1009,6 +1056,155 @@ describe('eurostatDownloadDataset — period inputs and SDMX faults (real bulk s
         data: { reason: 'filter_arity', recovery: { hint: expect.stringContaining('une_rt_m') } },
       },
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// An empty download on a canvas deployment — real bulk service, real canvas (#56)
+// ---------------------------------------------------------------------------
+
+/** The header-only TSV Eurostat answers `nama_10_gdp` CP_MEUR/B1GQ/DE 1975–1985 with. */
+const HEADER_ONLY_TSV =
+  'freq,unit,na_item,geo\\TIME_PERIOD\t1975 \t1976 \t1977 \t1978 \t1979 \t1980 \t1981 \t1982 \t1983 \t1984 \t1985 \n';
+
+/**
+ * A body that delivers `text` and then stays open, recording whether the reader
+ * cancelled it. A download abandoned without cancelling holds its connection.
+ */
+function openBody(text: string): { body: ReadableStream<Uint8Array>; cancelled: () => boolean } {
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(text));
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  return { body, cancelled: () => cancelled };
+}
+
+describe('eurostatDownloadDataset — an empty download leaves every canvas untouched (#56)', () => {
+  let canvas: DataCanvas;
+  let teardown: () => Promise<void>;
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeAll(() => {
+    ({ canvas, teardown } = withRealCanvas());
+  });
+  afterAll(async () => {
+    await teardown();
+  });
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.restoreAllMocks();
+    setCanvas(canvas);
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(getEurostatBulkService).mockReturnValue(
+      new EurostatBulkService({} as never, {} as never),
+    );
+    vi.mocked(getEurostatDataService).mockReturnValue({
+      getDimensionOrder: vi.fn().mockResolvedValue(['freq', 'unit', 'na_item', 'geo']),
+    } as never);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const EMPTY_REQUEST = {
+    dataset_code: 'nama_10_gdp',
+    filters: { unit: ['CP_MEUR'], na_item: ['B1GQ'], geo: ['DE'] },
+    since_period: '1975',
+    until_period: '1985',
+  };
+
+  /** A canvas holding one staged table, made through the tool itself. */
+  async function canvasWithOneTable(): Promise<{ canvasId: string; tableName: string }> {
+    fetchMock.mockImplementationOnce(async () => new Response(UNE_TSV, { status: 200 }));
+    const result = await runToolContract(eurostatDownloadDataset, { dataset_code: 'une_rt_m' });
+    const { canvasId, tableName } = result.structuredContent as {
+      canvasId: string;
+      tableName: string;
+    };
+    return { canvasId, tableName };
+  }
+
+  it('fails no_results without acquiring a canvas when canvas_id is omitted', async () => {
+    fetchMock.mockImplementationOnce(async () => new Response(HEADER_ONLY_TSV, { status: 200 }));
+    const acquire = vi.spyOn(canvas, 'acquire');
+
+    const result = await runToolContract(eurostatDownloadDataset, EMPTY_REQUEST);
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.NotFound,
+        data: {
+          reason: 'no_results',
+          recovery: {
+            hint: expect.stringContaining('since_period "1975" and until_period "1985"'),
+          },
+        },
+      },
+    });
+    const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+    expect(text).toContain('Recovery:');
+    expect(acquire).not.toHaveBeenCalled();
+  });
+
+  it('stages nothing on a caller-supplied canvas', async () => {
+    const { canvasId, tableName } = await canvasWithOneTable();
+    fetchMock.mockImplementationOnce(async () => new Response(HEADER_ONLY_TSV, { status: 200 }));
+
+    const result = await runToolContract(eurostatDownloadDataset, {
+      ...EMPTY_REQUEST,
+      canvas_id: canvasId,
+    });
+
+    expect(result.structuredContent).toMatchObject({ error: { data: { reason: 'no_results' } } });
+    const instance = await canvas.acquire(canvasId, createMockContext({ tenantId: 'default' }));
+    expect((await instance.describe()).map((t) => t.name)).toEqual([tableName]);
+  });
+
+  it('reports no_results, not canvas_not_found, for an unknown canvas_id', async () => {
+    fetchMock.mockImplementationOnce(async () => new Response(HEADER_ONLY_TSV, { status: 200 }));
+    const result = await runToolContract(eurostatDownloadDataset, {
+      ...EMPTY_REQUEST,
+      canvas_id: 'Zz9Zz9Zz9Z',
+    });
+    expect(result.structuredContent).toMatchObject({ error: { data: { reason: 'no_results' } } });
+  });
+
+  it('still stages a download that yields rows onto the caller-supplied canvas', async () => {
+    const { canvasId, tableName } = await canvasWithOneTable();
+    fetchMock.mockImplementationOnce(async () => new Response(UNE_TSV, { status: 200 }));
+
+    const result = await runToolContract(eurostatDownloadDataset, {
+      dataset_code: 'une_rt_m',
+      canvas_id: canvasId,
+    });
+
+    expect(result.structuredContent).toMatchObject({ canvasId, rowCount: 2, stagedRowCount: 2 });
+    const instance = await canvas.acquire(canvasId, createMockContext({ tenantId: 'default' }));
+    expect((await instance.describe()).map((t) => t.name).sort()).toEqual(
+      [tableName, (result.structuredContent as { tableName: string }).tableName].sort(),
+    );
+  });
+
+  it('cancels the response body when staging fails on an unknown canvas_id', async () => {
+    const { body, cancelled } = openBody(UNE_TSV);
+    fetchMock.mockImplementationOnce(async () => new Response(body, { status: 200 }));
+
+    const result = await runToolContract(eurostatDownloadDataset, {
+      dataset_code: 'une_rt_m',
+      canvas_id: 'Zz9Zz9Zz9Z',
+    });
+
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'canvas_not_found' } },
+    });
+    expect(cancelled()).toBe(true);
   });
 });
 

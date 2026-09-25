@@ -1076,7 +1076,7 @@ describe('eurostatQueryDataset — period inputs and filter matching (real servi
       obsCount: 2,
       truncated: false,
       notice:
-        'preview_limit=1 returns the first 1 of 2 matched rows inline; it does not reduce the match. Use dimension filters (geo, unit, na_item) or a period range to reduce the match itself.',
+        'preview_limit=1 returns the first 1 of 2 matched rows inline; it does not reduce the match. Use dimension filters (freq, s_adj, age, unit, sex, geo) or a period range to reduce the match itself.',
     });
   });
 

@@ -9,10 +9,12 @@ import { getEurostatDataService } from '@/services/eurostat-data/eurostat-data-s
 export const eurostatDatasetResource = resource('eurostat://dataset/{dataset_code}', {
   name: 'eurostat-dataset-info',
   description:
-    'Dataset metadata for a Eurostat dataset — dimensions, time range, observation count, and last-updated date. Equivalent to eurostat_get_dataset_info but accessible as a resource URI for cache-injectable context.',
+    'Dataset metadata for a Eurostat dataset — dimensions, time range, observation count, and last-updated date. Equivalent to eurostat_get_dataset_info but accessible as a resource URI for cache-injectable context. A DS-* code (detailed trade and PRODCOM) is read from the Comext dissemination host, which reports no time range or observation count.',
   mimeType: 'application/json',
   params: z.object({
-    dataset_code: z.string().describe('Dataset code (e.g., "nama_10_gdp").'),
+    dataset_code: z
+      .string()
+      .describe('Dataset code (e.g., "nama_10_gdp", or "DS-045409" for a Comext collection).'),
   }),
   output: z.object({
     code: z.string().describe('Dataset code.'),

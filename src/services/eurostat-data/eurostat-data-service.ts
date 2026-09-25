@@ -19,12 +19,20 @@ import {
   CONF_STATUS_COLUMN,
   CONF_STATUS_LABEL_COLUMN,
   CONF_STATUS_LABELS,
+  decodeTextValue,
   OBS_FLAG_COLUMN,
   OBS_FLAG_LABEL_COLUMN,
   OBS_FLAG_LABELS,
   OBS_VALUE_COLUMN,
+  OBS_VALUE_TEXT_COLUMN,
 } from '@/services/eurostat-codelists.js';
-import { parseSdmxDatasetMetadata, type SdmxDatasetMetadata } from './sdmx-metadata.js';
+import { dataHostFor, isComextDataset } from '@/services/eurostat-hosts.js';
+import { awaitShared } from '@/services/shared-load.js';
+import {
+  parseSdmxDatasetMetadata,
+  parseSdmxDimensionOrder,
+  type SdmxDatasetMetadata,
+} from './sdmx-metadata.js';
 import {
   type DatasetMeta,
   type DimensionValuesResult,
@@ -43,6 +51,52 @@ const CONF_SEPARATOR = '|';
 
 /** A Statistics API error label that names one of the two period parameters. */
 const PERIOD_PARAM_LABEL = /'(since|until)TimePeriod'/;
+
+/**
+ * How long parsed dataset metadata is reused. Eurostat publishes data at 11:00 and
+ * 23:00 Brussels time, so an hour bounds how stale a constraint's period list or
+ * `lastUpdated` can get while sparing repeat calls the structure download — 23 MB
+ * for `DS-045409`.
+ */
+const METADATA_CACHE_TTL_MS = 60 * 60 * 1000;
+
+/**
+ * Estimated bytes of parsed metadata held at once, least recently used evicted first.
+ * The bound is on size because entries differ by three orders of magnitude: a
+ * main-host dataset holds a few KB, `DS-045409`'s 37,069 labelled product codes
+ * about 13.5 MB (measured retained heap; {@link estimateMetadataBytes} puts it at
+ * 13.8 MB). A dataset estimated past the whole budget is answered but not kept.
+ */
+const METADATA_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Upper-end estimate of one entry's retained heap: two bytes per character of every
+ * code and label (a label outside Latin-1 is stored at two bytes a character), plus
+ * a fixed cost per value and per entry for the objects that hold them.
+ */
+function estimateMetadataBytes({ valuesByDimension }: SdmxDatasetMetadata): number {
+  let bytes = 4_096;
+  for (const values of Object.values(valuesByDimension)) {
+    for (const { code, label } of values) bytes += 2 * (code.length + label.length) + 100;
+  }
+  return bytes;
+}
+
+interface MetadataCacheEntry {
+  /** {@link estimateMetadataBytes} of the settled parse; absent while the load is in flight. */
+  bytes?: number;
+  expiresAt: number;
+  metadata: Promise<SdmxDatasetMetadata>;
+}
+
+/** Freeze a parsed structure all the way down, so no caller can edit a cached entry. */
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value)) deepFreeze(child);
+  }
+  return value;
+}
 
 /**
  * Filter values the reply matched to nothing, compared case-insensitively
@@ -149,15 +203,38 @@ export function splitStatus(
   };
 }
 
+/** Run an SDMX parse, reporting a body it cannot read as a non-retryable upstream fault. */
+function parseSdmx<T>(datasetCode: string, parse: () => T): T {
+  try {
+    return parse();
+  } catch (error) {
+    throw serviceUnavailable(
+      `Eurostat returned malformed SDMX metadata for dataset "${datasetCode}": ${error instanceof Error ? error.message : String(error)}`,
+      { reason: 'upstream_fault', datasetCode, retryable: false },
+    );
+  }
+}
+
 export class EurostatDataService {
+  /**
+   * Parsed metadata per dataset, keyed by host and lowercased code — Eurostat matches
+   * codes in any case, so `ds-045409` and `DS-045409` share one entry. The value is the
+   * in-flight or settled parse, so concurrent first calls share one download. Entries
+   * are deep-frozen, expire after {@link METADATA_CACHE_TTL_MS}, are bounded in total
+   * by {@link METADATA_CACHE_MAX_BYTES}, and a failed load is dropped rather than
+   * cached. Map order is recency order: a hit is re-inserted.
+   */
+  private readonly metadataCache = new Map<string, MetadataCacheEntry>();
+
   // config and storage accepted to match the standard service init pattern;
   // this service uses only the Eurostat public API and per-request config.
   // biome-ignore lint/complexity/noUselessConstructor: standard init pattern
   constructor(_config: AppConfig, _storage: StorageService) {}
 
   private buildUrl(datasetCode: string, params: Record<string, string | string[]>): URL {
-    const { baseUrl } = getServerConfig();
-    const url = new URL(`${baseUrl}/statistics/1.0/data/${encodeURIComponent(datasetCode)}`);
+    const url = new URL(
+      `${dataHostFor(datasetCode)}/statistics/1.0/data/${encodeURIComponent(datasetCode)}`,
+    );
     url.searchParams.set('format', 'JSON');
     for (const [key, value] of Object.entries(params)) {
       if (Array.isArray(value)) {
@@ -169,10 +246,21 @@ export class EurostatDataService {
     return url;
   }
 
-  private buildSdmxUrl(resource: 'contentconstraint' | 'dataflow', datasetCode: string): URL {
-    const { baseUrl } = getServerConfig();
+  /**
+   * One dataset-scoped SDMX 2.1 structure URL — every structure read goes through
+   * here, on the host {@link dataHostFor} picks for the code.
+   *
+   * The structure definition is requested unversioned, which Eurostat answers with
+   * the current one. Its version moves with the dataset (`earn_ses_annual`'s is
+   * 22.0), and a pinned `/1.0` returns the dataset's first structure instead.
+   */
+  private buildSdmxUrl(
+    resource: 'contentconstraint' | 'dataflow' | 'datastructure',
+    datasetCode: string,
+  ): URL {
+    const version = resource === 'datastructure' ? '' : '/1.0';
     const url = new URL(
-      `${baseUrl}/sdmx/2.1/${resource}/ESTAT/${encodeURIComponent(datasetCode)}/1.0`,
+      `${dataHostFor(datasetCode)}/sdmx/2.1/${resource}/ESTAT/${encodeURIComponent(datasetCode)}${version}`,
     );
     if (resource === 'dataflow') {
       url.searchParams.set('references', 'descendants');
@@ -181,13 +269,22 @@ export class EurostatDataService {
     return url;
   }
 
-  private fetchSdmxXml(url: URL, datasetCode: string, ctx: Context): Promise<string> {
-    const { requestTimeoutMs } = getServerConfig();
+  /**
+   * `signal` cancels the request. It is the caller's own for a read one caller owns,
+   * and undefined for the shared metadata load, which no single caller may cancel.
+   */
+  private fetchSdmxXml(
+    url: URL,
+    datasetCode: string,
+    ctx: Context,
+    signal: AbortSignal | undefined,
+    timeoutMs = getServerConfig().requestTimeoutMs,
+  ): Promise<string> {
     return withRetry(
       async () => {
         try {
-          const response = await fetchWithTimeout(url.toString(), requestTimeoutMs, ctx, {
-            signal: ctx.signal,
+          const response = await fetchWithTimeout(url.toString(), timeoutMs, ctx, {
+            ...(signal && { signal }),
             expectedStatuses: [404],
           });
           return await response.text();
@@ -202,23 +299,104 @@ export class EurostatDataService {
           throw error;
         }
       },
-      { operation: 'fetchSdmxMetadata', context: ctx, baseDelayMs: 1000, signal: ctx.signal },
+      {
+        operation: 'fetchSdmxMetadata',
+        context: ctx,
+        baseDelayMs: 1000,
+        ...(signal && { signal }),
+      },
     );
   }
 
-  private async getSdmxMetadata(datasetCode: string, ctx: Context): Promise<SdmxDatasetMetadata> {
-    const [dataflowXml, constraintXml] = await Promise.all([
-      this.fetchSdmxXml(this.buildSdmxUrl('dataflow', datasetCode), datasetCode, ctx),
-      this.fetchSdmxXml(this.buildSdmxUrl('contentconstraint', datasetCode), datasetCode, ctx),
-    ]);
-    try {
-      return parseSdmxDatasetMetadata(dataflowXml, constraintXml, datasetCode);
-    } catch (error) {
-      throw serviceUnavailable(
-        `Eurostat returned malformed SDMX metadata for dataset "${datasetCode}": ${error instanceof Error ? error.message : String(error)}`,
-        { reason: 'upstream_fault', datasetCode, retryable: false },
+  /**
+   * The dataset's parsed metadata, from {@link metadataCache} when a live entry holds it.
+   *
+   * The load is shared by every caller of the dataset, so it runs without a caller's
+   * signal and is bounded by its timeouts alone: a caller that cancels stops waiting
+   * without failing the others or the entry.
+   */
+  private getSdmxMetadata(datasetCode: string, ctx: Context): Promise<SdmxDatasetMetadata> {
+    return awaitShared(ctx.signal, () => {
+      const key = `${dataHostFor(datasetCode)} ${datasetCode.toLowerCase()}`;
+      const now = Date.now();
+      const hit = this.metadataCache.get(key);
+      this.metadataCache.delete(key);
+      if (hit && hit.expiresAt > now) {
+        this.metadataCache.set(key, hit);
+        return hit.metadata;
+      }
+
+      const entry: MetadataCacheEntry = {
+        expiresAt: now + METADATA_CACHE_TTL_MS,
+        metadata: this.loadSdmxMetadata(datasetCode, ctx).then(deepFreeze),
+      };
+      this.metadataCache.set(key, entry);
+      entry.metadata.then(
+        (metadata) => {
+          entry.bytes = estimateMetadataBytes(metadata);
+          if (entry.bytes > METADATA_CACHE_MAX_BYTES) {
+            if (this.metadataCache.get(key) === entry) this.metadataCache.delete(key);
+          } else {
+            this.evictToBudget();
+          }
+        },
+        () => {
+          if (this.metadataCache.get(key) === entry) this.metadataCache.delete(key);
+        },
       );
+      return entry.metadata;
+    });
+  }
+
+  /**
+   * Drop settled entries, least recently used first, until the estimated total fits
+   * {@link METADATA_CACHE_MAX_BYTES}. A load still in flight has no size yet and is
+   * kept, so concurrent callers of it still share one download.
+   */
+  private evictToBudget(): void {
+    let total = 0;
+    for (const { bytes } of this.metadataCache.values()) total += bytes ?? 0;
+    for (const [key, { bytes }] of this.metadataCache) {
+      if (total <= METADATA_CACHE_MAX_BYTES) break;
+      if (bytes === undefined) continue;
+      this.metadataCache.delete(key);
+      total -= bytes;
     }
+  }
+
+  /**
+   * Download and parse one dataset's dataflow structure and content constraint.
+   *
+   * The dataflow carries a label for every code the dataset uses, so it is the one
+   * structure read that scales with the dataset — 23 MB, uncompressed, for the CN8
+   * collection — and it alone gets `EUROSTAT_METADATA_TIMEOUT_MS`.
+   */
+  private async loadSdmxMetadata(datasetCode: string, ctx: Context): Promise<SdmxDatasetMetadata> {
+    const { metadataTimeoutMs } = getServerConfig();
+    const [dataflowXml, constraintXml] = await Promise.all([
+      this.fetchSdmxXml(
+        this.buildSdmxUrl('dataflow', datasetCode),
+        datasetCode,
+        ctx,
+        undefined,
+        metadataTimeoutMs,
+      ),
+      this.fetchSdmxXml(
+        this.buildSdmxUrl('contentconstraint', datasetCode),
+        datasetCode,
+        ctx,
+        undefined,
+      ),
+    ]);
+    /**
+     * The parse's strings are slices of the response bodies, and a slice keeps its
+     * whole source string alive: kept as parsed, a `DS-045409` entry pins the 23 MB
+     * dataflow body and retains 52 MB instead of 13.5 MB. Cloning copies every string
+     * out, so the bodies are freed once the load ends.
+     */
+    return parseSdmx(datasetCode, () =>
+      structuredClone(parseSdmxDatasetMetadata(dataflowXml, constraintXml, datasetCode)),
+    );
   }
 
   private fetchJson(url: URL, ctx: Context): Promise<JsonStatResponse> {
@@ -229,10 +407,11 @@ export class EurostatDataService {
         try {
           response = await fetchWithTimeout(url.toString(), requestTimeoutMs, ctx, {
             signal: ctx.signal,
-            // 400 (invalid dimension / conflicting params) and 404 (unknown dataset) are
-            // modeled outcomes reclassified below into the declared error contract, not
-            // service failures — log them at debug. The thrown McpError is unchanged.
-            expectedStatuses: [400, 404],
+            // 400 (invalid dimension / conflicting params), 404 (unknown dataset) and 413
+            // (extraction too large) are modeled outcomes reclassified below into the
+            // declared error contract, not service failures — log them at debug. The
+            // thrown McpError is unchanged.
+            expectedStatuses: [400, 404, 413],
           });
         } catch (err) {
           // fetchWithTimeout throws an McpError for ANY non-2xx response BEFORE the JSON
@@ -282,14 +461,24 @@ export class EurostatDataService {
   private checkResponseErrors(data: JsonStatResponse, url: string): void {
     const firstError = Array.isArray(data.error) ? data.error[0] : undefined;
 
-    // Async response: query too large. Eurostat emits both a warning object on HTTP 200 and
-    // an error-array item on HTTP 413; classify both before withRetry sees the error.
-    if (data.warning?.status === 413 || firstError?.status === 413) {
-      // Non-retryable: the same query re-run immediately just re-triggers the async response.
-      // Fail fast so callers narrow the query instead of hammering the endpoint (matches the
-      // async_response contract's retryable: false).
+    /**
+     * Query too large to serve. Eurostat answers with a warning object on HTTP 200
+     * (the asynchronous response) or an error-array item on HTTP 413 — its label
+     * `EXTRACTION_TOO_BIG` with the estimated row count, or `ASYNCHRONOUS_RESPONSE`.
+     * Both are classified before withRetry sees them and are non-retryable: the same
+     * query re-run just re-triggers the refusal, so the caller has to narrow it. The
+     * dimensions to narrow by are the dataset's own, which the tool names; this
+     * message cannot, since a refusal carries no dimension list.
+     */
+    if (data.warning?.status === 413) {
       throw serviceUnavailable(
-        'Eurostat returned an asynchronous response — the query matched too many observations. Add dimension filters (geo, unit, na_item, etc.) to reduce the result size and retry.',
+        'Eurostat returned an asynchronous response — the query matched too many observations. Add dimension filters or a narrower period range to reduce the result size, then retry.',
+        { reason: 'async_response', url, retryable: false },
+      );
+    }
+    if (firstError?.status === 413) {
+      throw serviceUnavailable(
+        `Eurostat refused the query as too large to serve (${firstError.label}). Add dimension filters or a narrower period range to reduce the result size, then retry.`,
         { reason: 'async_response', url, retryable: false },
       );
     }
@@ -388,7 +577,8 @@ export class EurostatDataService {
       if (timeSize > 0) timeSeen[Math.floor(idx / timeStride) % timeSize] = 1;
     };
 
-    for (const key in value) count(key, value[key] == null);
+    // A text value (PRODCOM's `:C`, `KG`) carries no number, so it counts as missing.
+    for (const key in value) count(key, typeof value[key] !== 'number');
     // A cell flagged in `status` but absent from `value` decodes to a null value.
     for (const key in status) {
       if (!(key in value)) count(key, true);
@@ -467,11 +657,24 @@ export class EurostatDataService {
       const rawValue = value[keyStr] ?? null;
       const statusCode = status[keyStr];
 
-      const obs: Observation = { dimensions, value: rawValue };
+      const obs: Observation = {
+        dimensions,
+        value: typeof rawValue === 'number' ? rawValue : null,
+      };
       if (statusCode) {
         const { flag, confStatus } = splitStatus(statusCode, statusLabels);
         if (flag) obs.status = flag;
         if (confStatus) obs.confStatus = confStatus;
+      }
+      if (typeof rawValue === 'string') {
+        const { confStatus, text } = decodeTextValue(rawValue);
+        if (confStatus && !obs.confStatus) {
+          obs.confStatus = {
+            code: confStatus,
+            label: CONF_STATUS_LABELS[confStatus] ?? confStatus,
+          };
+        }
+        if (text) obs.valueText = text;
       }
       yield obs;
     }
@@ -501,24 +704,37 @@ export class EurostatDataService {
     return data.extension?.annotation?.find((a) => a.type === type)?.[field];
   }
 
-  /** Fetch complete dataset metadata from its scoped SDMX structure and content constraint. */
+  /**
+   * Fetch complete dataset metadata from its scoped SDMX structure and content constraint.
+   *
+   * Returns a copy of the cached entry carrying `code` as this caller spelled it: the
+   * cache is shared across spellings, and a caller that edits the result edits its own.
+   */
   async getDatasetInfo(datasetCode: string, ctx: Context): Promise<DatasetMeta> {
     ctx.log.info('Fetching dataset info', { datasetCode });
-    return (await this.getSdmxMetadata(datasetCode, ctx)).meta;
+    const { meta } = await this.getSdmxMetadata(datasetCode, ctx);
+    return { ...structuredClone(meta), code: datasetCode };
   }
 
   /**
    * The dataset's dimensions in key order, `time` excluded.
    *
-   * This is the order the SDMX positional key is built from, and it is read from
-   * the JSON-stat `id` array of a one-period slice — the cheapest response that
-   * carries the full dimension list. Verified against live SDMX TSV headers on
-   * 4-, 6- and 7-dimension datasets: the TSV header's comma-joined key field is
-   * exactly this array.
+   * This is the order the SDMX positional key is built from, read from the
+   * dataset's structure definition. That response is a few KB however large the
+   * dataset is, where an observation request — even a one-period slice — is
+   * refused with HTTP 413 once the latest period alone exceeds Eurostat's
+   * extraction limit (`earn_ses_annual`). Verified against live SDMX TSV headers
+   * and JSON-stat `id` arrays: the header's comma-joined key field is exactly this
+   * order.
    */
   async getDimensionOrder(datasetCode: string, ctx: Context): Promise<string[]> {
-    const data = await this.fetchJson(this.buildUrl(datasetCode, { lastTimePeriod: '1' }), ctx);
-    const order = (data.id ?? []).filter((dim) => dim !== 'time');
+    const xml = await this.fetchSdmxXml(
+      this.buildSdmxUrl('datastructure', datasetCode),
+      datasetCode,
+      ctx,
+      ctx.signal,
+    );
+    const order = parseSdmx(datasetCode, () => parseSdmxDimensionOrder(xml));
     if (order.length === 0) {
       throw serviceUnavailable(
         `Eurostat reported no dimensions for dataset "${datasetCode}", so a positional filter key cannot be built. Retry without filters to download the whole dataset.`,
@@ -560,10 +776,11 @@ export class EurostatDataService {
       );
     }
 
+    // A fresh array either way: the cached list is frozen and shared across calls.
     const effectiveGeoLevel = dimension === 'geo' ? (geoLevel ?? 'country') : undefined;
     const filteredValues = effectiveGeoLevel
       ? values.filter(({ code }) => metadata.geoLevelsByCode[code] === effectiveGeoLevel)
-      : values;
+      : [...values];
     if (effectiveGeoLevel && filteredValues.length === 0) {
       throw notFound(
         `Dataset "${datasetCode}" has no "geo" values at the "${effectiveGeoLevel}" level. Choose a different geo_level or omit geo_level only when country values are wanted.`,
@@ -699,7 +916,7 @@ export class EurostatDataService {
       missingObsCount,
       appliedFilters,
       ...(unmatchedValues && { unmatchedValues }),
-      rows: () => this.iterateRows(data, dimensionsUsed),
+      rows: () => this.iterateRows(data, dimensionsUsed, isComextDataset(datasetCode)),
     };
   }
 
@@ -707,9 +924,10 @@ export class EurostatDataService {
   private *iterateRows(
     data: JsonStatResponse,
     dimensionsUsed: string[],
+    valueText: boolean,
   ): Generator<ObservationRow> {
     for (const obs of this.iterateObservations(data)) {
-      yield toObservationRow(obs, dimensionsUsed);
+      yield toObservationRow(obs, dimensionsUsed, valueText);
     }
   }
 }
@@ -723,8 +941,15 @@ export class EurostatDataService {
  * `conf_status` / `conf_status_label`. Anything the observation does not carry —
  * a dimension, either flag — yields `null` in its columns rather than an absent
  * key, so every row has the same column set the table is declared with.
+ *
+ * `valueText` adds the `obs_value_text` column, which a `DS-*` table declares (see
+ * {@link observationRowSchema}).
  */
-export function toObservationRow(obs: Observation, dimensionsUsed: string[]): ObservationRow {
+export function toObservationRow(
+  obs: Observation,
+  dimensionsUsed: string[],
+  valueText = false,
+): ObservationRow {
   const row: ObservationRow = {};
   for (const dim of dimensionsUsed) {
     const cell = obs.dimensions[dim];
@@ -732,6 +957,7 @@ export function toObservationRow(obs: Observation, dimensionsUsed: string[]): Ob
     row[`${dim}_label`] = cell?.label ?? null;
   }
   row[OBS_VALUE_COLUMN] = obs.value;
+  if (valueText) row[OBS_VALUE_TEXT_COLUMN] = obs.valueText ?? null;
   row[OBS_FLAG_COLUMN] = obs.status?.code ?? null;
   row[OBS_FLAG_LABEL_COLUMN] = obs.status?.label ?? null;
   row[CONF_STATUS_COLUMN] = obs.confStatus?.code ?? null;
@@ -751,14 +977,20 @@ export function toObservationRow(obs: Observation, dimensionsUsed: string[]): Ob
  * Names and order mirror {@link toObservationRow}. Nothing in the type system
  * ties a row's keys to a schema's names, so the service tests assert the two
  * against each other instead.
+ *
+ * `valueText` declares `obs_value_text` after `obs_value`. The query tool sets it for a
+ * `DS-*` dataset, whose PRODCOM indicators publish units and flags as text.
  */
-export function observationRowSchema(dimensionsUsed: string[]): ColumnSchema[] {
+export function observationRowSchema(dimensionsUsed: string[], valueText = false): ColumnSchema[] {
   return [
     ...dimensionsUsed.flatMap((dim): ColumnSchema[] => [
       { name: dim, type: 'VARCHAR', nullable: true },
       { name: `${dim}_label`, type: 'VARCHAR', nullable: true },
     ]),
     { name: OBS_VALUE_COLUMN, type: 'DOUBLE', nullable: true },
+    ...(valueText
+      ? [{ name: OBS_VALUE_TEXT_COLUMN, type: 'VARCHAR', nullable: true } satisfies ColumnSchema]
+      : []),
     { name: OBS_FLAG_COLUMN, type: 'VARCHAR', nullable: true },
     { name: OBS_FLAG_LABEL_COLUMN, type: 'VARCHAR', nullable: true },
     { name: CONF_STATUS_COLUMN, type: 'VARCHAR', nullable: true },

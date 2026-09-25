@@ -172,8 +172,20 @@ describe('parseCell', () => {
     expect(parseCell('100')).toEqual({ value: 100, flag: null, conf: null });
   });
 
-  it('reports an unparseable value as missing rather than NaN', () => {
-    expect(parseCell('n/a ')).toEqual({ value: null, flag: null, conf: null });
+  it('keeps a non-numeric value as text with a null value, never NaN (#46)', () => {
+    expect(parseCell('n/a ')).toEqual({ value: null, flag: null, conf: null, text: 'n/a' });
+  });
+
+  it('reads a PRODCOM ":C" with no space as a confidential null, not text (#46)', () => {
+    expect(parseCell(':C')).toEqual({ value: null, flag: null, conf: 'C' });
+  });
+
+  it('keeps a PRODCOM unit such as "KG" verbatim as text (#46)', () => {
+    expect(parseCell('KG')).toEqual({ value: null, flag: null, conf: null, text: 'KG' });
+  });
+
+  it('prefers a conf status behind the @ over one decoded from the value', () => {
+    expect(parseCell(':N @C')).toEqual({ value: null, flag: null, conf: 'C' });
   });
 
   it('reads an empty value carrying a flag as missing, not as zero', () => {

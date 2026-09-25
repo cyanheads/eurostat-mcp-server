@@ -21,6 +21,11 @@ import {
   withRetry,
 } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
+import {
+  parseSdmxDataflowList,
+  type SdmxDataflowSummary,
+} from '@/services/eurostat-data/sdmx-metadata.js';
+import { awaitShared } from '@/services/shared-load.js';
 import type { BrowseItem, DatasetResult, TocEntry } from './types.js';
 
 /** Upper bound on datasets returned per search page, mirroring the tool's `limit` cap. */
@@ -29,14 +34,49 @@ const MAX_PAGE_SIZE = 100;
 /**
  * How long a failed refresh keeps the stale cache in service before upstream is
  * tried again. `withRetry` bounds one attempt; this bounds the attempt rate, so
- * an upstream outage costs one fetch per minute rather than one per call.
+ * an upstream outage costs one fetch per minute rather than one per call. A failed
+ * Comext merge is retried on the same schedule.
  */
 const REFRESH_RETRY_COOLDOWN_MS = 60_000;
+
+/**
+ * Where each Comext collection is filed in the TOC tree, keyed by the stem of its
+ * dataflows' `ESMS_HTML` metadata page (`ext_go_detail_sims.htm`, `prom_esms.htm`) —
+ * the collection's own code, absent from the TOC. The labels carry "Comext" and
+ * "PRODCOM" because two PRODCOM titles contain neither word, and search reads the
+ * breadcrumb.
+ */
+const COMEXT_FOLDERS: Readonly<Record<string, { label: string; parent: string }>> = {
+  ext_go_detail: {
+    label: 'International trade in goods - detailed data (Comext)',
+    parent: 'ext_go',
+  },
+  prom: {
+    label: 'Statistics on the production of manufactured goods (PRODCOM)',
+    parent: 'icts',
+  },
+};
+
+/** Folder for a Comext dataflow whose metadata page names no collection in {@link COMEXT_FOLDERS}. */
+const COMEXT_OTHER_FOLDER = {
+  code: 'comext',
+  label: 'Comext dissemination database - other collections',
+};
+
+/** A dataset code on the Comext host's scheme, as a lowercased search token. */
+const DS_CODE_TOKEN = /^ds-\d+$/;
 
 /** Parsed TOC held in memory until its TTL expires and the next call refreshes it. */
 interface TocCache {
   /** Map from code → entry index for O(1) lookup. */
   codeIndex: Map<string, number>;
+  /**
+   * Set when the Comext dataflow list could not be merged: the epoch ms after which
+   * the next catalogue call retries the merge. `entries` then holds the TOC alone, so
+   * the retry merges onto them without re-fetching the TOC.
+   */
+  comextRetryAt?: number;
+  /** The TOC plus the merged Comext dataflows. */
   entries: TocEntry[];
   loadedAt: Date;
 }
@@ -45,6 +85,8 @@ export class EurostatCatalogueService {
   private cache: TocCache | undefined;
   /** Shared in-flight refresh so concurrent callers past the TTL trigger one fetch. */
   private refresh: Promise<TocCache> | undefined;
+  /** Shared in-flight retry of a failed Comext merge. */
+  private remerge: Promise<TocCache> | undefined;
   /** Epoch ms before which a stale cache is served without re-attempting a failed refresh. */
   private refreshRetryAt = 0;
 
@@ -60,13 +102,29 @@ export class EurostatCatalogueService {
    * next attempt for `REFRESH_RETRY_COOLDOWN_MS`, so an outage does not make
    * every catalogue call pay a full retry-and-backoff cycle. Only a cold-start
    * failure surfaces to the caller, and that path retries on the next call.
+   *
+   * A catalogue whose Comext merge failed is served as-is until its retry time,
+   * then the next call retries the merge alone; that retry never fails the call.
+   *
+   * Both loads are shared, so they run without a caller's signal, bounded by their
+   * timeouts: a caller that cancels stops waiting without failing the others,
+   * caching a failure, or postponing the merge.
    */
-  private async ensureLoaded(ctx: Context): Promise<TocCache> {
+  private ensureLoaded(ctx: Context): Promise<TocCache> {
+    return awaitShared(ctx.signal, () => this.loadShared(ctx));
+  }
+
+  private async loadShared(ctx: Context): Promise<TocCache> {
     const cached = this.cache;
     const now = Date.now();
-    if (cached) {
-      if (now - cached.loadedAt.getTime() < getServerConfig().tocCacheTtlMs) return cached;
-      if (now < this.refreshRetryAt) return cached;
+    if (
+      cached &&
+      (now - cached.loadedAt.getTime() < getServerConfig().tocCacheTtlMs ||
+        now < this.refreshRetryAt)
+    ) {
+      return cached.comextRetryAt !== undefined && now >= cached.comextRetryAt
+        ? this.retryComextMerge(cached, ctx)
+        : cached;
     }
 
     this.refresh ??= this.fetchAndParseToc(ctx)
@@ -97,16 +155,148 @@ export class EurostatCatalogueService {
     }
   }
 
+  /**
+   * Fetch the TOC and the Comext dataflow list together, and merge them.
+   *
+   * Only the TOC is required. A Comext list that fails to load leaves the catalogue
+   * answering from the TOC alone: the failure is logged, and the merge is retried
+   * after `REFRESH_RETRY_COOLDOWN_MS` without re-fetching the TOC.
+   */
   private async fetchAndParseToc(ctx: Context): Promise<TocCache> {
+    const comext = this.fetchComextFlows(ctx).then(
+      (flows) => ({ flows }),
+      (error: unknown) => ({ error }),
+    );
+    const tocEntries = await this.fetchTocEntries(ctx);
+    const loaded = await comext;
+    if ('flows' in loaded) return this.buildCache(tocEntries, loaded.flows, new Date());
+    this.logComextFailure(loaded.error, ctx);
+    return this.buildCache(tocEntries, undefined, new Date());
+  }
+
+  /** Retry a failed Comext merge onto the TOC already held; concurrent callers share it. */
+  private retryComextMerge(cached: TocCache, ctx: Context): Promise<TocCache> {
+    this.remerge ??= this.fetchComextFlows(ctx)
+      .then(
+        (flows) => {
+          const merged = this.buildCache(cached.entries, flows, cached.loadedAt);
+          if (this.cache === cached) this.cache = merged;
+          return merged;
+        },
+        (error: unknown) => {
+          this.logComextFailure(error, ctx);
+          cached.comextRetryAt = Date.now() + REFRESH_RETRY_COOLDOWN_MS;
+          return cached;
+        },
+      )
+      .finally(() => {
+        this.remerge = undefined;
+      });
+    return this.remerge;
+  }
+
+  private logComextFailure(error: unknown, ctx: Context): void {
+    ctx.log.warning(
+      'Comext dataflow list unavailable — search and browse answer from the TOC alone',
+      {
+        error: error instanceof Error ? error.message : String(error),
+        retryAfterMs: REFRESH_RETRY_COOLDOWN_MS,
+      },
+    );
+  }
+
+  /**
+   * Assemble a catalogue snapshot. `flows` undefined means the Comext list failed to
+   * load, which arms the merge retry. `loadedAt` is the TOC's load time — the TTL and
+   * the cursor generation both key on it. A later merge only appends entries, so a
+   * cursor paged over the TOC alone still addresses the same leading matches.
+   */
+  private buildCache(
+    tocEntries: TocEntry[],
+    flows: SdmxDataflowSummary[] | undefined,
+    loadedAt: Date,
+  ): TocCache {
+    const entries = flows ? this.mergeComextFlows(tocEntries, flows) : tocEntries;
+    return {
+      entries,
+      codeIndex: this.buildCodeIndex(entries),
+      loadedAt,
+      ...(!flows && { comextRetryAt: Date.now() + REFRESH_RETRY_COOLDOWN_MS }),
+    };
+  }
+
+  /** The Comext host's dataflow list — the `DS-*` collections the TOC does not carry. */
+  private async fetchComextFlows(ctx: Context): Promise<SdmxDataflowSummary[]> {
+    const { comextBaseUrl, requestTimeoutMs } = getServerConfig();
+    const url = `${comextBaseUrl}/sdmx/2.1/dataflow/ESTAT`;
+    const response = await fetchWithTimeout(url, requestTimeoutMs, ctx);
+    const flows = parseSdmxDataflowList(await response.text());
+    // An empty list is a broken answer, not an empty host: merging it would report every
+    // DS-* code as undisseminated, so it is retried like any other failure.
+    if (flows.length === 0)
+      throw new Error(`The Comext dataflow list at ${url} listed no dataflows`);
+    ctx.log.info('Comext dataflow list loaded', { url, dataflowCount: flows.length });
+    return flows;
+  }
+
+  /**
+   * Append the Comext dataflows to the TOC as datasets, each under the folder its
+   * collection maps to in {@link COMEXT_FOLDERS}. A folder is created only when a
+   * dataflow lands in it, and is parented to its TOC folder — or to the first root
+   * when the TOC no longer carries that folder. Merged entries carry `lastUpdated`
+   * in the TOC's `dd.mm.yyyy` form and no period coverage or observation count,
+   * which the Comext list does not publish.
+   */
+  private mergeComextFlows(tocEntries: TocEntry[], flows: SdmxDataflowSummary[]): TocEntry[] {
+    const entries = [...tocEntries];
+    const firstRoot = entries.findIndex((e) => e.depth === 0 && e.type === 'folder');
+    const folderIndex = new Map<string, number>();
+
+    const folderFor = (flow: SdmxDataflowSummary): number => {
+      const stem = /([a-z0-9_]+?)(?:_sims|_esms)?\.htm$/i.exec(flow.esmsUrl ?? '')?.[1] ?? '';
+      const known = COMEXT_FOLDERS[stem];
+      const code = known ? stem : COMEXT_OTHER_FOLDER.code;
+      const existing = folderIndex.get(code);
+      if (existing !== undefined) return existing;
+
+      const tocParent = known
+        ? entries.findIndex((e) => e.code === known.parent && e.type === 'folder')
+        : -1;
+      const parent = tocParent >= 0 ? tocParent : firstRoot;
+      entries.push({
+        code,
+        label: known?.label ?? COMEXT_OTHER_FOLDER.label,
+        type: 'folder',
+        depth: (entries[parent]?.depth ?? -1) + 1,
+        parentIndex: parent,
+      });
+      folderIndex.set(code, entries.length - 1);
+      return entries.length - 1;
+    };
+
+    for (const flow of flows) {
+      const parentIndex = folderFor(flow);
+      const lastUpdated = flow.lastUpdated && toTocDate(flow.lastUpdated);
+      entries.push({
+        code: flow.id,
+        label: flow.label,
+        type: 'dataset',
+        depth: (entries[parentIndex]?.depth ?? 0) + 1,
+        parentIndex,
+        ...(lastUpdated && { lastUpdated }),
+      });
+    }
+    return entries;
+  }
+
+  private async fetchTocEntries(ctx: Context): Promise<TocEntry[]> {
     const { baseUrl, requestTimeoutMs } = getServerConfig();
     const url = `${baseUrl}/catalogue/toc/txt?lang=en`;
     ctx.log.info('Fetching Eurostat TOC', { url });
 
     const text = await withRetry(
       async () => {
-        const response = await fetchWithTimeout(url, requestTimeoutMs, ctx, {
-          signal: ctx.signal,
-        });
+        const response = await fetchWithTimeout(url, requestTimeoutMs, ctx);
         const body = await response.text();
         if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(body)) {
           throw serviceUnavailable(
@@ -115,13 +305,12 @@ export class EurostatCatalogueService {
         }
         return body;
       },
-      { operation: 'fetchToc', context: ctx, baseDelayMs: 1000, signal: ctx.signal },
+      { operation: 'fetchToc', context: ctx, baseDelayMs: 1000 },
     );
 
     const entries = this.parseToc(text);
-    const codeIndex = this.buildCodeIndex(entries);
     ctx.log.info('TOC loaded', { entryCount: entries.length });
-    return { entries, codeIndex, loadedAt: new Date() };
+    return entries;
   }
 
   /**
@@ -401,13 +590,24 @@ export class EurostatCatalogueService {
    * it. An unusable cursor — malformed, from another query, or from a catalogue
    * since refreshed — is rejected as `invalid_cursor` instead of silently paging
    * a different result set.
+   *
+   * An empty match reports the `DS-*` codes the query names that neither source lists
+   * (`undisseminatedCodes`), so the caller can be told the collection is not
+   * disseminated rather than to broaden the search. `comextListMissing` flags that the
+   * Comext list is not merged right now, when absence from it proves nothing.
    */
   async search(
     query: string,
     limit: number,
     cursor: string | undefined,
     ctx: Context,
-  ): Promise<{ datasets: DatasetResult[]; totalMatches: number; nextCursor?: string }> {
+  ): Promise<{
+    comextListMissing?: boolean;
+    datasets: DatasetResult[];
+    nextCursor?: string;
+    totalMatches: number;
+    undisseminatedCodes?: string[];
+  }> {
     const toc = await this.ensureLoaded(ctx);
     const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
     if (tokens.length === 0) return { datasets: [], totalMatches: 0 };
@@ -447,10 +647,20 @@ export class EurostatCatalogueService {
         themePath,
       }));
 
+    const undisseminatedCodes =
+      matched.length === 0
+        ? tokens
+            .filter((t) => DS_CODE_TOKEN.test(t) && !toc.codeIndex.has(t.toUpperCase()))
+            .map((t) => t.toUpperCase())
+        : [];
     const nextOffset = offset + pageSize;
     return {
       datasets,
       totalMatches: matched.length,
+      ...(undisseminatedCodes.length > 0 && {
+        undisseminatedCodes,
+        ...(toc.comextRetryAt !== undefined && { comextListMissing: true }),
+      }),
       ...(nextOffset < matched.length && {
         nextCursor: encodeCursor({
           offset: nextOffset,
@@ -461,6 +671,16 @@ export class EurostatCatalogueService {
       }),
     };
   }
+}
+
+/**
+ * An SDMX timestamp (`2026-09-15T11:00:00+0200`) in the TOC's `dd.mm.yyyy` form, the
+ * date read as published rather than shifted across time zones. Anything else is
+ * returned unchanged rather than dropped.
+ */
+function toTocDate(timestamp: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(timestamp);
+  return match ? `${match[3]}.${match[2]}.${match[1]}` : timestamp;
 }
 
 // --- Init/accessor pattern ---

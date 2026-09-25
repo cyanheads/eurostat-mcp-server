@@ -1,0 +1,202 @@
+{
+  "version": "2.0",
+  "class": "dataset",
+  "label": "Sold production, exports and imports",
+  "source": "ESTAT",
+  "updated": "2026-09-16T11:00:00+0200",
+  "value": {
+    "15": ":C",
+    "12": ":C",
+    "7": ":C",
+    "1": ":C",
+    "6": "KG",
+    "32": 23097098,
+    "26": 32868973,
+    "33": 571292354,
+    "27": 549704707,
+    "38": ":C",
+    "35": ":C",
+    "30": ":C",
+    "24": ":C",
+    "29": "KG",
+    "44": ":C",
+    "41": ":C",
+    "55": 90793321,
+    "49": 104439971,
+    "56": 43305271,
+    "50": 105495430,
+    "61": ":C",
+    "58": ":C",
+    "53": ":C",
+    "46": 124243000,
+    "52": "KG",
+    "67": ":C",
+    "64": ":C",
+    "78": 85844622,
+    "72": 283077411,
+    "79": 200510213,
+    "73": 374563894,
+    "80": 215760000,
+    "84": ":C",
+    "76": ":C",
+    "69": 215760000,
+    "75": "KG",
+    "101": 64034987,
+    "95": 375519304,
+    "102": 101066014,
+    "96": 528795447,
+    "107": ":C",
+    "104": ":C",
+    "97": 21829000,
+    "92": 144276000,
+    "98": "KG",
+    "113": ":C",
+    "110": ":C",
+    "124": 179484220,
+    "118": 305339719,
+    "125": 75306682,
+    "119": 158423159,
+    "130": ":C",
+    "127": ":C",
+    "122": ":C",
+    "116": ":C",
+    "121": "KG",
+    "136": ":C",
+    "133": ":C"
+  },
+  "id": ["freq", "reporter", "product", "indicators", "time"],
+  "size": [1, 1, 6, 23, 1],
+  "dimension": {
+    "freq": {
+      "label": "Frequency",
+      "category": { "index": { "A": 0 }, "label": { "A": "Annual" } }
+    },
+    "reporter": {
+      "label": "REPORTER",
+      "category": {
+        "index": { "DE": 0 },
+        "label": { "DE": "Germany (incl. German Democratic Republic 'DD' from 1991)" }
+      }
+    },
+    "product": {
+      "label": "PRODUCT",
+      "category": {
+        "index": {
+          "20143420": 0,
+          "20143430": 1,
+          "20143440": 2,
+          "20143473": 3,
+          "20143475": 4,
+          "201434Z1": 5
+        },
+        "label": {
+          "20143420": "Other esters of orthophthalic acid",
+          "20143430": "Phthalic anhydride; terephthalic acid and its salts",
+          "20143440": "Aromatic polycarboxylic acids, their anhydrides, halides, peroxides, peroxyacids and their halogenated, sulphonated, nitrated or nitrosated derivatives (excluding esters of orthophthalic acid, phthalic anhydride, terephthalic acid and its salts)",
+          "20143473": "Citric acid and its salts and esters",
+          "20143475": "Carboxylic acid with alcohol, phenol, aldehyde or ketone functions",
+          "201434Z1": "Esters of orthophthalic acid"
+        }
+      }
+    },
+    "indicators": {
+      "label": "INDICATORS",
+      "category": {
+        "index": {
+          "PRODVAL": 0,
+          "PVALFLAG": 1,
+          "PVALBASE": 2,
+          "EXPVAL": 3,
+          "IMPVAL": 4,
+          "PRODQNT": 5,
+          "QNTUNIT": 6,
+          "PQNTFLAG": 7,
+          "PQNTBASE": 8,
+          "EXPQNT": 9,
+          "IMPQNT": 10,
+          "OWNPRODVAL": 11,
+          "OWNVALFLAG": 12,
+          "OWNVALBASE": 13,
+          "OWNPRODQNT": 14,
+          "OWNQNTFLAG": 15,
+          "OWNQNTBASE": 16,
+          "SCPRODVAL": 17,
+          "SCVALFLAG": 18,
+          "SCVALBASE": 19,
+          "SCPRODQNT": 20,
+          "SCQNTFLAG": 21,
+          "SCQNTBASE": 22
+        },
+        "label": {
+          "PRODVAL": "Sold production value, euro",
+          "PVALFLAG": "Sold production value flag",
+          "PVALBASE": "Sold production value rounding base",
+          "EXPVAL": "Exports value, euro",
+          "IMPVAL": "Imports value, euro",
+          "PRODQNT": "Sold production quantity",
+          "QNTUNIT": "Quantity unit",
+          "PQNTFLAG": "Sold production quantity flag",
+          "PQNTBASE": "Sold production quantity rounding base",
+          "EXPQNT": "Exports quantity",
+          "IMPQNT": "Imports quantity",
+          "OWNPRODVAL": "Production on own account value, euro",
+          "OWNVALFLAG": "Production on own account value flag",
+          "OWNVALBASE": "Production on own account value rounding base",
+          "OWNPRODQNT": "Production on own account quantity",
+          "OWNQNTFLAG": "Production on own account quantity flag",
+          "OWNQNTBASE": "Production on own account quantity rounding base",
+          "SCPRODVAL": "Sub-contracted production value, euro",
+          "SCVALFLAG": "Sub-contracted production quantity flag",
+          "SCVALBASE": "Sub-contracted production value rounding base",
+          "SCPRODQNT": "Sub-contracted production quantity",
+          "SCQNTFLAG": "Sub-contracted production quantity flag",
+          "SCQNTBASE": "Sub-contracted production quantity rounding base"
+        }
+      }
+    },
+    "time": {
+      "label": "TIME_PERIOD",
+      "category": { "index": { "2022": 0 }, "label": { "2022": "2022" } }
+    }
+  },
+  "extension": {
+    "lang": "EN",
+    "id": "DS-059358",
+    "agencyId": "ESTAT",
+    "version": "1.0",
+    "datastructure": { "id": "DS-059358", "agencyId": "ESTAT", "version": "2.6" },
+    "annotation": [
+      {
+        "type": "DISSEMINATION_EXPLANATORY_LINK",
+        "href": "https://ec.europa.eu/eurostat/documents/120432/19597181/Guide+rapide+pour+acceder+aux+donnees+PRODCOM+DS-059358.pdf/1146e401-e64f-cde4-0b3b-61d7e72a4dd1?t=1758811388880"
+      },
+      {
+        "type": "DISSEMINATION_EXPLANATORY_LINK",
+        "href": "https://ec.europa.eu/eurostat/documents/120432/19597181/Schnellanleitung+f%C3%BCr+den+Zugriff+auf+j%C3%A4hrliche+Daten+zur+PRODCOM+-+DS059358.pdf/f70ca808-4d72-36a1-930b-1d16bf6383d3?t=1758811390356"
+      },
+      {
+        "type": "DISSEMINATION_EXPLANATORY_LINK",
+        "href": "https://ec.europa.eu/eurostat/documents/120432/19597181/Quick+guide+on+accessing+PRODCOM+data+DS-059358.pdf/30ad2839-31cd-32b0-c0f2-d43f200be35e?t=1758811389698",
+        "text": "Important notice"
+      },
+      { "type": "DISSEMINATION_OBJECT_TYPE", "title": "DATASET" },
+      { "type": "DISSEMINATION_TIMESTAMP_DATA", "date": "2026-09-16T11:00:00+0200" },
+      { "type": "DISSEMINATION_TIMESTAMP_GLOBAL", "date": "2026-09-16T11:00:00+0200" },
+      { "type": "DISSEMINATION_TIMESTAMP_PLANNED", "date": "2026-09-16T11:00:00+0200" },
+      {
+        "type": "ESMS_HTML",
+        "title": "Explanatory texts (metadata)",
+        "href": "https://ec.europa.eu/eurostat/cache/metadata/en/prom_esms.htm"
+      },
+      { "type": "UPDATE_DATA", "date": "2026-09-16T11:00:00+0200" },
+      { "type": "UPDATE_STRUCTURE", "date": "2026-09-16T11:00:00+0200" }
+    ],
+    "positions-with-no-data": {
+      "freq": [],
+      "reporter": [],
+      "product": [],
+      "indicators": [2, 8, 13, 14, 16, 17, 19, 20, 22],
+      "time": []
+    }
+  }
+}

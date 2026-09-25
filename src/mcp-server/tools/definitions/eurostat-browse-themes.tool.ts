@@ -10,7 +10,7 @@ import { getEurostatCatalogueService } from '@/services/eurostat-catalogue/euros
 export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
   title: 'Browse Eurostat Theme Hierarchy',
   description:
-    'Navigate the Eurostat theme tree. Without theme_code returns the top-level theme folders (Economy, Population, Transport, etc.) — the practical starting points. With a theme_code returns its immediate children: subtheme folders and datasets in that branch. Use this for structured discovery when you know the domain but not the dataset code, or to drill down from a broad topic to a specific dataset. Pair with eurostat_search_datasets for keyword-based discovery.',
+    'Navigate the Eurostat theme tree. Without theme_code returns the top-level theme folders (Economy, Population, Transport, etc.) — the practical starting points. With a theme_code returns its immediate children: subtheme folders and datasets in that branch. Use this for structured discovery when you know the domain but not the dataset code, or to drill down from a broad topic to a specific dataset. Pair with eurostat_search_datasets for keyword-based discovery. The tree is the dissemination table of contents plus the Comext host\'s DS-* collections: detailed trade under ext_go_detail (inside ext_go, "International trade in goods") and PRODCOM under prom (inside icts, "Industry, trade and services"). A collection on neither, such as the legacy PRODCOM DS-056120, is not disseminated and appears nowhere in the tree.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     theme_code: z

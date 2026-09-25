@@ -10,14 +10,14 @@ import { getEurostatDataService } from '@/services/eurostat-data/eurostat-data-s
 export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
   title: 'Get Eurostat Dataset Info',
   description:
-    'Fetch metadata for a Eurostat dataset: dimensions with valid values, time range, observation count, and last-update date. Call this before eurostat_query_dataset or eurostat_download_dataset to discover what dimension codes are valid (unit, na_item, geo, etc.); eurostat_download_dataset builds its positional filter key from this dimension list, so a filter naming a dimension absent here is rejected outright. Returns up to 10 sample values per dimension for orientation; use eurostat_get_dimension_values to list the full set for large dimensions.',
+    'Fetch metadata for a Eurostat dataset: dimensions with valid values, time range, observation count, and last-update date. Call this before eurostat_query_dataset or eurostat_download_dataset to discover what dimension codes are valid (unit, na_item, geo, etc.); eurostat_download_dataset builds its positional filter key from this dimension list, so a filter naming a dimension absent here is rejected outright. Returns up to 10 sample values per dimension for orientation; use eurostat_get_dimension_values to list the full set for large dimensions. A DS-* code (detailed trade and PRODCOM, in any case) is read from the Comext dissemination host, which reports no period coverage or observation count, so timeRange and obsCount come back unreported; the first call on a large Comext collection downloads its full structure (23 MB for DS-045409) and takes longer, and repeat calls within the hour reuse it.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     dataset_code: z
       .string()
       .min(1)
       .describe(
-        'Dataset code (e.g., "nama_10_gdp"). Use eurostat_search_datasets or eurostat_browse_themes to find codes.',
+        'Dataset code (e.g., "nama_10_gdp", or "DS-045409" for a Comext collection). Use eurostat_search_datasets or eurostat_browse_themes to find codes.',
       ),
   }),
   output: z.object({
@@ -102,12 +102,11 @@ export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
         'Use eurostat_search_datasets or eurostat_browse_themes to find a valid dataset code.',
     },
     {
-      reason: 'async_response',
+      reason: 'upstream_fault',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Eurostat returned an async response (query too large for the API).',
-      retryable: false,
+      when: "Eurostat returned a dataset structure or content constraint this server cannot read: malformed, truncated, not XML, or missing the requested dataset's dataflow.",
       recovery:
-        'The same call cannot succeed — this tool has no filters to narrow. Use eurostat_search_datasets or eurostat_browse_themes for catalogue-level coverage, or eurostat_get_dimension_values for one dimension at a time.',
+        'Retry in a few minutes, since a failed structure read is not cached. If it fails the same way, eurostat_query_dataset reads the observations, with dimension codes and labels, from a separate endpoint.',
     },
   ],
 
@@ -125,10 +124,10 @@ export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
           },
         });
       }
-      if (reason === 'async_response') {
-        throw ctx.fail('async_response', (err as Error).message, {
+      if (reason === 'upstream_fault') {
+        throw ctx.fail('upstream_fault', (err as Error).message, {
           recovery: {
-            hint: `Eurostat returned an oversized-response warning for "${input.dataset_code}", and this call exposes no filters to narrow — the same request will fail the same way. Use eurostat_search_datasets or eurostat_browse_themes for catalogue-level coverage (period range, observation count), or eurostat_get_dimension_values to inspect one dimension at a time.`,
+            hint: `Eurostat returned a structure for "${input.dataset_code}" that this server cannot read. A failed read is not cached, so retry in a few minutes. If it fails the same way, eurostat_query_dataset reads the dataset's observations, with their dimension codes and labels, from the Statistics API, which does not depend on this structure; start with last_n_periods: 1 to keep the match small.`,
           },
         });
       }

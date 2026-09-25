@@ -12,11 +12,11 @@ import { acquireCanvas, getCanvas } from '@/services/canvas-accessor.js';
 export const eurostatDataframeQuery = tool('eurostat_dataframe_query', {
   title: 'Query Eurostat Dataframes',
   description:
-    'Run a read-only SQL SELECT against tables staged on a Eurostat dataframe canvas — the way to reach observations past the 5,000-row inline cap of eurostat_query_dataset and past the inline preview of a eurostat_download_dataset bulk download, and to aggregate, group, or join across staged tables without re-fetching from Eurostat. Call eurostat_dataframe_describe first for the table and column names, which differ between the two stagers. Only a single SELECT statement runs: statement chaining, non-SELECT verbs, and functions that read files or external data are rejected. Columns are flat — every dimension is a code column named after the dimension, the measure is obs_value, the observation flag is obs_flag / obs_flag_label and the confidentiality marker is conf_status / conf_status_label; a "_label" companion per dimension exists only on tables eurostat_query_dataset staged. Both stagers write the same five measure columns with the same codes, so join their tables on dimension codes and time and compare obs_flag or conf_status across them directly.',
+    'Run a read-only SQL SELECT against tables staged on a Eurostat dataframe canvas — the way to reach observations past the 5,000-row inline cap of eurostat_query_dataset and past the inline preview of a eurostat_download_dataset bulk download, and to aggregate, group, or join across staged tables without re-fetching from Eurostat. Call eurostat_dataframe_describe first for the table and column names, which differ between the tools that stage them. Only a single SELECT statement runs: statement chaining, non-SELECT verbs, and functions that read files or external data are rejected. Columns are flat — every dimension is a code column named after the dimension, the measure is obs_value, the observation flag is obs_flag / obs_flag_label and the confidentiality marker is conf_status / conf_status_label; a "_label" companion per dimension exists only on tables eurostat_query_dataset staged. Both observation stagers write the same five measure columns with the same codes, so join their tables on dimension codes and time and compare obs_flag or conf_status across them directly; a DS-* table also carries obs_value_text, a value published as text (e.g. a PRODCOM unit "KG"). A value list eurostat_get_dimension_values staged has two columns, code and label: join it to the code column of a download (e.g. JOIN df_x g ON d.geo = g.code) to label that table.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({
     canvas_id: CanvasIdSchema.describe(
-      'Canvas identifier returned as canvasId by eurostat_query_dataset or eurostat_download_dataset. Identifies the workspace holding the staged tables.',
+      'Canvas identifier returned as canvasId by eurostat_query_dataset, eurostat_download_dataset, or eurostat_get_dimension_values. Identifies the workspace holding the staged tables.',
     ),
     sql: z
       .string()
@@ -59,7 +59,7 @@ export const eurostatDataframeQuery = tool('eurostat_dataframe_query', {
       code: JsonRpcErrorCode.NotFound,
       when: 'The canvas_id is unknown or its lifetime has elapsed.',
       recovery:
-        'Re-run the tool that staged it (eurostat_query_dataset or eurostat_download_dataset) and use the canvasId it returns.',
+        'Re-run eurostat_query_dataset or eurostat_download_dataset without canvas_id and use the canvasId it returns; eurostat_get_dimension_values stages onto that canvas but never starts one.',
       thrownBy: 'service',
     },
     {
@@ -67,7 +67,7 @@ export const eurostatDataframeQuery = tool('eurostat_dataframe_query', {
       code: JsonRpcErrorCode.NotFound,
       when: 'The SQL names a table that is not staged on this canvas, or that has expired.',
       recovery:
-        'Call eurostat_dataframe_describe for the staged table names, or re-run the tool that staged them (eurostat_query_dataset or eurostat_download_dataset).',
+        'Call eurostat_dataframe_describe for the staged table names, or re-run the tool that staged them (eurostat_query_dataset, eurostat_download_dataset, or eurostat_get_dimension_values with canvas_id).',
       thrownBy: 'service',
     },
   ],

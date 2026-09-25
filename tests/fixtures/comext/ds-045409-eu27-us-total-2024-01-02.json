@@ -1,0 +1,80 @@
+{
+  "version": "2.0",
+  "class": "dataset",
+  "label": "EU trade since 1988 by HS2-4-6 and CN8",
+  "source": "ESTAT",
+  "updated": "2026-09-15T11:00:00+0200",
+  "value": { "2": 28417786122, "3": 27944902670 },
+  "id": ["freq", "reporter", "partner", "product", "flow", "indicators", "time"],
+  "size": [2, 1, 1, 1, 1, 1, 2],
+  "dimension": {
+    "freq": {
+      "label": "Frequency",
+      "category": { "index": { "A": 0, "M": 1 }, "label": { "A": "Annual", "M": "Monthly" } }
+    },
+    "reporter": {
+      "label": "REPORTER",
+      "category": {
+        "index": { "EU27_2020": 0 },
+        "label": {
+          "EU27_2020": "European Union - 27 countries (AT, BE, BG, CY, CZ, DE, DK, EE, ES, FI, FR, GR, HR, HU, IE, IT, LT, LU, LV, MT, NL, PL, PT, RO, SE, SI, SK)"
+        }
+      }
+    },
+    "partner": {
+      "label": "PARTNER",
+      "category": {
+        "index": { "US": 0 },
+        "label": { "US": "United States (incl. Navassa Island (part of 'UM') from 1995 -> 2000)" }
+      }
+    },
+    "product": {
+      "label": "PRODUCT",
+      "category": { "index": { "TOTAL": 0 }, "label": { "TOTAL": "Total" } }
+    },
+    "flow": { "label": "FLOW", "category": { "index": { "1": 0 }, "label": { "1": "IMPORT" } } },
+    "indicators": {
+      "label": "INDICATORS",
+      "category": {
+        "index": { "VALUE_IN_EUROS": 0 },
+        "label": { "VALUE_IN_EUROS": "VALUE_IN_EUROS" }
+      }
+    },
+    "time": {
+      "label": "TIME_PERIOD",
+      "category": {
+        "index": { "2024-01": 0, "2024-02": 1 },
+        "label": { "2024-01": "2024-01", "2024-02": "2024-02" }
+      }
+    }
+  },
+  "extension": {
+    "lang": "EN",
+    "id": "DS-045409",
+    "agencyId": "ESTAT",
+    "version": "1.0",
+    "datastructure": { "id": "DS-045409", "agencyId": "ESTAT", "version": "6.5" },
+    "annotation": [
+      { "type": "DISSEMINATION_OBJECT_TYPE", "title": "DATASET" },
+      { "type": "DISSEMINATION_TIMESTAMP_DATA", "date": "2026-09-15T11:00:00+0200" },
+      { "type": "DISSEMINATION_TIMESTAMP_GLOBAL", "date": "2026-09-15T11:00:00+0200" },
+      { "type": "DISSEMINATION_TIMESTAMP_PLANNED", "date": "2026-09-15T11:00:00+0200" },
+      {
+        "type": "ESMS_HTML",
+        "title": "Explanatory texts (metadata)",
+        "href": "https://ec.europa.eu/eurostat/cache/metadata/en/ext_go_detail_sims.htm"
+      },
+      { "type": "UPDATE_DATA", "date": "2026-09-15T11:00:00+0200" },
+      { "type": "UPDATE_STRUCTURE", "date": "2026-09-15T11:00:00+0200" }
+    ],
+    "positions-with-no-data": {
+      "freq": [0],
+      "reporter": [],
+      "partner": [],
+      "product": [],
+      "flow": [],
+      "indicators": [],
+      "time": []
+    }
+  }
+}

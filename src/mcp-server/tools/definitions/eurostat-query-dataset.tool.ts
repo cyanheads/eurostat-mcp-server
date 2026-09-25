@@ -6,6 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
+import { dimensionsToNarrow, narrowingAdvice } from '@/mcp-server/tools/narrowing-advice.js';
 import { acquireCanvas, getCanvas, newTableName } from '@/services/canvas-accessor.js';
 import {
   getEurostatDataService,
@@ -17,6 +18,7 @@ import {
   OBS_CAP,
   type UnmatchedValues,
 } from '@/services/eurostat-data/types.js';
+import { isComextDataset } from '@/services/eurostat-hosts.js';
 import { PERIOD_FORMS, resolvePeriods } from '@/services/eurostat-periods.js';
 
 /** Upper bound on the deterministic observation prefix returned inline. */
@@ -35,7 +37,12 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
     'Fetch statistical data from a Eurostat dataset with dimension filters. Returns a deterministic inline prefix of decoded observations with dimension codes and labels, numeric values, an OBS_FLAG status (e.g., "p" = provisional, "e" = estimated) and a separate CONF_STATUS confidentiality marker (e.g., "C" = confidential, which is usually why a value is null). preview_limit controls only that prefix; filters and period controls reduce the matched result itself. Call eurostat_get_dataset_info first to discover valid dimension codes and values. Apply filters to keep the result set manageable — large unfiltered queries may trigger an async response error. Use filters.geo for specific country/region codes, or geo_level for NUTS hierarchy filtering (mutually exclusive). Use last_n_periods for the N most recent periods without knowing the end date. Matches above 5,000 observations are staged whole when this deployment runs a dataframe canvas: call eurostat_dataframe_describe first, then eurostat_dataframe_query. Matches at or below 5,000 are never staged. When the target is a whole dataset rather than a slice, eurostat_download_dataset reads the SDMX bulk endpoint instead and is the cheaper route.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
-    dataset_code: z.string().min(1).describe('Dataset code (e.g., "nama_10_gdp"). Required.'),
+    dataset_code: z
+      .string()
+      .min(1)
+      .describe(
+        'Dataset code (e.g., "nama_10_gdp"). Required. A DS-* code — Comext detailed trade or PRODCOM, in any case — is served by the Comext host: filter freq on its trade flows, which mix annual and monthly series, and note that product, reporter and partner carry aggregates (TOTAL, EU27_2020) that double-count when summed with their members.',
+      ),
     filters: z
       .record(z.string(), z.array(z.string()))
       .default({})
@@ -110,7 +117,13 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
               .number()
               .nullable()
               .describe(
-                'Numeric observation value, or null when Eurostat reports none — either unavailable in the source data or withheld, in which case confStatus says so.',
+                'Numeric observation value, or null when Eurostat reports none — unavailable in the source data, withheld (confStatus says so), or published as text (valueText holds it).',
+              ),
+            valueText: z
+              .string()
+              .optional()
+              .describe(
+                'A value Eurostat published as text rather than a number, verbatim — PRODCOM (DS-*) flag and unit indicators such as QNTUNIT publish a unit like "KG" — with value null. PRODCOM\'s ":C" is decoded to confStatus "C" instead. Omitted for numeric and missing values.',
               ),
             status: z
               .object({
@@ -162,7 +175,7 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       .string()
       .optional()
       .describe(
-        'Canvas table holding every matched observation in flat form — one code column per dimension plus a "_label" companion, then obs_value, obs_flag, obs_flag_label, conf_status, conf_status_label. Call eurostat_dataframe_describe with canvasId first to confirm the table and columns, then eurostat_dataframe_query. Omitted when nothing was staged: either the match was at or below 5,000 observations, or this deployment runs without a dataframe canvas.',
+        'Canvas table holding every matched observation in flat form — one code column per dimension plus a "_label" companion, then obs_value, obs_flag, obs_flag_label, conf_status, conf_status_label. A DS-* table also carries obs_value_text, the valueText of each row. Call eurostat_dataframe_describe with canvasId first to confirm the table and columns, then eurostat_dataframe_query. Omitted when nothing was staged: either the match was at or below 5,000 observations, or this deployment runs without a dataframe canvas.',
       ),
     stagedRowCount: z
       .number()
@@ -268,9 +281,10 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
     {
       reason: 'async_response',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Eurostat returned an async warning or HTTP-413 error array — the query matched too many observations.',
+      when: "Eurostat returned an async warning or an HTTP-413 error array — the query matched too many observations, including an EXTRACTION_TOO_BIG refusal past Eurostat's 5,000,000-row limit.",
       retryable: false,
-      recovery: 'Add dimension filters (geo, unit, na_item) to reduce the result size, then retry.',
+      recovery:
+        'Filter on the dataset dimensions this query left unfiltered, or narrow the period range, then retry.',
     },
     {
       reason: 'invalid_dimension',
@@ -346,9 +360,14 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
         throw ctx.fail('invalid_period', (err as Error).message, ctx.recoveryFor('invalid_period'));
       }
       if (reason === 'async_response') {
+        const dimensions = await dimensionsToNarrow(input.dataset_code, [], ctx);
+        const filtered = [
+          ...Object.keys(input.filters).filter((key) => (input.filters[key] ?? []).length > 0),
+          ...(input.geo_level ? ['geo'] : []),
+        ];
         throw ctx.fail('async_response', (err as Error).message, {
           recovery: {
-            hint: `Query matched too many observations. Add dimension filters (e.g., unit, na_item, geo) to reduce the result size for "${input.dataset_code}".`,
+            hint: `Query matched too many observations for "${input.dataset_code}". ${narrowingAdvice(input.dataset_code, dimensions, filtered)}`,
           },
         });
       }
@@ -395,7 +414,7 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
     if (canvas) {
       const instance = await acquireCanvas(canvas, input.canvas_id, ctx);
       const handle = await instance.registerTable(newTableName(), rows(), {
-        schema: observationRowSchema(result.dimensionsUsed),
+        schema: observationRowSchema(result.dimensionsUsed, isComextDataset(input.dataset_code)),
         signal: ctx.signal,
       });
       staged = {
@@ -433,10 +452,12 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       );
     }
     if (result.obsCount > result.observations.length) {
+      // This dataset's own dimensions: a DS-* flow has no geo, unit, or na_item to name.
+      const filterOn = `dimension filters (${result.dimensionsUsed.filter((dim) => dim !== 'time').join(', ')})`;
       notices.push(
         staged
-          ? `preview_limit=${input.preview_limit.toLocaleString()} returns the first ${result.observations.length.toLocaleString()} of ${result.obsCount.toLocaleString()} matched rows inline; it does not reduce the match. All ${staged.stagedRowCount.toLocaleString()} matched rows are staged as table "${staged.tableName}" on canvas "${staged.canvasId}". Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query. Use dimension filters (geo, unit, na_item) or a period range when the match itself should be smaller.`
-          : `preview_limit=${input.preview_limit.toLocaleString()} returns the first ${result.observations.length.toLocaleString()} of ${result.obsCount.toLocaleString()} matched rows inline; it does not reduce the match. Use dimension filters (geo, unit, na_item) or a period range to reduce the match itself${truncated ? ', or call eurostat_download_dataset when the whole dataset is wanted' : ''}.`,
+          ? `preview_limit=${input.preview_limit.toLocaleString()} returns the first ${result.observations.length.toLocaleString()} of ${result.obsCount.toLocaleString()} matched rows inline; it does not reduce the match. All ${staged.stagedRowCount.toLocaleString()} matched rows are staged as table "${staged.tableName}" on canvas "${staged.canvasId}". Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query. Use ${filterOn} or a period range when the match itself should be smaller.`
+          : `preview_limit=${input.preview_limit.toLocaleString()} returns the first ${result.observations.length.toLocaleString()} of ${result.obsCount.toLocaleString()} matched rows inline; it does not reduce the match. Use ${filterOn} or a period range to reduce the match itself${truncated ? ', or call eurostat_download_dataset when the whole dataset is wanted' : ''}.`,
       );
     }
     if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
@@ -487,11 +508,12 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
         (dim) => `${dim}=${dims[dim]?.code ?? '?'} (${dims[dim]?.label ?? '?'})`,
       );
       const val = obs.value != null ? String(obs.value) : 'N/A';
+      const textPart = obs.valueText ? ` [valueText "${obs.valueText}"]` : '';
       const statusPart = obs.status ? ` [${obs.status.code}: ${obs.status.label}]` : '';
       const confPart = obs.confStatus
         ? ` [CONF_STATUS ${obs.confStatus.code}: ${obs.confStatus.label}]`
         : '';
-      lines.push(`${dimParts.join(' | ')} → ${val}${statusPart}${confPart}`);
+      lines.push(`${dimParts.join(' | ')} → ${val}${textPart}${statusPart}${confPart}`);
     }
 
     return [{ type: 'text', text: lines.join('\n') }];

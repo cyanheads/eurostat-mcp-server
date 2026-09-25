@@ -7,6 +7,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
+import { dimensionsToNarrow, narrowingAdvice } from '@/mcp-server/tools/narrowing-advice.js';
 import { acquireCanvas, getCanvas, newTableName } from '@/services/canvas-accessor.js';
 import {
   bulkRowSchema,
@@ -36,13 +37,24 @@ async function* teePreview(
   }
 }
 
+/** Put back a row already pulled off `rest`, so the canvas receives the stream whole. */
+async function* prepend(first: BulkRow, rest: AsyncGenerator<BulkRow>): AsyncGenerator<BulkRow> {
+  yield first;
+  yield* rest;
+}
+
 export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
   title: 'Download Eurostat Dataset',
   description:
     'Download a Eurostat dataset in bulk through the SDMX 2.1 TSV endpoint and stage every observation as a SQL table on the dataframe canvas — the route to a whole dataset, where eurostat_query_dataset is the route to a slice of one. The TSV wire format is roughly half the bytes of the JSON-stat body eurostat_query_dataset reads, so it reaches datasets that would otherwise time out, and it is expanded here into one row per observation. Filters take the same dimension-code map eurostat_query_dataset uses and are applied server-side by Eurostat; call eurostat_get_dataset_info first for the dimension codes and eurostat_get_dimension_values for their values. Narrow with since_period/until_period rather than asking for the most recent N periods — the TSV layout keeps a column for every period whichever is requested, so a period range is what actually shrinks the response. Transfers are bounded by a byte budget enforced while streaming: when it is spent the download stops and budgetExceeded is set, leaving a prefix of the dataset rather than an error. Only preview_limit rows come back inline. When a table is staged, call eurostat_dataframe_describe first to confirm its columns, then eurostat_dataframe_query; without a canvas, rows past the preview are not retained.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
-    dataset_code: z.string().min(1).describe('Dataset code (e.g., "nama_10_gdp"). Required.'),
+    dataset_code: z
+      .string()
+      .min(1)
+      .describe(
+        'Dataset code (e.g., "nama_10_gdp"). Required. A DS-* code — Comext detailed trade or PRODCOM, in any case — is served by the Comext host, which refuses an unfiltered download of its large collections as extraction_too_big: filter it, including freq on the trade flows, which mix annual and monthly series.',
+      ),
     filters: z
       .record(z.string(), z.array(z.string()))
       .default({})
@@ -71,7 +83,7 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
         'How many observations to echo inline, from the start of the download. Caps at 500. The full download is on the canvas table when one was staged; this is orientation, not the result set.',
       ),
     canvas_id: CanvasIdSchema.optional().describe(
-      'Reuse an existing dataframe canvas so this download lands beside earlier results and can be joined against them. Pass the canvasId a previous eurostat_download_dataset or eurostat_query_dataset response returned; omit to start a fresh canvas. Ignored on deployments without a dataframe canvas.',
+      'Reuse an existing dataframe canvas so this download lands beside earlier results and can be joined against them. Pass the canvasId a previous eurostat_download_dataset or eurostat_query_dataset response returned; omit to start a fresh canvas. Ignored on deployments without a dataframe canvas. A download that carries no observations fails as no_results and leaves the canvas untouched.',
     ),
   }),
   output: z.object({
@@ -125,7 +137,7 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
         z
           .record(z.string(), z.union([z.string(), z.number(), z.null()]))
           .describe(
-            'One observation as a flat row: one column per dimension holding its code, "time" for the period, then obs_value, obs_flag, obs_flag_label, conf_status, conf_status_label. A label column is null when Eurostat publishes no label for that code.',
+            'One observation as a flat row: one column per dimension holding its code, "time" for the period, then obs_value, obs_flag, obs_flag_label, conf_status, conf_status_label. A label column is null when Eurostat publishes no label for that code. Rows of a DS-* dataset also carry obs_value_text after obs_value: a value Eurostat published as text, such as a PRODCOM quantity unit ("KG"), kept verbatim with obs_value null; a PRODCOM ":C" arrives as conf_status "C" instead.',
           ),
       )
       .describe(
@@ -234,9 +246,18 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
     {
       reason: 'no_results',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The download completed but carried no populated observation cells.',
+      when: 'The download completed but carried no populated observation cells. Nothing is staged, and no canvas is created or touched.',
       recovery:
         "Verify the filter values with eurostat_get_dimension_values and keep since_period/until_period inside the series' coverage — a combination that exists in no cell and a range that misses the series both download as an empty table.",
+    },
+    {
+      reason: 'extraction_too_big',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Eurostat refused the extraction as too large (SDMX faultcode 413, HTTP 413): past its 5,000,000-row extraction limit, or an unfiltered DS-* Comext collection, which Eurostat never serves whole. Covers every dataset, on either host.',
+      retryable: false,
+      recovery:
+        'Add dimension filters or a narrower since_period/until_period range to shrink the extraction; the same request fails the same way on every retry.',
+      thrownBy: 'service',
     },
     {
       reason: 'upstream_fault',
@@ -271,6 +292,14 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
     );
 
     /**
+     * The positional key needs every dimension in order, not just the filtered
+     * ones, so a filtered download first reads the dataset's structure
+     * definition, a few KB whatever the dataset's size. An unfiltered download
+     * needs no key and skips it — the TSV header names the dimensions anyway.
+     */
+    let dimensionOrder: string[] = [];
+
+    /**
      * `ctx.fail` is typed against this tool's reason union, so the mapping stays
      * here rather than inside a helper that would have to take a bare string.
      */
@@ -278,81 +307,98 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
       try {
         return await run();
       } catch (err) {
-        const mapped = mapBulkFailure(err, input.dataset_code);
+        const mapped = mapBulkFailure(err, input.dataset_code, {
+          dimensions:
+            (err as McpError).data?.reason === 'extraction_too_big'
+              ? await dimensionsToNarrow(input.dataset_code, dimensionOrder, ctx)
+              : undefined,
+          filtered: Object.keys(filters),
+        });
         if (!mapped) throw err;
         throw ctx.fail(mapped.reason, mapped.message, { recovery: { hint: mapped.hint } });
       }
     };
 
-    /**
-     * The positional key needs every dimension in order, not just the filtered
-     * ones, so a filtered download pays one cheap metadata call first. An
-     * unfiltered download needs no key and skips it — the TSV header names the
-     * dimensions anyway.
-     */
-    const dimensionOrder =
-      Object.keys(filters).length > 0
-        ? await asContract(() =>
-            getEurostatDataService().getDimensionOrder(input.dataset_code, ctx),
-          )
-        : [];
+    if (Object.keys(filters).length > 0) {
+      dimensionOrder = await asContract(() =>
+        getEurostatDataService().getDimensionOrder(input.dataset_code, ctx),
+      );
+    }
 
     const download = await asContract(() =>
       bulk.startDownload(input.dataset_code, dimensionOrder, filters, sinceP, untilP, ctx),
     );
 
     const preview: BulkRow[] = [];
-    const source = teePreview(download.rows(), preview, input.preview_limit);
+    const rows = teePreview(download.rows(), preview, input.preview_limit);
 
-    const canvas = getCanvas();
     let staged: { canvasId: string; stagedRowCount: number; tableName: string } | undefined;
-    if (canvas) {
-      const instance = await acquireCanvas(canvas, input.canvas_id, ctx);
-      const handle = await instance.registerTable(newTableName(), source, {
-        schema: bulkRowSchema(download.header.dimensions),
-        signal: ctx.signal,
-      });
-      staged = {
-        canvasId: instance.canvasId,
-        stagedRowCount: handle.rowCount,
-        tableName: handle.tableName,
-      };
-    } else {
+    /**
+     * Every exit closes the row stream, which cancels the response body. A
+     * canvas that cannot be acquired, or a staging call that fails before it
+     * pulls a row, would otherwise leave the body undrained and its connection
+     * held. Closing a stream that already ended is a no-op.
+     */
+    try {
       /**
-       * Without a canvas the stream still runs to completion. Everything past
-       * the preview is discarded, but the counts, the period coverage and the
-       * budget verdict then describe the download rather than describing the
-       * preview — and the byte budget still bounds what is transferred. Stopping
-       * at preview_limit instead would report a row count of 50 for a dataset of
-       * millions.
+       * Nothing touches a canvas until the stream has yielded a row. An empty
+       * download would otherwise mint a canvas the error never names, or add a
+       * 0-row table to the caller's, before failing — so it fails here instead,
+       * exactly as it does on a deployment without a canvas.
        */
-      for await (const _row of source) {
-        // Drained for its counters; nothing is retained past the preview.
+      const first = await rows.next();
+      if (first.done) {
+        const range = [
+          ...(sinceP ? [`since_period "${sinceP}"`] : []),
+          ...(untilP ? [`until_period "${untilP}"`] : []),
+        ].join(' and ');
+        throw ctx.fail(
+          'no_results',
+          `The download of "${input.dataset_code}" carried no observations.`,
+          {
+            recovery: {
+              hint: `Eurostat returned a table with no populated cells for "${input.dataset_code}". Verify the filter values with eurostat_get_dimension_values — a combination present in no cell downloads as an empty body.${
+                range
+                  ? ` Also check that ${range} overlaps the series: a range outside the series' own coverage downloads as an empty table too.`
+                  : ''
+              }`,
+            },
+          },
+        );
       }
+
+      const canvas = getCanvas();
+      if (canvas) {
+        const instance = await acquireCanvas(canvas, input.canvas_id, ctx);
+        const handle = await instance.registerTable(newTableName(), prepend(first.value, rows), {
+          schema: bulkRowSchema(download.header.dimensions, download.valueText),
+          signal: ctx.signal,
+        });
+        staged = {
+          canvasId: instance.canvasId,
+          stagedRowCount: handle.rowCount,
+          tableName: handle.tableName,
+        };
+      } else {
+        /**
+         * Without a canvas the stream still runs to completion. Everything past
+         * the preview is discarded, but the counts, the period coverage and the
+         * budget verdict then describe the download rather than describing the
+         * preview — and the byte budget still bounds what is transferred. Stopping
+         * at preview_limit instead would report a row count of 50 for a dataset of
+         * millions.
+         */
+        for await (const _row of rows) {
+          // Drained for its counters; nothing is retained past the preview.
+        }
+      }
+    } finally {
+      await rows.return(undefined);
     }
 
     const { stats } = download;
     const firstPeriod = stats.periodsSeen[0];
     const lastPeriod = stats.periodsSeen.at(-1);
-    if (stats.rowCount === 0) {
-      const range = [
-        ...(sinceP ? [`since_period "${sinceP}"`] : []),
-        ...(untilP ? [`until_period "${untilP}"`] : []),
-      ].join(' and ');
-      throw ctx.fail(
-        'no_results',
-        `The download of "${input.dataset_code}" carried no observations.`,
-        {
-          recovery: {
-            hint: `Eurostat returned a table with no populated cells for "${input.dataset_code}". Verify the filter values with eurostat_get_dimension_values — a combination present in no cell downloads as an empty body.${
-              range
-                ? ` Also check that ${range} overlaps the series: a range outside the series' own coverage downloads as an empty table too.`
-                : ''
-            }`,
-          },
-        },
-      );
-    }
 
     ctx.log.info('Bulk download complete', {
       datasetCode: input.dataset_code,
@@ -461,6 +507,7 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
 /** Contract reasons the bulk service's classified failures map onto. */
 type MappedReason =
   | 'async_queued'
+  | 'extraction_too_big'
   | 'filter_arity'
   | 'invalid_dimension'
   | 'invalid_period'
@@ -475,14 +522,25 @@ type MappedReason =
  * This resolves the reason and the caller-facing recovery hint; the handler does
  * the throwing, so `ctx.fail` stays typed against the union rather than taking a
  * bare string.
+ *
+ * `request.dimensions` is the dataset's dimension list, when known, and
+ * `request.filtered` the dimensions the request already filtered — together they let
+ * a too-large refusal name the dimensions still open to filter.
  */
-export function mapBulkFailure(
+function mapBulkFailure(
   err: unknown,
   datasetCode: string,
+  request: { dimensions: string[] | undefined; filtered: string[] },
 ): { hint: string; message: string; reason: MappedReason } | undefined {
   const reason = (err as McpError).data?.reason;
   const message = (err as Error).message;
   switch (reason) {
+    case 'extraction_too_big':
+      return {
+        reason,
+        message,
+        hint: `Eurostat will not serve this extraction of "${datasetCode}" whole, and retrying repeats the refusal. ${narrowingAdvice(datasetCode, request.dimensions, request.filtered)}`,
+      };
     case 'not_found':
       return {
         reason,

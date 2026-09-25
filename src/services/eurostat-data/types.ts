@@ -16,8 +16,11 @@ export interface JsonStatResponse {
   size?: number[];
   /** Status codes for non-normal observations: linear_index (as string) → status code. */
   status?: Record<string, string>;
-  /** Flat dict: linear_index → numeric value (or null for missing). */
-  value?: Record<string, number | null>;
+  /**
+   * Flat dict: linear_index → value. Numeric, or null for missing — except on the
+   * PRODCOM collections, which publish flag and unit indicators as text (`":C"`, `"KG"`).
+   */
+  value?: Record<string, number | string | null>;
   /** Async/error response structures. */
   warning?: { status: number; label: string };
 }
@@ -56,7 +59,14 @@ export interface Observation {
   dimensions: Record<string, { code: string; label: string }>;
   /** `OBS_FLAG` code + label. Absent for an unflagged observation. */
   status?: { code: string; label: string };
+  /** Numeric value; null when missing, withheld, or published as text. */
   value: number | null;
+  /**
+   * A value Eurostat published as text rather than a number (a PRODCOM unit such as
+   * `KG`), verbatim. Absent for numeric and missing values; `:C` decodes to
+   * `confStatus` instead.
+   */
+  valueText?: string;
 }
 
 /**

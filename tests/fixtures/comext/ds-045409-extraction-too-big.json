@@ -1,0 +1,9 @@
+{
+  "error": [
+    {
+      "status": 413,
+      "id": 413,
+      "label": "EXTRACTION_TOO_BIG: The requested extraction is too big, estimated 10305182 rows, max authorised is 5000000, please change your filters to reduce the extraction size"
+    }
+  ]
+}

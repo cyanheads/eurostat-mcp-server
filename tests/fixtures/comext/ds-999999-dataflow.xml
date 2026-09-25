@@ -1,0 +1,1 @@
+<?xml version="1.0" encoding="UTF-8"?><S:Fault xmlns:S="http://schemas.xmlsoap.org/soap/envelope/"><faultcode>100</faultcode><faultstring>ERR_NOT_FOUND_4: DS-999999 (DATA_FLOW:ESTAT,*) is not available for dissemination.</faultstring></S:Fault>

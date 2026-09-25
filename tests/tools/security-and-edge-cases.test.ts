@@ -7,8 +7,8 @@
 
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eurostatDatasetResource } from '@/mcp-server/resources/definitions/eurostat-dataset.resource.js';
 import { eurostatBrowseThemes } from '@/mcp-server/tools/definitions/eurostat-browse-themes.tool.js';
 import { eurostatDataframeDescribe } from '@/mcp-server/tools/definitions/eurostat-dataframe-describe.tool.js';
@@ -47,7 +47,10 @@ vi.mock('@/services/eurostat-bulk/eurostat-bulk-service.js', async (importOrigin
 import { getEurostatBulkService } from '@/services/eurostat-bulk/eurostat-bulk-service.js';
 import type { BulkDownload } from '@/services/eurostat-bulk/types.js';
 import { getEurostatCatalogueService } from '@/services/eurostat-catalogue/eurostat-catalogue-service.js';
-import { getEurostatDataService } from '@/services/eurostat-data/eurostat-data-service.js';
+import {
+  EurostatDataService,
+  getEurostatDataService,
+} from '@/services/eurostat-data/eurostat-data-service.js';
 
 // ---------------------------------------------------------------------------
 // Shared fixtures
@@ -146,6 +149,7 @@ function minimalDownload(): BulkDownload {
   const download: BulkDownload = {
     header: { dimensions: ['freq', 'geo'], periods: ['2024'] },
     url: 'https://ec.europa.eu/eurostat/api/dissemination/sdmx/2.1/data/nama_10_gdp?format=TSV',
+    valueText: false,
     stats: {
       bytesRead: 64,
       budgetExceeded: false,
@@ -1000,20 +1004,43 @@ describe('Edge cases', () => {
     });
   });
 
-  describe('eurostatGetDatasetInfo — async_response error', () => {
-    it('surfaces async_response reason', async () => {
-      vi.mocked(getEurostatDataService).mockReturnValue({
-        getDatasetInfo: vi
-          .fn()
-          .mockRejectedValue(
-            Object.assign(new Error('async'), { data: { reason: 'async_response' } }),
-          ),
-      } as never);
-      const ctx = createMockContext({ errors: eurostatGetDatasetInfo.errors });
-      const input = eurostatGetDatasetInfo.input.parse({ dataset_code: 'huge_dataset' });
-      await expect(eurostatGetDatasetInfo.handler(input, ctx)).rejects.toMatchObject({
-        data: { reason: 'async_response', retryable: false },
+  describe('eurostatGetDatasetInfo — a hostile structure body', () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it('refuses an entity-declaring DOCTYPE as upstream_fault without expanding it', async () => {
+      const hostile = [
+        '<?xml version="1.0"?>',
+        '<!DOCTYPE m:Structure [<!ENTITY leak SYSTEM "file:///etc/passwd">]>',
+        '<m:Structure><s:Dataflow id="EARN_SES_ANNUAL"><c:Name xml:lang="en">&leak;</c:Name></s:Dataflow></m:Structure>',
+      ].join('\n');
+      const fetchMock = vi.fn(async () => new Response(hostile, { status: 200 }));
+      vi.stubGlobal('fetch', fetchMock);
+      vi.mocked(getEurostatDataService).mockReturnValue(
+        new EurostatDataService({} as never, {} as never),
+      );
+
+      const result = await runToolContract(eurostatGetDatasetInfo, {
+        dataset_code: 'earn_ses_annual',
       });
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ServiceUnavailable,
+          data: {
+            reason: 'upstream_fault',
+            recovery: { hint: expect.stringContaining('earn_ses_annual') },
+          },
+        },
+      });
+      const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+      expect(text).toContain('must not contain a DOCTYPE');
+      expect(text).toContain('reason upstream_fault');
+      expect(text).not.toMatch(/passwd|root:/);
+      // Only the two structure reads: nothing the body names is fetched.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
     });
   });
 

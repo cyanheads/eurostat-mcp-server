@@ -25,9 +25,11 @@ import {
   type ObservationRow,
 } from '@/services/eurostat-data/types.js';
 import {
+  EARN_SES_ANNUAL_DIMENSIONS,
   SDMX_CONSTRAINT_WITHOUT_COUNTRIES_XML,
   SDMX_CONSTRAINT_XML,
   SDMX_DATAFLOW_XML,
+  sdmxDataStructureXml,
 } from '../fixtures/eurostat-sdmx-metadata.js';
 
 /** Minimal mock AppConfig and StorageService — service ignores both */
@@ -845,6 +847,125 @@ describe('EurostatDataService — getDatasetInfo time coverage', () => {
     await expect(
       svc().getDatasetInfo('nonexistent_xyz', createMockContext()),
     ).rejects.toMatchObject({ data: { reason: 'not_found' } });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getDimensionOrder — the positional key order a filtered bulk download needs
+// ---------------------------------------------------------------------------
+
+/** The Statistics API's HTTP-413 refusal of an extraction, as Eurostat sends it. */
+const EXTRACTION_TOO_BIG =
+  '{ "error": [{"status": 413,"id": 413,"label": "EXTRACTION_TOO_BIG: The requested extraction is too big, estimated 5821200 rows, max authorised is 5000000, please change your filters to reduce the extraction size"}]}';
+
+/** The SOAP fault the structure endpoint returns for a code it does not know. */
+const DSD_NOT_FOUND =
+  '<?xml version="1.0" encoding="UTF-8"?><S:Fault xmlns:S="http://schemas.xmlsoap.org/soap/envelope/"><faultcode>100</faultcode><faultstring>ERR_NOT_FOUND_4: NONEXISTENT_XYZ (DATA_STRUCTURE:ESTAT,*) is not available for dissemination.</faultstring></S:Fault>';
+
+describe('EurostatDataService — getDimensionOrder (#57)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const svc = () => new EurostatDataService(mockConfig, mockStorage);
+  const requested = () => fetchMock.mock.calls.map(([input]) => new URL(String(input)));
+
+  /**
+   * Answers both sources a dimension order can be read from — the Statistics API's
+   * one-period slice and the SDMX structure definition — with the same order, so
+   * the assertion pins what the method returns rather than where it reads it.
+   */
+  const bothSources =
+    (statistics: () => Response) =>
+    async (input: string | URL): Promise<Response> => {
+      const url = new URL(String(input));
+      if (url.pathname.includes('/sdmx/2.1/datastructure/')) {
+        return xmlResponse(sdmxDataStructureXml());
+      }
+      if (url.pathname.includes('/statistics/1.0/data/')) return statistics();
+      throw new Error(`Unexpected URL: ${url}`);
+    };
+
+  it('returns the key dimensions in key order, time excluded', async () => {
+    fetchMock.mockImplementation(
+      bothSources(() =>
+        okResponse(
+          jsonStat(
+            Object.fromEntries([
+              ...EARN_SES_ANNUAL_DIMENSIONS.map((dim) => [dim, ['X']]),
+              ['time', ['2022']],
+            ]),
+          ),
+        ),
+      ),
+    );
+    await expect(svc().getDimensionOrder('earn_ses_annual', createMockContext())).resolves.toEqual(
+      EARN_SES_ANNUAL_DIMENSIONS,
+    );
+  });
+
+  it('resolves when the unfiltered latest-period slice exceeds the extraction limit', async () => {
+    fetchMock.mockImplementation(bothSources(() => errorResponse(413, EXTRACTION_TOO_BIG)));
+    await expect(svc().getDimensionOrder('earn_ses_annual', createMockContext())).resolves.toEqual(
+      EARN_SES_ANNUAL_DIMENSIONS,
+    );
+  });
+
+  it('reads the latest structure definition and never requests observations', async () => {
+    fetchMock.mockImplementation(bothSources(() => errorResponse(413, EXTRACTION_TOO_BIG)));
+    await svc().getDimensionOrder('earn_ses_annual', createMockContext());
+
+    const urls = requested();
+    expect(urls.some(({ pathname }) => pathname.includes('/statistics/'))).toBe(false);
+    expect(urls).toHaveLength(1);
+    // Unversioned: a pinned `/1.0` answers with the dataset's first structure, not its current one.
+    expect(urls[0]?.pathname).toMatch(/\/sdmx\/2\.1\/datastructure\/ESTAT\/earn_ses_annual$/);
+    expect(urls[0]?.search).toBe('');
+  });
+
+  it('orders by the position attribute rather than document order', async () => {
+    fetchMock.mockImplementation(async () =>
+      xmlResponse(
+        sdmxDataStructureXml([
+          { id: 'geo', position: 4 },
+          { id: 'freq', position: 1 },
+          { id: 'na_item', position: 3 },
+          { id: 'unit', position: 2 },
+        ]),
+      ),
+    );
+    await expect(svc().getDimensionOrder('nama_10_gdp', createMockContext())).resolves.toEqual([
+      'freq',
+      'unit',
+      'na_item',
+      'geo',
+    ]);
+  });
+
+  it('reports an unknown dataset as not_found', async () => {
+    fetchMock.mockImplementation(async () => errorResponse(404, DSD_NOT_FOUND));
+    await expect(
+      svc().getDimensionOrder('nonexistent_xyz', createMockContext()),
+    ).rejects.toMatchObject({ data: { reason: 'not_found' } });
+  });
+
+  it('reports a structure definition with no dimension list as a non-retryable upstream fault', async () => {
+    fetchMock.mockImplementation(async () => xmlResponse('<m:Structure/>'));
+    await expect(
+      svc().getDimensionOrder('earn_ses_annual', createMockContext()),
+    ).rejects.toMatchObject({ data: { reason: 'upstream_fault', retryable: false } });
+  });
+
+  it('reports a structure definition with only a time dimension as an upstream fault', async () => {
+    fetchMock.mockImplementation(async () => xmlResponse(sdmxDataStructureXml([])));
+    await expect(
+      svc().getDimensionOrder('earn_ses_annual', createMockContext()),
+    ).rejects.toMatchObject({ data: { reason: 'upstream_fault' } });
   });
 });
 

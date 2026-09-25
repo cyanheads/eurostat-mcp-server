@@ -81,6 +81,43 @@ export const SDMX_CONSTRAINT_XML = `<?xml version="1.0" encoding="UTF-8"?>
   </s:CubeRegion></s:ContentConstraint></s:Constraints></m:Structures>
 </m:Structure>`;
 
+/** `earn_ses_annual`'s key dimensions, in the order its live structure definition positions them. */
+export const EARN_SES_ANNUAL_DIMENSIONS = [
+  'freq',
+  'nace_r2',
+  'isco08',
+  'worktime',
+  'age',
+  'sex',
+  'indic_se',
+  'geo',
+];
+
+function dsdDimension(id: string, position: number): string {
+  const urn = `urn:sdmx:org.sdmx.infomodel.datastructure.Dimension=ESTAT:EARN_SES_ANNUAL(22.0).${id}`;
+  return `<s:Dimension id="${id}" position="${position}" urn="${urn}"><s:ConceptIdentity><Ref agencyID="ESTAT" class="Concept" id="${id}" maintainableParentID="EARN_SES_ANNUAL" maintainableParentVersion="21.0" package="conceptscheme"/></s:ConceptIdentity><s:LocalRepresentation><s:Enumeration><Ref agencyID="ESTAT" class="Codelist" id="${id.toUpperCase()}" package="codelist" version="1.0"/></s:Enumeration></s:LocalRepresentation></s:Dimension>`;
+}
+
+/**
+ * The shape `sdmx/2.1/datastructure/ESTAT/earn_ses_annual` answers with: one
+ * `DataStructure` whose `DimensionList` carries the key dimensions and the
+ * `TIME_PERIOD` time dimension, each with its `position`. `dimensionOrder`
+ * lists the key dimensions in document order, which need not be key order —
+ * the `position` attribute is what places them.
+ */
+export function sdmxDataStructureXml(
+  dimensionOrder: Array<{ id: string; position: number }> = EARN_SES_ANNUAL_DIMENSIONS.map(
+    (id, index) => ({ id, position: index + 1 }),
+  ),
+): string {
+  const timePosition = dimensionOrder.length + 1;
+  return `<?xml version='1.0' encoding='UTF-8'?><m:Structure xmlns:m="http://www.sdmx.org/resources/sdmxml/schemas/v2_1/message" xmlns:s="http://www.sdmx.org/resources/sdmxml/schemas/v2_1/structure" xmlns:c="http://www.sdmx.org/resources/sdmxml/schemas/v2_1/common"><m:Header><m:ID>DS-EARN_SES_ANNUAL1770303274475</m:ID><m:Test>false</m:Test><m:Sender id="ESTAT"/><m:Receiver id="unknown"/></m:Header><m:Structures><s:DataStructures><s:DataStructure agencyID="ESTAT" id="EARN_SES_ANNUAL" isFinal="true" version="22.0"><c:Annotations><c:Annotation><c:AnnotationTitle>time</c:AnnotationTitle><c:AnnotationType>DISSEMINATION_TIME_DIMENSION_CODE</c:AnnotationType><c:AnnotationURL/></c:Annotation></c:Annotations><c:Name xml:lang="en">EARN_SES_ANNUAL data structure</c:Name><s:DataStructureComponents><s:DimensionList id="DimensionDescriptor">${dimensionOrder
+    .map(({ id, position }) => dsdDimension(id, position))
+    .join(
+      '',
+    )}<s:TimeDimension id="TIME_PERIOD" position="${timePosition}"><s:ConceptIdentity><Ref agencyID="ESTAT" class="Concept" id="TIME_PERIOD" maintainableParentID="EARN_SES_ANNUAL" maintainableParentVersion="21.0" package="conceptscheme"/></s:ConceptIdentity><s:LocalRepresentation><s:TextFormat textType="ObservationalTimePeriod"/></s:LocalRepresentation></s:TimeDimension></s:DimensionList><s:AttributeList id="AttributeDescriptor"><s:Attribute assignmentStatus="Conditional" id="OBS_FLAG"><s:ConceptIdentity><Ref agencyID="ESTAT" class="Concept" id="OBS_FLAG" maintainableParentID="EARN_SES_ANNUAL" maintainableParentVersion="21.0" package="conceptscheme"/></s:ConceptIdentity><s:AttributeRelationship><s:PrimaryMeasure><Ref id="OBS_VALUE"/></s:PrimaryMeasure></s:AttributeRelationship></s:Attribute></s:AttributeList><s:MeasureList id="MeasureDescriptor"><s:PrimaryMeasure id="OBS_VALUE"><s:ConceptIdentity><Ref agencyID="ESTAT" class="Concept" id="OBS_VALUE" maintainableParentID="EARN_SES_ANNUAL" maintainableParentVersion="21.0" package="conceptscheme"/></s:ConceptIdentity></s:PrimaryMeasure></s:MeasureList></s:DataStructureComponents></s:DataStructure></s:DataStructures></m:Structures></m:Structure>`;
+}
+
 export const SDMX_CONSTRAINT_WITHOUT_COUNTRIES_XML = SDMX_CONSTRAINT_XML.replace(
   '<c:KeyValue id="geo"><c:Value>EU27_2020</c:Value><c:Value>EA20</c:Value><c:Value>DE</c:Value><c:Value>FR</c:Value><c:Value>DE1</c:Value><c:Value>DE11</c:Value><c:Value>DE111</c:Value></c:KeyValue>',
   '<c:KeyValue id="geo"><c:Value>EU27_2020</c:Value><c:Value>EA20</c:Value><c:Value>DE1</c:Value><c:Value>DE11</c:Value><c:Value>DE111</c:Value></c:KeyValue>',

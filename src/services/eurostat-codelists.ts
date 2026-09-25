@@ -92,3 +92,28 @@ export const CONF_STATUS_LABELS: Readonly<Record<string, string>> = {
   N: 'not for publication',
   P: 'information under non-statistical secrecy arrangements',
 };
+
+/**
+ * Column holding a value Eurostat publishes as text. Declared only on tables staged
+ * from a `DS-*` dataset — the only collections observed publishing one — so a main-host
+ * table keeps the five measure columns it has always had.
+ */
+export const OBS_VALUE_TEXT_COLUMN = 'obs_value_text';
+
+/**
+ * Read an observation value that is not a number.
+ *
+ * PRODCOM publishes its flag and unit indicators in the value itself, on both wire
+ * formats: `:C` for a confidential cell and `KG` for a quantity unit, with nothing
+ * separating them from the numeric indicators beside them. `:` is Eurostat's
+ * missing-value marker, so `:` followed by a `CONF_STATUS` code is a withheld value
+ * carrying its confidentiality status, and `:` alone is a plain missing value. Any
+ * other text is kept as published — never coerced to a number, and never dropped.
+ */
+export function decodeTextValue(raw: string): { confStatus?: string; text?: string } {
+  const text = raw.trim();
+  if (text === '' || text === ':') return {};
+  const code = text.startsWith(':') ? text.slice(1).trim() : undefined;
+  if (code && CONF_STATUS_LABELS[code]) return { confStatus: code };
+  return { text };
+}

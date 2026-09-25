@@ -3,15 +3,22 @@
  * @module tests/tools/eurostat-get-dataset-info.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eurostatGetDatasetInfo } from '@/mcp-server/tools/definitions/eurostat-get-dataset-info.tool.js';
+import { SDMX_CONSTRAINT_XML, SDMX_DATAFLOW_XML } from '../fixtures/eurostat-sdmx-metadata.js';
 
-vi.mock('@/services/eurostat-data/eurostat-data-service.js', () => ({
+// Only the accessor is replaced, so a test can hand the tool the real service class.
+vi.mock('@/services/eurostat-data/eurostat-data-service.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/eurostat-data/eurostat-data-service.js')>()),
   getEurostatDataService: vi.fn(),
 }));
 
-import { getEurostatDataService } from '@/services/eurostat-data/eurostat-data-service.js';
+import {
+  EurostatDataService,
+  getEurostatDataService,
+} from '@/services/eurostat-data/eurostat-data-service.js';
 
 const mockMeta = {
   code: 'nama_10_gdp',
@@ -88,30 +95,6 @@ describe('eurostatGetDatasetInfo', () => {
     const input = eurostatGetDatasetInfo.input.parse({ dataset_code: 'nonexistent_xyz' });
     await expect(eurostatGetDatasetInfo.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'not_found', recovery: { hint: expect.stringContaining('nonexistent_xyz') } },
-    });
-  });
-
-  it('surfaces async_response as non-retryable with a recovery path that can work', async () => {
-    vi.mocked(getEurostatDataService).mockReturnValue({
-      getDatasetInfo: vi
-        .fn()
-        .mockRejectedValue(
-          Object.assign(new Error('async response'), { data: { reason: 'async_response' } }),
-        ),
-    } as never);
-    const ctx = createMockContext({ errors: eurostatGetDatasetInfo.errors });
-    const input = eurostatGetDatasetInfo.input.parse({ dataset_code: 'nama_10_gdp' });
-    // The 413 is deterministic: the caller must be told retryable:false and pointed at a
-    // different call, not at repeating this one (which previously said "retry in a few seconds").
-    await expect(eurostatGetDatasetInfo.handler(input, ctx)).rejects.toMatchObject({
-      data: {
-        reason: 'async_response',
-        retryable: false,
-        recovery: { hint: expect.stringContaining('eurostat_search_datasets') },
-      },
-    });
-    await expect(eurostatGetDatasetInfo.handler(input, ctx)).rejects.toMatchObject({
-      data: { recovery: { hint: expect.not.stringContaining('retry') } },
     });
   });
 
@@ -265,5 +248,160 @@ describe('eurostatGetDatasetInfo', () => {
     // unit has 12 values but only 2 samples shown — expect "more" hint
     expect(text).toContain('more');
     expect(text).toContain('eurostat_get_dimension_values');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The metadata path end to end: the real data service, only fetch stubbed, so the
+// SDMX fetch, the parse and its failure classification are what run.
+// ---------------------------------------------------------------------------
+
+/** The recorded dataflow, cut off inside the GEO codelist — three levels below the root. */
+const TRUNCATED_DATAFLOW_XML = SDMX_DATAFLOW_XML.slice(
+  0,
+  SDMX_DATAFLOW_XML.indexOf('<s:Code id="DE111">') + 20,
+);
+
+interface StructureBodies {
+  constraint?: { body: string; status?: number };
+  dataflow?: { body: string; status?: number };
+}
+
+/** Answer the two structure reads from `bodies`, defaulting to the recorded fixtures. */
+function structureFetch(bodies: StructureBodies) {
+  return vi.fn(async (input: unknown): Promise<Response> => {
+    const url = new URL(String(input));
+    const code = url.pathname.split('/').at(-2)?.toUpperCase() ?? 'EARN_SES_ANNUAL';
+    if (url.pathname.includes('/sdmx/2.1/dataflow/')) {
+      const { body, status = 200 } = bodies.dataflow ?? {
+        body: SDMX_DATAFLOW_XML.replaceAll('EARN_SES_ANNUAL', code),
+      };
+      return new Response(body, { status });
+    }
+    if (url.pathname.includes('/sdmx/2.1/contentconstraint/')) {
+      const { body, status = 200 } = bodies.constraint ?? { body: SDMX_CONSTRAINT_XML };
+      return new Response(body, { status });
+    }
+    return new Response(
+      '{"warning":{"status":413,"label":"ASYNCHRONOUS_RESPONSE. Your request will be treated asynchronously."}}',
+      { status: 200 },
+    );
+  });
+}
+
+const textOf = (result: { content: Array<{ type: string; text?: string }> }): string =>
+  result.content.map((block) => block.text ?? '').join('\n');
+
+const errorOf = (result: { structuredContent?: unknown }) =>
+  (result.structuredContent as { error: { code: number; data: Record<string, unknown> } }).error;
+
+describe('eurostatGetDatasetInfo — the metadata path through the real data service', () => {
+  let fetchMock: ReturnType<typeof structureFetch>;
+
+  const serve = (bodies: StructureBodies = {}) => {
+    fetchMock = structureFetch(bodies);
+    vi.stubGlobal('fetch', fetchMock);
+  };
+
+  beforeEach(() => {
+    vi.mocked(getEurostatDataService).mockReturnValue(
+      new EurostatDataService({} as never, {} as never),
+    );
+    serve();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('reads only the SDMX structure and constraint, never the Statistics API', async () => {
+    const result = await runToolContract(eurostatGetDatasetInfo, {
+      dataset_code: 'earn_ses_annual',
+    });
+    expect(result.isError).not.toBe(true);
+    const paths = fetchMock.mock.calls.map(([input]) => new URL(String(input)).pathname);
+    expect(paths).toHaveLength(2);
+    expect(paths.every((path) => path.includes('/sdmx/2.1/'))).toBe(true);
+    expect(paths.some((path) => path.includes('/statistics/1.0/'))).toBe(false);
+  });
+
+  it('surfaces a 404 structure read as not_found on both surfaces', async () => {
+    serve({ dataflow: { body: 'Not found', status: 404 } });
+    const result = await runToolContract(eurostatGetDatasetInfo, { dataset_code: 'nope_xyz' });
+    expect(result.isError).toBe(true);
+    expect(errorOf(result)).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'not_found', recovery: { hint: expect.stringContaining('nope_xyz') } },
+    });
+    expect(textOf(result)).toContain('reason not_found');
+  });
+
+  it.each([
+    ['a dataflow cut off inside a nested codelist', { dataflow: { body: TRUNCATED_DATAFLOW_XML } }],
+    ['an empty dataflow body', { dataflow: { body: '' } }],
+    [
+      'an HTML page answered with HTTP 200',
+      { dataflow: { body: '<!DOCTYPE html><html><body>Service busy</body></html>' } },
+    ],
+    [
+      'a dataflow that omits the requested dataset',
+      { dataflow: { body: SDMX_DATAFLOW_XML.replaceAll('EARN_SES_ANNUAL', 'OTHER_SET') } },
+    ],
+    [
+      'a content constraint cut off mid-region',
+      {
+        constraint: {
+          body: SDMX_CONSTRAINT_XML.slice(0, SDMX_CONSTRAINT_XML.indexOf('<c:KeyValue id="geo">')),
+        },
+      },
+    ],
+  ] satisfies Array<[string, StructureBodies]>)(
+    'surfaces %s as the declared upstream_fault on both surfaces',
+    async (_label, bodies) => {
+      serve(bodies);
+      const result = await runToolContract(eurostatGetDatasetInfo, {
+        dataset_code: 'earn_ses_annual',
+      });
+      expect(result.isError).toBe(true);
+      const error = errorOf(result);
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.data).toMatchObject({
+        reason: 'upstream_fault',
+        recovery: { hint: expect.stringContaining('earn_ses_annual') },
+      });
+      expect(error.data.recovery).toMatchObject({
+        hint: expect.stringContaining('eurostat_query_dataset'),
+      });
+      const text = textOf(result);
+      expect(text).toContain('malformed SDMX metadata');
+      expect(text).toContain('Recovery:');
+      expect(text).toContain('reason upstream_fault');
+      expect(text).not.toMatch(/async/i);
+    },
+  );
+
+  it('does not cache a failed structure read: the next call downloads it afresh', async () => {
+    serve({ dataflow: { body: TRUNCATED_DATAFLOW_XML } });
+    const failed = await runToolContract(eurostatGetDatasetInfo, {
+      dataset_code: 'earn_ses_annual',
+    });
+    expect(errorOf(failed).data.reason).toBe('upstream_fault');
+
+    serve();
+    const recovered = await runToolContract(eurostatGetDatasetInfo, {
+      dataset_code: 'earn_ses_annual',
+    });
+    expect(recovered.isError).not.toBe(true);
+    expect(recovered.structuredContent).toMatchObject({
+      code: 'earn_ses_annual',
+      obsCount: 6160543,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('declares exactly the failures its metadata path can raise', () => {
+    expect(eurostatGetDatasetInfo.errors?.map(({ reason }) => reason)).toEqual([
+      'not_found',
+      'upstream_fault',
+    ]);
   });
 });

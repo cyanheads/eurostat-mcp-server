@@ -73,4 +73,9 @@ export interface BulkDownload {
   stats: BulkStats;
   /** The request URL, minus nothing — no credentials are involved. */
   url: string;
+  /**
+   * True when every row carries an `obs_value_text` column — a `DS-*` dataset, whose
+   * PRODCOM indicators publish units and flags as text. Pass it to `bulkRowSchema`.
+   */
+  valueText: boolean;
 }

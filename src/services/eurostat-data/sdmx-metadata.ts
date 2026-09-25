@@ -16,6 +16,8 @@ interface XmlNode {
 interface DimensionDefinition {
   code: string;
   codelistId?: string;
+  /** True for the `TimeDimension` element, which the positional series key never includes. */
+  isTime: boolean;
   label: string;
   position: number;
 }
@@ -256,7 +258,7 @@ function parseConceptLabels(root: XmlNode): Map<string, string> {
 
 function parseDimensions(root: XmlNode, conceptLabels: Map<string, string>): DimensionDefinition[] {
   const dimensionList = firstDescendant(root, 'DimensionList');
-  if (!dimensionList) throw new Error('SDMX dataflow descendants omitted the dimension list');
+  if (!dimensionList) throw new Error('SDMX structure omitted the dimension list');
 
   return dimensionList.children
     .filter(({ name }) => name === 'Dimension' || name === 'TimeDimension')
@@ -275,6 +277,7 @@ function parseDimensions(root: XmlNode, conceptLabels: Map<string, string>): Dim
       return {
         code,
         ...(codelistId && { codelistId }),
+        isTime: dimension.name === 'TimeDimension',
         label: (conceptId && conceptLabels.get(conceptId)) ?? conceptLabels.get(rawCode) ?? code,
         position: Number.parseInt(dimension.attributes.position ?? '', 10) || index + 1,
       };
@@ -303,6 +306,54 @@ function parseConstraintValues(root: XmlNode): Map<string, string[]> {
     }
   }
   return valuesByDimension;
+}
+
+/** One dataflow from an SDMX 2.1 dataflow list (`dataflow/{agency}`). */
+export interface SdmxDataflowSummary {
+  /** `ESMS_HTML` annotation: the dataflow's metadata page, which names its collection. */
+  esmsUrl?: string;
+  id: string;
+  /** English name, whitespace collapsed. Falls back to the id. */
+  label: string;
+  /** `UPDATE_DATA` annotation, verbatim (e.g. `2026-09-15T11:00:00+0200`). */
+  lastUpdated?: string;
+}
+
+/**
+ * The dataflows an SDMX 2.1 dataflow list describes, with the annotations a
+ * catalogue entry needs. The list requested with no `detail` carries every
+ * dataflow's names and annotations — 23 KB for the Comext host's 11 — where the
+ * `allstubs` form carries names only.
+ */
+export function parseSdmxDataflowList(xml: string): SdmxDataflowSummary[] {
+  return descendants(parseXml(xml), 'Dataflow').flatMap((dataflow) => {
+    const id = dataflow.attributes.id;
+    if (!id) return [];
+    const lastUpdated = annotationValue(dataflow, 'UPDATE_DATA', 'AnnotationTitle');
+    const esmsUrl = annotationValue(dataflow, 'ESMS_HTML', 'AnnotationURL');
+    return [
+      {
+        id,
+        label: (localizedName(dataflow) ?? id).replace(/\s+/g, ' '),
+        ...(lastUpdated && { lastUpdated }),
+        ...(esmsUrl && { esmsUrl }),
+      },
+    ];
+  });
+}
+
+/**
+ * The key dimensions of an SDMX 2.1 structure definition (`datastructure/{agency}/{id}`),
+ * in the order the positional series key places them, time excluded.
+ *
+ * Order comes from each dimension's `position` attribute, not document order. The
+ * structure definition runs to a few KB whatever the dataset's size, so reading the
+ * order here never trips the extraction limit an observation request can hit.
+ */
+export function parseSdmxDimensionOrder(dataStructureXml: string): string[] {
+  return parseDimensions(parseXml(dataStructureXml), new Map())
+    .filter(({ isTime }) => !isTime)
+    .map(({ code }) => code);
 }
 
 /** Combine one dataflow's referencepartial descendants with its dataset content constraint. */

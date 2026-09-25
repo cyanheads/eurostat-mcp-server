@@ -11,11 +11,11 @@ import { acquireCanvas, getCanvas } from '@/services/canvas-accessor.js';
 export const eurostatDataframeDescribe = tool('eurostat_dataframe_describe', {
   title: 'Describe Eurostat Dataframes',
   description:
-    'List the tables staged on a Eurostat dataframe canvas, with their row counts and column names and types. Call this before eurostat_dataframe_query to learn the table and column names to write SQL against. The canvas_id comes from a eurostat_query_dataset or eurostat_download_dataset response that reported a staged table. Every observation column is flat, but the two stagers write different dimension columns, so read the columns reported here rather than assuming: eurostat_query_dataset gives each dimension a code column named after the dimension (e.g. "geo") plus a label companion (e.g. "geo_label"); eurostat_download_dataset gives code columns only — the bulk endpoint carries no labels — plus a "time" column. Both write the same five measure columns — obs_value, obs_flag, obs_flag_label, conf_status, conf_status_label — carrying the same codes for the same observation, so tables from the two stagers join on dimension codes and time and compare like with like.',
+    'List the tables staged on a Eurostat dataframe canvas, with their row counts and column names and types. Call this before eurostat_dataframe_query to learn the table and column names to write SQL against. The canvas_id comes from a eurostat_query_dataset or eurostat_download_dataset response that reported a staged table. Three tools stage tables, and they write different columns, so read the columns reported here rather than assuming. The two observation stagers keep every column flat: eurostat_query_dataset gives each dimension a code column named after the dimension (e.g. "geo") plus a label companion (e.g. "geo_label"); eurostat_download_dataset gives code columns only — the bulk endpoint carries no labels — plus a "time" column. Both write the same five measure columns — obs_value, obs_flag, obs_flag_label, conf_status, conf_status_label — carrying the same codes for the same observation, so their tables join on dimension codes and time and compare like with like. A table staged from a DS-* dataset (Comext detailed trade, PRODCOM) adds obs_value_text, holding a value Eurostat published as text, such as a PRODCOM quantity unit. eurostat_get_dimension_values, given a canvas_id, stages one dimension\'s value list as two columns, code and label, which labels a download\'s code column through a join (e.g. d.geo = g.code).',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({
     canvas_id: CanvasIdSchema.describe(
-      'Canvas identifier returned as canvasId by eurostat_query_dataset or eurostat_download_dataset. Identifies the workspace holding the staged tables.',
+      'Canvas identifier returned as canvasId by eurostat_query_dataset, eurostat_download_dataset, or eurostat_get_dimension_values. Identifies the workspace holding the staged tables.',
     ),
   }),
   output: z.object({
@@ -79,7 +79,7 @@ export const eurostatDataframeDescribe = tool('eurostat_dataframe_describe', {
       code: JsonRpcErrorCode.NotFound,
       when: 'The canvas_id is unknown or its lifetime has elapsed.',
       recovery:
-        'Re-run the tool that staged it (eurostat_query_dataset or eurostat_download_dataset) and use the canvasId it returns.',
+        'Re-run eurostat_query_dataset or eurostat_download_dataset without canvas_id and use the canvasId it returns; eurostat_get_dimension_values stages onto that canvas but never starts one.',
       thrownBy: 'service',
     },
   ],
@@ -97,7 +97,7 @@ export const eurostatDataframeDescribe = tool('eurostat_dataframe_describe', {
 
     if (tables.length === 0) {
       ctx.enrich.notice(
-        `Canvas ${instance.canvasId} holds no tables. Staged tables expire on their own schedule — re-run eurostat_query_dataset to stage the data again.`,
+        `Canvas ${instance.canvasId} holds no tables. Staged tables expire on their own schedule — re-run the tool that staged the data to stage it again: eurostat_query_dataset, eurostat_download_dataset, or eurostat_get_dimension_values with this canvas_id.`,
       );
     }
 

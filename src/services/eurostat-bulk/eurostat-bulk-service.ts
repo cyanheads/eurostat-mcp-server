@@ -23,11 +23,14 @@ import {
   CONF_STATUS_COLUMN,
   CONF_STATUS_LABEL_COLUMN,
   CONF_STATUS_LABELS,
+  decodeTextValue,
   OBS_FLAG_COLUMN,
   OBS_FLAG_LABEL_COLUMN,
   OBS_FLAG_LABELS,
   OBS_VALUE_COLUMN,
+  OBS_VALUE_TEXT_COLUMN,
 } from '@/services/eurostat-codelists.js';
+import { dataHostFor, isComextDataset } from '@/services/eurostat-hosts.js';
 import {
   type BulkDownload,
   type BulkRow,
@@ -118,6 +121,18 @@ export function classifyXmlBody(xml: string, datasetCode: string): never {
       { reason: 'invalid_dimension', datasetCode, faultcode: code },
     );
   }
+  /**
+   * Fault 413 is Eurostat refusing the extraction's size, on either host:
+   * `EXTRACTION_TOO_BIG` past its 5,000,000-row limit, or `EXTRACTION_TOO_BIG_COMEXT`
+   * for an unfiltered Comext collection, which it never serves whole. The same
+   * request fails the same way every time, so it is not retryable.
+   */
+  if (code === '413') {
+    throw serviceUnavailable(
+      `Eurostat refused the extraction of "${datasetCode}" as too large. Eurostat fault ${code}: ${detail}`,
+      { reason: 'extraction_too_big', datasetCode, faultcode: code, retryable: false },
+    );
+  }
   throw serviceUnavailable(
     `Eurostat SDMX endpoint returned a fault for "${datasetCode}"${code ? ` (faultcode ${code})` : ''}: ${detail}`,
     { reason: 'upstream_fault', datasetCode, ...(code && { faultcode: code }) },
@@ -133,10 +148,14 @@ export function classifyXmlBody(xml: string, datasetCode: string): never {
  * on both sides of the split is not an observation at all and yields
  * `undefined` — distinct from `: `, which is an observation Eurostat reports as
  * unavailable.
+ *
+ * A value that is not a number is read by {@link decodeTextValue}: PRODCOM's flag
+ * and unit indicators publish `:C` (confidential, no space before the `C`) and `KG`
+ * in the value position. `:C` lands in `conf`, and other text in `text`.
  */
 export function parseCell(
   cell: string,
-): { conf: string | null; flag: string | null; value: number | null } | undefined {
+): { conf: string | null; flag: string | null; text?: string; value: number | null } | undefined {
   const sep = cell.indexOf(' ');
   const rawValue = (sep === -1 ? cell : cell.slice(0, sep)).trim();
   const rawFlags = (sep === -1 ? '' : cell.slice(sep + 1)).trim();
@@ -149,7 +168,14 @@ export function parseCell(
 
   if (rawValue === '' || rawValue === MISSING_VALUE) return { conf, flag, value: null };
   const num = Number(rawValue);
-  return { conf, flag, value: Number.isFinite(num) ? num : null };
+  if (Number.isFinite(num)) return { conf, flag, value: num };
+  const decoded = decodeTextValue(rawValue);
+  return {
+    conf: conf ?? decoded.confStatus ?? null,
+    flag,
+    value: null,
+    ...(decoded.text && { text: decoded.text }),
+  };
 }
 
 /**
@@ -227,12 +253,18 @@ export function buildKeyPath(
  * prefix as `BIGINT` — serialized back out as a string — and types an
  * all-missing prefix from nulls alone. Every column is nullable: a measure is
  * routinely unavailable, and flags are the exception rather than the rule.
+ *
+ * `valueText` declares `obs_value_text` after `obs_value`, for a `DS-*` dataset —
+ * the same flag {@link BulkDownload.valueText} reports for the rows.
  */
-export function bulkRowSchema(dimensions: string[]): ColumnSchema[] {
+export function bulkRowSchema(dimensions: string[], valueText = false): ColumnSchema[] {
   return [
     ...dimensions.map((dim): ColumnSchema => ({ name: dim, type: 'VARCHAR', nullable: true })),
     { name: TIME_COLUMN, type: 'VARCHAR', nullable: true },
     { name: OBS_VALUE_COLUMN, type: 'DOUBLE', nullable: true },
+    ...(valueText
+      ? [{ name: OBS_VALUE_TEXT_COLUMN, type: 'VARCHAR', nullable: true } satisfies ColumnSchema]
+      : []),
     { name: OBS_FLAG_COLUMN, type: 'VARCHAR', nullable: true },
     { name: OBS_FLAG_LABEL_COLUMN, type: 'VARCHAR', nullable: true },
     { name: CONF_STATUS_COLUMN, type: 'VARCHAR', nullable: true },
@@ -252,11 +284,10 @@ export class EurostatBulkService {
     sinceP: string | undefined,
     untilP: string | undefined,
   ): URL {
-    const { baseUrl } = getServerConfig();
     const path = keyPath
       ? `${encodeURIComponent(datasetCode)}/${encodeURIComponent(keyPath)}`
       : encodeURIComponent(datasetCode);
-    const url = new URL(`${baseUrl}/sdmx/2.1/data/${path}`);
+    const url = new URL(`${dataHostFor(datasetCode)}/sdmx/2.1/data/${path}`);
     url.searchParams.set('format', 'TSV');
     if (sinceP) url.searchParams.set('startPeriod', sinceP);
     if (untilP) url.searchParams.set('endPeriod', untilP);
@@ -296,9 +327,10 @@ export class EurostatBulkService {
     try {
       response = await fetchWithTimeout(url.toString(), bulkTimeoutMs, ctx, {
         signal: ctx.signal,
-        // 400 (bad filter value or arity) and 404 (unknown dataset) are modeled outcomes
-        // reclassified below into the declared error contract, not service failures.
-        expectedStatuses: [400, 404],
+        // 400 (bad filter value or arity), 404 (unknown dataset) and 413 (extraction too
+        // large) are modeled outcomes reclassified below into the declared error
+        // contract, not service failures.
+        expectedStatuses: [400, 404, 413],
       });
     } catch (err) {
       // fetchWithTimeout throws for any non-2xx before the caller sees the body, so the
@@ -329,12 +361,14 @@ export class EurostatBulkService {
 
     const decoded = await decodeBody(response.body, stats, bulkMaxBytes);
     const { header, remainder, iterator } = await readHeader(decoded, datasetCode);
+    const valueText = isComextDataset(datasetCode);
 
     return {
       header,
       stats,
       url: url.toString(),
-      rows: () => expandRows(iterator, remainder, header, stats),
+      valueText,
+      rows: () => expandRows(iterator, remainder, header, stats, valueText),
     };
   }
 }
@@ -539,12 +573,15 @@ function stripCr(line: string): string {
  * Only complete lines are parsed. When the byte budget cancels the transfer
  * mid-line the trailing fragment is dropped rather than parsed into a row with
  * silently truncated fields.
+ *
+ * `valueText` adds the `obs_value_text` column holding a cell's text value.
  */
 async function* expandRows(
   chunks: AsyncGenerator<string>,
   remainder: string,
   header: TsvHeader,
   stats: BulkStats,
+  valueText: boolean,
 ): AsyncGenerator<BulkRow> {
   const seen = new Set<string>();
   let buf = remainder;
@@ -566,6 +603,7 @@ async function* expandRows(
       }
       row[TIME_COLUMN] = period;
       row[OBS_VALUE_COLUMN] = parsed.value;
+      if (valueText) row[OBS_VALUE_TEXT_COLUMN] = parsed.text ?? null;
       row[OBS_FLAG_COLUMN] = parsed.flag;
       row[OBS_FLAG_LABEL_COLUMN] = parsed.flag ? (OBS_FLAG_LABELS[parsed.flag] ?? null) : null;
       row[CONF_STATUS_COLUMN] = parsed.conf;
