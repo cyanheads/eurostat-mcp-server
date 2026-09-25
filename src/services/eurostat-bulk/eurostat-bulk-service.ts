@@ -124,7 +124,8 @@ export function classifyXmlBody(xml: string, datasetCode: string): never {
   /**
    * Fault 413 is Eurostat refusing the extraction's size, on either host:
    * `EXTRACTION_TOO_BIG` past its 5,000,000-row limit, or `EXTRACTION_TOO_BIG_COMEXT`
-   * for an unfiltered Comext collection, which it never serves whole. The same
+   * for an unfiltered download of a large Comext collection (a small one, such as
+   * `DS-059368`, is served whole). The same
    * request fails the same way every time, so it is not retryable.
    */
   if (code === '413') {

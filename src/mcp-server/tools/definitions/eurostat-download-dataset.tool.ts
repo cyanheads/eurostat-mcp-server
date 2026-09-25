@@ -253,7 +253,7 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
     {
       reason: 'extraction_too_big',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Eurostat refused the extraction as too large (SDMX faultcode 413, HTTP 413): past its 5,000,000-row extraction limit, or an unfiltered DS-* Comext collection, which Eurostat never serves whole. Covers every dataset, on either host.',
+      when: 'Eurostat refused the extraction as too large (SDMX faultcode 413, HTTP 413): past its 5,000,000-row extraction limit, or an unfiltered download of a large DS-* Comext collection, which Eurostat serves only filtered. Covers every dataset, on either host.',
       retryable: false,
       recovery:
         'Add dimension filters or a narrower since_period/until_period range to shrink the extraction; the same request fails the same way on every retry.',
