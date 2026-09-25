@@ -3,6 +3,7 @@
  * @module tests/tools/eurostat-query-dataset.tool.test
  */
 
+import { readFileSync } from 'node:fs';
 import type { z } from '@cyanheads/mcp-ts-core';
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
@@ -168,6 +169,15 @@ describe('eurostatQueryDataset', () => {
       { dataset_code: 'nama_10_gdp', filters: { geo: ['DE'] }, geo_level: 'country' },
     ],
     [
+      'an upper-case GEO key plus geo_level (#54)',
+      {
+        dataset_code: 'une_rt_m',
+        filters: { GEO: ['DE'] },
+        geo_level: 'country',
+        last_n_periods: 1,
+      },
+    ],
+    [
       'since_period plus last_n_periods',
       { dataset_code: 'nama_10_gdp', since_period: '2020', last_n_periods: 5 },
     ],
@@ -178,7 +188,7 @@ describe('eurostatQueryDataset', () => {
   ];
   for (const [label, input] of conflictingInputs) {
     it(`renders contract recovery for ${label} before any request`, async () => {
-      const fetchMock = vi.fn();
+      const fetchMock = vi.fn(unmockedFetch);
       vi.stubGlobal('fetch', fetchMock);
       vi.mocked(getEurostatDataService).mockReturnValue(
         new EurostatDataService({} as never, {} as never),
@@ -521,7 +531,7 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
   });
 
   beforeEach(() => {
-    fetchMock = vi.fn();
+    fetchMock = vi.fn(unmockedFetch);
     vi.stubGlobal('fetch', fetchMock);
     vi.mocked(getEurostatDataService).mockReturnValue(
       new EurostatDataService({} as never, {} as never),
@@ -623,6 +633,28 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
       expect(text.split('\n').filter((line) => line.includes('→'))).toHaveLength(3);
       expect(text).toMatch(/eurostat_dataframe_describe.*eurostat_dataframe_query/is);
       expect(text).toContain('df_');
+    });
+
+    it('composes the unmatched, preview and staged sentences into one notice on both surfaces', async () => {
+      fetchMock.mockImplementation(async () => okResponse(pastCap()));
+
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'nama_10_gdp',
+        filters: { geo: ['G1', 'G2', 'XX'], time: ['2000', '1850'] },
+        preview_limit: 3,
+      });
+
+      const notice = (result.structuredContent as { notice?: string }).notice ?? '';
+      expect(result.structuredContent).toMatchObject({
+        stagedRowCount: 5001,
+        unmatchedValues: { geo: ['XX'], time: ['1850'] },
+      });
+      expect(notice).toMatch(
+        /geo=\[XX\]; time=\[1850\].*eurostat_get_dimension_values.*preview_limit=3 returns the first 3 of 5,001 matched rows inline.*eurostat_dataframe_describe.*eurostat_dataframe_query/s,
+      );
+      const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+      expect(text).toContain('**Unmatched filter values:** geo=[XX]; time=[1850]');
+      expect(text).toContain(`> ${notice}`);
     });
 
     it('stages exactly what the inline rows show, in the same order', async () => {
@@ -824,5 +856,750 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
     // the reader that narrowing the query is the way to the rest.
     expect(text).toContain('the whole match is staged on the canvas below');
     expect(text).not.toContain('Add dimension filters');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Period inputs and filter matching — run on the real service with fetch stubbed,
+// so the period check, the error classifier, and the envelope diagnosis are all the
+// production code. The fixtures are JSON-stat replies captured live for the requests
+// their names describe.
+// ---------------------------------------------------------------------------
+
+const envelope = (name: string): object =>
+  JSON.parse(readFileSync(new URL(`../fixtures/${name}.json`, import.meta.url), 'utf8')) as object;
+
+const jsonReply = (body: object, status = 200) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+
+/** Any fetch a test did not arrange fails loudly instead of returning undefined. */
+const unmockedFetch = async (input: unknown): Promise<Response> => {
+  throw new Error(`Unmocked fetch: ${String(input)}`);
+};
+
+const contentText = (result: { content: Array<{ type: string; text?: string }> }) =>
+  result.content.map((block) => block.text ?? '').join('\n');
+
+const DE_UNEMPLOYMENT = {
+  geo: ['DE'],
+  unit: ['PC_ACT'],
+  s_adj: ['SA'],
+  age: ['TOTAL'],
+  sex: ['T'],
+};
+
+describe('eurostatQueryDataset — period inputs and filter matching (real service)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(getEurostatDataService).mockReturnValue(
+      new EurostatDataService({} as never, {} as never),
+    );
+    setCanvas(undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const requestedUrl = (): URL => new URL(String(fetchMock.mock.calls[0]?.[0]));
+
+  describe('period bounds that reach Eurostat unchanged', () => {
+    for (const [label, sent, expected] of [
+      ['an empty string', '', null],
+      ['a whitespace-only string', '   ', null],
+      ['a padded year', '  2020  ', '2020'],
+    ] as const) {
+      it(`sends ${label} as ${expected === null ? 'no bound' : `"${expected}"`}`, async () => {
+        fetchMock.mockImplementationOnce(async () =>
+          jsonReply(envelope('une-rt-m-geo-de-xx-since-2024-01')),
+        );
+        await runToolContract(eurostatQueryDataset, {
+          dataset_code: 'une_rt_m',
+          filters: DE_UNEMPLOYMENT,
+          since_period: sent,
+          until_period: sent,
+        });
+        expect(requestedUrl().searchParams.get('sinceTimePeriod')).toBe(expected);
+        expect(requestedUrl().searchParams.get('untilTimePeriod')).toBe(expected);
+      });
+    }
+
+    for (const period of [
+      '2020',
+      '2020-01',
+      '2020-01-15',
+      '2020-Q1',
+      '2020-q1',
+      '2020-s1',
+      '2020-W1',
+      '2020-w01',
+      '2020-W53',
+      '2020-M01',
+      '2020-M1',
+      '2020-m01',
+      '2024-02-29',
+      '2020-T1',
+      '2026-D001',
+      '2024-D366',
+    ]) {
+      it(`passes "${period}" through on either bound`, async () => {
+        fetchMock.mockImplementation(async () =>
+          jsonReply(envelope('une-rt-m-geo-de-xx-since-2024-01')),
+        );
+        await runToolContract(eurostatQueryDataset, {
+          dataset_code: 'une_rt_m',
+          filters: DE_UNEMPLOYMENT,
+          since_period: period,
+        });
+        await runToolContract(eurostatQueryDataset, {
+          dataset_code: 'une_rt_m',
+          filters: DE_UNEMPLOYMENT,
+          until_period: period,
+        });
+        expect(
+          new URL(String(fetchMock.mock.calls[0]?.[0])).searchParams.get('sinceTimePeriod'),
+        ).toBe(period);
+        expect(
+          new URL(String(fetchMock.mock.calls[1]?.[0])).searchParams.get('untilTimePeriod'),
+        ).toBe(period);
+      });
+    }
+  });
+
+  it('maps a JSON-stat 400 that is not about the period to conflicting_params', async () => {
+    fetchMock.mockImplementationOnce(async () =>
+      jsonReply(
+        { error: [{ status: 400, id: 400, label: "Invalid value for 'lang' parameter." }] },
+        400,
+      ),
+    );
+    const result = await runToolContract(eurostatQueryDataset, {
+      dataset_code: 'une_rt_m',
+      filters: DE_UNEMPLOYMENT,
+    });
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.ValidationError, data: { reason: 'conflicting_params' } },
+    });
+  });
+
+  it('keeps the generic no_results hint for an HTTP-200 NO_RESULTS reply, which carries no envelope', async () => {
+    fetchMock.mockImplementationOnce(async () =>
+      jsonReply({
+        error: [
+          {
+            status: 200,
+            id: 100,
+            label: 'NO_RESULTS: The query that has been sent did not return any results.',
+          },
+        ],
+      }),
+    );
+    const result = await runToolContract(eurostatQueryDataset, {
+      dataset_code: 'tgs00010',
+      filters: { isced11: ['ED0-2'], sex: ['T'] },
+      geo_level: 'country',
+      last_n_periods: 1,
+    });
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.NotFound,
+        data: {
+          reason: 'no_results',
+          recovery: {
+            hint: 'No observation cells matched. Verify dimension values for "tgs00010" using eurostat_get_dimension_values, and check the period range is inside the dataset\'s coverage — an unmatched value and an out-of-coverage range both return no data rather than an error.',
+          },
+        },
+      },
+    });
+    const data = (result.structuredContent as { error: { data: Record<string, unknown> } }).error
+      .data;
+    expect(data).not.toHaveProperty('unmatchedValues');
+    expect(data).not.toHaveProperty('matchedPeriods');
+  });
+
+  it('returns a fully matched query with no unmatchedValues and no notice', async () => {
+    fetchMock.mockImplementationOnce(async () =>
+      jsonReply(envelope('une-rt-m-geo-de-lower-last3')),
+    );
+    const result = await runToolContract(eurostatQueryDataset, {
+      dataset_code: 'une_rt_m',
+      filters: { ...DE_UNEMPLOYMENT, geo: ['de'] },
+      last_n_periods: 3,
+    });
+    expect(result.isError).not.toBe(true);
+    expect(Object.keys(result.structuredContent ?? {}).sort()).toEqual(
+      [
+        'appliedFilters',
+        'datasetCode',
+        'datasetLabel',
+        'dimensionsUsed',
+        'missingObsCount',
+        'obsCount',
+        'observations',
+        'timeRange',
+        'truncated',
+      ].sort(),
+    );
+    expect(contentText(result as never)).not.toMatch(/unmatched/i);
+  });
+
+  it('keeps the preview-short response shape: structured keys and notice text', async () => {
+    fetchMock.mockImplementationOnce(async () =>
+      jsonReply(envelope('une-rt-m-geo-de-lower-last3')),
+    );
+    const result = await runToolContract(eurostatQueryDataset, {
+      dataset_code: 'une_rt_m',
+      filters: DE_UNEMPLOYMENT,
+      last_n_periods: 3,
+      preview_limit: 1,
+    });
+    expect(Object.keys(result.structuredContent ?? {}).sort()).toEqual(
+      [
+        'appliedFilters',
+        'datasetCode',
+        'datasetLabel',
+        'dimensionsUsed',
+        'missingObsCount',
+        'notice',
+        'obsCount',
+        'observations',
+        'timeRange',
+        'truncated',
+      ].sort(),
+    );
+    expect(result.structuredContent).toMatchObject({
+      obsCount: 2,
+      truncated: false,
+      notice:
+        'preview_limit=1 returns the first 1 of 2 matched rows inline; it does not reduce the match. Use dimension filters (geo, unit, na_item) or a period range to reduce the match itself.',
+    });
+  });
+
+  describe('malformed period bounds (#47)', () => {
+    const REJECTED = [
+      '2020-13',
+      '2020-00',
+      '2020-Q5',
+      '2020-Q9',
+      '2020-S3',
+      '2020-W54',
+      '2021-W53',
+      '2026-02-30',
+      '2021-02-29',
+      '2020-1',
+      '2020Q1',
+      '202001',
+      'banana',
+    ];
+    for (const period of REJECTED) {
+      for (const bound of ['since_period', 'until_period'] as const) {
+        it(`rejects ${bound} "${period}" as invalid_period before any request`, async () => {
+          const result = await runToolContract(eurostatQueryDataset, {
+            dataset_code: 'une_rt_m',
+            filters: DE_UNEMPLOYMENT,
+            [bound]: `  ${period} `,
+          });
+          expect(fetchMock).not.toHaveBeenCalled();
+          expect(result.isError).toBe(true);
+          expect(result.structuredContent).toMatchObject({
+            error: {
+              code: JsonRpcErrorCode.ValidationError,
+              message: expect.stringContaining(`${bound} "${period}"`),
+              data: {
+                reason: 'invalid_period',
+                recovery: { hint: expect.stringMatching(/YYYY-MM-DD.*YYYY-Qn.*YYYY-Wnn/) },
+              },
+            },
+          });
+          expect(contentText(result as never)).toMatch(/Recovery:.*YYYY-Qn/s);
+        });
+      }
+    }
+
+    it('checks the period before the since/last_n conflict, so a bad literal is named first', async () => {
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'une_rt_m',
+        since_period: '2020-13',
+        last_n_periods: 3,
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'invalid_period' } },
+      });
+    });
+
+    it('rejects an inverted range before any request, naming both bounds (#53)', async () => {
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'une_rt_m',
+        filters: DE_UNEMPLOYMENT,
+        since_period: '2024-01',
+        until_period: '2020-01',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          message:
+            'since_period "2024-01" starts after until_period "2020-01" ends, so the range holds no period.',
+          data: { reason: 'invalid_period' },
+        },
+      });
+    });
+
+    it('sends a cross-frequency range that holds periods (#53)', async () => {
+      fetchMock.mockImplementationOnce(async () =>
+        jsonReply(envelope('une-rt-m-geo-de-xx-since-2024-01')),
+      );
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'une_rt_m',
+        filters: DE_UNEMPLOYMENT,
+        since_period: '2020-06',
+        until_period: '2020',
+      });
+      expect(result.isError).not.toBe(true);
+      expect(requestedUrl().searchParams.get('sinceTimePeriod')).toBe('2020-06');
+      expect(requestedUrl().searchParams.get('untilTimePeriod')).toBe('2020');
+    });
+
+    for (const [label, body] of [
+      [
+        "Eurostat's 400 naming sinceTimePeriod",
+        {
+          error: [
+            { status: 400, id: 400, label: "Invalid value for 'sinceTimePeriod' parameter." },
+          ],
+        },
+      ],
+      [
+        "Eurostat's error id 140",
+        {
+          error: [
+            {
+              status: 400,
+              id: 140,
+              label:
+                'TIME_PERIOD_FILTER_SPEC_INVALID: Impossible to apply time dimension filtering',
+            },
+          ],
+        },
+      ],
+    ] as const) {
+      it(`maps ${label} to invalid_period with the contract recovery`, async () => {
+        fetchMock.mockImplementationOnce(async () => jsonReply(body, 400));
+        const result = await runToolContract(eurostatQueryDataset, {
+          dataset_code: 'une_rt_m',
+          filters: DE_UNEMPLOYMENT,
+          since_period: '2020',
+        });
+        expect(result.structuredContent).toMatchObject({
+          error: {
+            code: JsonRpcErrorCode.ValidationError,
+            data: {
+              reason: 'invalid_period',
+              recovery: { hint: expect.stringContaining('YYYY-Qn') },
+            },
+          },
+        });
+        expect(contentText(result as never)).not.toContain('geo_level');
+      });
+    }
+
+    it('declares invalid_period on the contract with the ValidationError code', () => {
+      expect(eurostatQueryDataset.errors).toContainEqual(
+        expect.objectContaining({
+          reason: 'invalid_period',
+          code: JsonRpcErrorCode.ValidationError,
+        }),
+      );
+    });
+  });
+
+  describe('zero-padded period components (#47)', () => {
+    for (const [sent, canonical] of [
+      ['2020-Q01', '2020-Q1'],
+      ['2020-q01', '2020-q1'],
+      ['2020-S01', '2020-S1'],
+      ['2020-W001', '2020-W01'],
+      ['2020-M001', '2020-M01'],
+      ['2026-D1', '2026-D001'],
+      ['2020-A1', '2020'],
+    ] as const) {
+      it(`sends "${sent}" as "${canonical}" on either bound and echoes what was sent`, async () => {
+        fetchMock.mockImplementation(async () =>
+          jsonReply(envelope('une-rt-m-geo-de-xx-since-2024-01')),
+        );
+        const since = await runToolContract(eurostatQueryDataset, {
+          dataset_code: 'une_rt_m',
+          filters: DE_UNEMPLOYMENT,
+          since_period: ` ${sent} `,
+        });
+        const until = await runToolContract(eurostatQueryDataset, {
+          dataset_code: 'une_rt_m',
+          filters: DE_UNEMPLOYMENT,
+          until_period: sent,
+        });
+        expect(
+          new URL(String(fetchMock.mock.calls[0]?.[0])).searchParams.get('sinceTimePeriod'),
+        ).toBe(canonical);
+        expect(
+          new URL(String(fetchMock.mock.calls[1]?.[0])).searchParams.get('untilTimePeriod'),
+        ).toBe(canonical);
+        expect(since.structuredContent).toMatchObject({
+          appliedFilters: { sincePeriod: canonical },
+        });
+        expect(until.structuredContent).toMatchObject({
+          appliedFilters: { untilPeriod: canonical },
+        });
+        expect(contentText(since as never)).toContain(`**Period:** ${canonical} – latest`);
+      });
+    }
+
+    for (const period of ['2020-Q05', '2021-W053', '2020-M013']) {
+      it(`rejects "${period}", whose canonical form is out of range, before any request`, async () => {
+        const result = await runToolContract(eurostatQueryDataset, {
+          dataset_code: 'une_rt_m',
+          since_period: period,
+        });
+        expect(fetchMock).not.toHaveBeenCalled();
+        expect(result.structuredContent).toMatchObject({
+          error: {
+            message: expect.stringContaining(`since_period "${period}"`),
+            data: { reason: 'invalid_period' },
+          },
+        });
+      });
+    }
+  });
+
+  describe('no_results diagnosis from the envelope (#48)', () => {
+    const noResults = async (
+      fixtureName: string,
+      input: Record<string, unknown>,
+    ): Promise<{ data: Record<string, unknown>; message: string; hint: string; text: string }> => {
+      fetchMock.mockImplementationOnce(async () => jsonReply(envelope(fixtureName)));
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'une_rt_m',
+        ...input,
+      } as never);
+      expect(result.isError).toBe(true);
+      const error = (
+        result.structuredContent as {
+          error: { code: number; message: string; data: Record<string, unknown> };
+        }
+      ).error;
+      expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(error.data.reason).toBe('no_results');
+      return {
+        data: error.data,
+        message: error.message,
+        hint: (error.data.recovery as { hint: string }).hint,
+        text: contentText(result as never),
+      };
+    };
+
+    it('names an unmatched geo value and points at eurostat_get_dimension_values for geo', async () => {
+      const { data, message, hint, text } = await noResults('une-rt-m-geo-xx-last1', {
+        filters: { geo: ['XX'] },
+        last_n_periods: 1,
+      });
+      expect(data.unmatchedValues).toEqual({ geo: ['XX'] });
+      expect(data).not.toHaveProperty('matchedPeriods');
+      expect(message).toContain('geo=[XX]');
+      expect(hint).toContain('eurostat_get_dimension_values');
+      expect(hint).toContain('geo');
+      expect(hint).not.toMatch(/last_n_periods counts/);
+      expect(text).toContain('geo=[XX]');
+      expect(text).toContain('eurostat_get_dimension_values');
+    });
+
+    it('names a dropped value beside a valid one and the valueless periods together', async () => {
+      const { data, message, hint } = await noResults('une-rt-m-geo-de-xx-last1', {
+        filters: { ...DE_UNEMPLOYMENT, geo: ['DE', 'XX'] },
+        last_n_periods: 1,
+      });
+      expect(data.unmatchedValues).toEqual({ geo: ['XX'] });
+      expect(data.matchedPeriods).toEqual(['2026-08']);
+      expect(message).toContain('geo=[XX]');
+      expect(message).toContain('2026-08');
+      expect(hint).toContain('eurostat_get_dimension_values');
+      expect(hint).toMatch(/last_n_periods/);
+    });
+
+    it('lists both unmatched dimensions', async () => {
+      const { data, message, hint } = await noResults('une-rt-m-geo-xx-age-zzz-last1', {
+        filters: { geo: ['XX'], age: ['ZZZ'] },
+        last_n_periods: 1,
+      });
+      expect(data.unmatchedValues).toEqual({ geo: ['XX'], age: ['ZZZ'] });
+      expect(message).toContain('geo=[XX]');
+      expect(message).toContain('age=[ZZZ]');
+      expect(hint).toMatch(/geo and age|age and geo/);
+    });
+
+    it('diagnoses an unmatched non-geo code the same way', async () => {
+      const { data, hint } = await noResults('une-rt-m-unit-fake-last1', {
+        filters: { geo: ['DE'], unit: ['QQQ_FAKE'] },
+        last_n_periods: 1,
+      });
+      expect(data.unmatchedValues).toEqual({ unit: ['QQQ_FAKE'] });
+      expect(hint).toContain('unit');
+    });
+
+    it('explains the last_n_periods counting rule when the slice has not published the latest period', async () => {
+      const { data, message, hint } = await noResults('une-rt-m-geo-de-lower-last1', {
+        filters: { ...DE_UNEMPLOYMENT, geo: ['de'] },
+        last_n_periods: 1,
+      });
+      expect(data).not.toHaveProperty('unmatchedValues');
+      expect(data.matchedPeriods).toEqual(['2026-08']);
+      expect(message).toContain('The last period (2026-08) carries no value for this slice');
+      expect(message).toMatch(/counts back from the dataset's latest period/);
+      expect(hint).toMatch(/last_n_periods/);
+      expect(hint).toMatch(/until_period/);
+      expect(hint).not.toContain('eurostat_get_dimension_values');
+    });
+
+    it('says the combination carries no values when no period control was used', async () => {
+      const { data, message, hint } = await noResults('une-rt-m-geo-de-lower-last1', {
+        filters: { ...DE_UNEMPLOYMENT, geo: ['de'] },
+      });
+      expect(data.matchedPeriods).toEqual(['2026-08']);
+      expect(message).toContain('carries no value in the 1 returned period (2026-08)');
+      expect(`${message} ${hint}`).not.toMatch(/last_n_periods counts/);
+    });
+
+    it('names the span of several valueless last_n_periods', async () => {
+      const valueless = { ...envelope('une-rt-m-geo-de-lower-last3'), value: {} };
+      fetchMock.mockImplementationOnce(async () => jsonReply(valueless));
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'une_rt_m',
+        filters: DE_UNEMPLOYMENT,
+        last_n_periods: 3,
+      });
+      const error = (
+        result.structuredContent as { error: { message: string; data: Record<string, unknown> } }
+      ).error;
+      expect(error.data.matchedPeriods).toEqual(['2026-06', '2026-07', '2026-08']);
+      expect(error.data.matchedPeriodCount).toBe(3);
+      expect(error.message).toContain(
+        'None of the last 3 periods (2026-06 – 2026-08) carries a value for this slice',
+      );
+    });
+
+    describe('matchedPeriods cap', () => {
+      /** Consecutive days from 1988-01-01, as a daily dataset's time index spells them. */
+      const days = (count: number): string[] =>
+        Array.from({ length: count }, (_, i) =>
+          new Date(Date.UTC(1988, 0, 1 + i)).toISOString().slice(0, 10),
+        );
+
+      /** The DE unemployment envelope with `count` valueless periods and no period control. */
+      const valuelessOver = async (count: number) => {
+        const base = envelope('une-rt-m-geo-de-lower-last1') as {
+          size: number[];
+          dimension: Record<string, unknown>;
+        };
+        const periods = days(count);
+        const body = {
+          ...base,
+          size: [...base.size.slice(0, -1), count],
+          dimension: {
+            ...base.dimension,
+            time: {
+              label: 'Time',
+              category: {
+                index: Object.fromEntries(periods.map((p, i) => [p, i])),
+                label: Object.fromEntries(periods.map((p) => [p, p])),
+              },
+            },
+          },
+          value: {},
+          status: {},
+        };
+        fetchMock.mockImplementationOnce(async () => jsonReply(body));
+        const result = await runToolContract(eurostatQueryDataset, {
+          dataset_code: 'une_rt_m',
+          filters: DE_UNEMPLOYMENT,
+        });
+        const error = (
+          result.structuredContent as { error: { message: string; data: Record<string, unknown> } }
+        ).error;
+        return { periods, error, bytes: JSON.stringify(result.structuredContent).length };
+      };
+
+      it('lists all 24 periods when there are exactly 24', async () => {
+        const { periods, error } = await valuelessOver(24);
+        expect(error.data.matchedPeriods).toEqual(periods);
+        expect(error.data.matchedPeriodCount).toBe(24);
+        expect(error.message).toContain(`24 returned periods (${periods[0]} – ${periods[23]})`);
+      });
+
+      it('keeps the newest 24 of 25 and names the whole span and count', async () => {
+        const { periods, error } = await valuelessOver(25);
+        expect(error.data.matchedPeriods).toEqual(periods.slice(1));
+        expect(error.data.matchedPeriodCount).toBe(25);
+        expect(error.message).toContain(`25 returned periods (${periods[0]} – ${periods[24]})`);
+      });
+
+      it('bounds a 13,900-period daily index to 24 entries', async () => {
+        const { periods, error, bytes } = await valuelessOver(13_900);
+        expect(error.data.matchedPeriods).toEqual(periods.slice(-24));
+        expect(error.data.matchedPeriodCount).toBe(13_900);
+        expect(error.message).toContain(
+          `13,900 returned periods (${periods[0]} – ${periods[13_899]})`,
+        );
+        expect(bytes).toBeLessThan(3_000);
+      });
+    });
+
+    it('names the dataset latest period for a range past coverage', async () => {
+      fetchMock.mockImplementationOnce(async () =>
+        jsonReply(envelope('nama-10-gdp-de-since-2030')),
+      );
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'nama_10_gdp',
+        filters: { unit: ['CP_MEUR'], na_item: ['B1GQ'], geo: ['DE'] },
+        since_period: '2030',
+      });
+      const error = (
+        result.structuredContent as { error: { message: string; data: Record<string, unknown> } }
+      ).error;
+      expect(error.data).toMatchObject({ reason: 'no_results' });
+      expect(error.data).not.toHaveProperty('matchedPeriods');
+      expect(error.message).toContain('2025');
+      expect((error.data.recovery as { hint: string }).hint).toContain('2025');
+      expect(contentText(result as never)).toContain('2025');
+    });
+
+    it('lists the matched periods of a past range with a coverage hint, never the last_n_periods rule', async () => {
+      fetchMock.mockImplementationOnce(async () =>
+        jsonReply(envelope('nama-10-gdp-de-until-1980')),
+      );
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'nama_10_gdp',
+        filters: { unit: ['CP_MEUR'], na_item: ['B1GQ'], geo: ['DE'] },
+        until_period: '1980',
+      });
+      const error = (
+        result.structuredContent as { error: { message: string; data: Record<string, unknown> } }
+      ).error;
+      expect(error.data.matchedPeriods).toEqual(['1975', '1976', '1977', '1978', '1979', '1980']);
+      expect(error.message).toContain('selects 6 periods (1975 – 1980)');
+      const hint = (error.data.recovery as { hint: string }).hint;
+      expect(hint).toMatch(/coverage/);
+      expect(`${error.message} ${hint}`).not.toMatch(/last_n_periods/);
+    });
+
+    it('still returns the six observations of the all-confidential slice (#36)', async () => {
+      fetchMock.mockImplementationOnce(async () =>
+        jsonReply(envelope('sts-inpr-m-ie-confidential')),
+      );
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'sts_inpr_m',
+        filters: { indic_bt: ['PRD'], nace_r2: ['B'], s_adj: ['CA'], unit: ['I21'], geo: ['IE'] },
+        since_period: '2023-01',
+        until_period: '2023-06',
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({ obsCount: 6, missingObsCount: 6 });
+      expect(result.structuredContent).not.toHaveProperty('unmatchedValues');
+    });
+
+    it('states the last_n_periods counting rule in its description', () => {
+      expect(eurostatQueryDataset.input.shape.last_n_periods.description).toMatch(
+        /counts back from the dataset's latest period/,
+      );
+    });
+  });
+
+  describe('unmatched filter values on a successful query (#52)', () => {
+    it('returns the matched rows and names the dropped value on both surfaces', async () => {
+      fetchMock.mockImplementationOnce(async () =>
+        jsonReply(envelope('une-rt-m-geo-de-xx-since-2024-01')),
+      );
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'une_rt_m',
+        filters: { ...DE_UNEMPLOYMENT, geo: ['DE', 'XX'] },
+        since_period: '2024-01',
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        obsCount: 31,
+        unmatchedValues: { geo: ['XX'] },
+        appliedFilters: { filters: { geo: ['DE', 'XX'] } },
+        notice: expect.stringMatching(/geo=\[XX\].*eurostat_get_dimension_values/),
+      });
+      const text = contentText(result as never);
+      expect(text).toContain('**Unmatched filter values:** geo=[XX]');
+      expect(text).toMatch(/> .*geo=\[XX\]/);
+    });
+
+    it('lists unmatched values in two dimensions', async () => {
+      fetchMock.mockImplementationOnce(async () =>
+        jsonReply(envelope('une-rt-m-geo-de-xx-age-zzz-since-2026-01')),
+      );
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'une_rt_m',
+        filters: { ...DE_UNEMPLOYMENT, geo: ['DE', 'XX'], age: ['TOTAL', 'ZZZ'] },
+        since_period: '2026-01',
+      });
+      expect(result.structuredContent).toMatchObject({
+        obsCount: 7,
+        unmatchedValues: { geo: ['XX'], age: ['ZZZ'] },
+        notice: expect.stringMatching(/geo=\[XX\]; age=\[ZZZ\]/),
+      });
+      expect(contentText(result as never)).toContain('geo=[XX]; age=[ZZZ]');
+    });
+
+    it('diagnoses an unmatched value under an upper-case key as under the lower-case one (#54)', async () => {
+      fetchMock.mockImplementationOnce(async () =>
+        jsonReply(envelope('une-rt-m-geo-de-xx-since-2024-01')),
+      );
+      const { geo: _geo, ...rest } = DE_UNEMPLOYMENT;
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'une_rt_m',
+        filters: { ...rest, GEO: ['DE', 'XX'] },
+        since_period: '2024-01',
+      });
+      expect(result.structuredContent).toMatchObject({
+        obsCount: 31,
+        unmatchedValues: { GEO: ['XX'] },
+        notice: expect.stringMatching(/GEO=\[XX\].*eurostat_get_dimension_values/),
+      });
+    });
+
+    it('composes the unmatched and preview sentences into one notice', async () => {
+      fetchMock.mockImplementationOnce(async () =>
+        jsonReply(envelope('une-rt-m-geo-de-xx-since-2024-01')),
+      );
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'une_rt_m',
+        filters: { ...DE_UNEMPLOYMENT, geo: ['DE', 'XX'] },
+        since_period: '2024-01',
+        preview_limit: 3,
+      });
+      expect(result.structuredContent).toMatchObject({
+        notice: expect.stringMatching(
+          /geo=\[XX\].*eurostat_get_dimension_values.*preview_limit=3 returns the first 3 of 31 matched rows inline/s,
+        ),
+      });
+    });
+
+    it('advertises unmatchedValues as an optional output field', () => {
+      const parsed = eurostatQueryDataset.output.parse({
+        ...mockQueryResult,
+        truncated: false,
+        unmatchedValues: { geo: ['XX'] },
+      });
+      expect(parsed.unmatchedValues).toEqual({ geo: ['XX'] });
+      expect(
+        eurostatQueryDataset.output.parse({ ...mockQueryResult, truncated: false }),
+      ).not.toHaveProperty('unmatchedValues');
+    });
   });
 });

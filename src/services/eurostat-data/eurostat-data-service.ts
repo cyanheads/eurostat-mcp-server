@@ -30,14 +30,80 @@ import {
   type DimensionValuesResult,
   type GeoLevel,
   type JsonStatResponse,
+  type NoResultsDiagnosis,
   OBS_CAP,
   type Observation,
   type ObservationRow,
   type QueryExecution,
+  type UnmatchedValues,
 } from './types.js';
 
 /** Separator between the observation flag and the confidentiality status inside a JSON-stat status. */
 const CONF_SEPARATOR = '|';
+
+/** A Statistics API error label that names one of the two period parameters. */
+const PERIOD_PARAM_LABEL = /'(since|until)TimePeriod'/;
+
+/**
+ * Filter values the reply matched to nothing, compared case-insensitively
+ * against each filtered dimension's `category.index`.
+ *
+ * Eurostat drops an unmatched value from the index rather than failing, and a
+ * dimension keeps `size` ≥ 1 as long as one value beside it matched — so `size`
+ * alone misses `geo=DE,XX`. It also matches codes in any case (`geo=de` comes
+ * back as `DE`), which the comparison mirrors — for the dimension key too, since
+ * `GEO=DE` is answered under `geo`. Values are reported under the key and in the
+ * spelling sent, each once. A filtered dimension the reply does not describe at all
+ * is skipped: there is nothing to compare against, and guessing would invent a
+ * mismatch.
+ */
+export function findUnmatchedValues(
+  sent: Record<string, string[]>,
+  data: JsonStatResponse,
+): UnmatchedValues | undefined {
+  const unmatched: UnmatchedValues = {};
+  for (const [key, values] of Object.entries(sent)) {
+    const dim = data.id?.find((id) => id.toLowerCase() === key.toLowerCase());
+    const index = dim === undefined ? undefined : data.dimension?.[dim]?.category?.index;
+    if (!index) continue;
+    const known = new Set(Object.keys(index).map((code) => code.toLowerCase()));
+    const missing = [...new Set(values)].filter((v) => !known.has(v.toLowerCase()));
+    if (missing.length > 0) unmatched[key] = missing;
+  }
+  return Object.keys(unmatched).length > 0 ? unmatched : undefined;
+}
+
+/**
+ * Read an empty match's envelope for why it is empty, without another request.
+ *
+ * Three signals, which can co-occur: filter values absent from their dimension's
+ * index; a `time` dimension of size 0, meaning the requested range selected no
+ * period of the dataset; and, when every dimension matched at least one value,
+ * the periods the reply selected — none of which carries a value for the slice.
+ */
+function diagnoseEmptyMatch(
+  data: JsonStatResponse,
+  sent: Record<string, string[]>,
+  annotation: (type: string) => string | undefined,
+): NoResultsDiagnosis {
+  const unmatchedValues = findUnmatchedValues(sent, data);
+  const dims = data.id ?? [];
+  const sizes = data.size ?? [];
+  const timeDim = dims.indexOf('time');
+  const diagnosis: NoResultsDiagnosis = { ...(unmatchedValues && { unmatchedValues }) };
+  if (timeDim < 0) return diagnosis;
+
+  if (sizes[timeDim] === 0) {
+    const oldest = annotation('OBS_PERIOD_OVERALL_OLDEST');
+    const latest = annotation('OBS_PERIOD_OVERALL_LATEST');
+    diagnosis.outsideCoverage = { ...(oldest && { oldest }), ...(latest && { latest }) };
+  } else if (sizes.length === dims.length && sizes.every((size) => size >= 1)) {
+    diagnosis.matchedPeriods = Object.entries(data.dimension?.time?.category?.index ?? {})
+      .sort(([, a], [, b]) => a - b)
+      .map(([code]) => code);
+  }
+  return diagnosis;
+}
 
 /**
  * Split a JSON-stat status into its observation flag and its confidentiality status.
@@ -248,6 +314,17 @@ export class EurostatDataService {
           throw validationError(
             `Invalid dimension code. Eurostat error: ${err.label}. Use eurostat_get_dataset_info to see valid dimensions for this dataset.`,
             { reason: 'invalid_dimension', eurostatError: err },
+          );
+        }
+        // Eurostat's own refusal of a period literal: error id 140 for one it cannot parse
+        // as a time filter, or a generic 400 whose label names the period parameter.
+        if (err.id === 140 || PERIOD_PARAM_LABEL.test(err.label)) {
+          throw validationError(
+            `Eurostat rejected the period range. Eurostat error: ${err.label}.`,
+            {
+              reason: 'invalid_period',
+              eurostatError: err,
+            },
           );
         }
         throw validationError(`Bad request. Eurostat error: ${err.label}.`, {
@@ -543,8 +620,8 @@ export class EurostatDataService {
       lastN,
     });
 
-    // Validate mutually exclusive params
-    if (appliedFilters.geo && geoLevel) {
+    // Validate mutually exclusive params. Eurostat reads filter keys in any case, so `GEO` is geo.
+    if (geoLevel && Object.keys(appliedFilters).some((key) => key.toLowerCase() === 'geo')) {
       throw validationError(
         `"geo" filter and "geo_level" cannot be used together. Use one or the other: "geo" for specific country/region codes, "geo_level" for filtering by NUTS hierarchy level.`,
         { reason: 'conflicting_params' },
@@ -581,12 +658,23 @@ export class EurostatDataService {
     // entry, so the whole slice arrives as `"value": {}` while still being data the decoder
     // yields. Deriving both the guard and the reported total from one count is what keeps a
     // rejected query and a returned one from disagreeing about what an observation is.
+    //
+    // The empty reply still says which filter values matched nothing and which periods it
+    // selected, so that diagnosis rides the error for the tool to explain.
     if (obsCount === 0) {
       throw notFound(
         `Query returned no observations for dataset "${datasetCode}". The dimension filter combination may not exist in the data, or the period range may fall outside the dataset's coverage. Verify dimension values with eurostat_get_dimension_values first.`,
-        { reason: 'no_results', datasetCode, filters: appliedFilters },
+        {
+          reason: 'no_results',
+          datasetCode,
+          filters: appliedFilters,
+          ...diagnoseEmptyMatch(data, appliedFilters, (type) =>
+            this.extractAnnotation(data, type, 'title'),
+          ),
+        },
       );
     }
+    const unmatchedValues = findUnmatchedValues(appliedFilters, data);
 
     const observations = this.decodeObservations(data, Math.min(previewLimit, OBS_CAP));
 
@@ -610,6 +698,7 @@ export class EurostatDataService {
       timeRange,
       missingObsCount,
       appliedFilters,
+      ...(unmatchedValues && { unmatchedValues }),
       rows: () => this.iterateRows(data, dimensionsUsed),
     };
   }

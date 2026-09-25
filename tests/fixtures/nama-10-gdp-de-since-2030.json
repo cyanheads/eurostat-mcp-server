@@ -1,0 +1,76 @@
+{
+  "version": "2.0",
+  "class": "dataset",
+  "label": "Gross domestic product (GDP) and main components (output, expenditure and income) - annual data",
+  "source": "ESTAT",
+  "updated": "2026-09-21T23:00:00+0200",
+  "value": {},
+  "id": ["freq", "unit", "na_item", "geo", "time"],
+  "size": [1, 1, 1, 1, 0],
+  "dimension": {
+    "freq": {
+      "label": "Time frequency",
+      "category": { "index": { "A": 0 }, "label": { "A": "Annual" } }
+    },
+    "unit": {
+      "label": "Unit of measure",
+      "category": {
+        "index": { "CP_MEUR": 0 },
+        "label": { "CP_MEUR": "Current prices, million euro" }
+      }
+    },
+    "na_item": {
+      "label": "National accounts indicator (ESA 2010)",
+      "category": {
+        "index": { "B1GQ": 0 },
+        "label": { "B1GQ": "Gross domestic product at market prices" }
+      }
+    },
+    "geo": {
+      "label": "Geopolitical entity (reporting)",
+      "category": { "index": { "DE": 0 }, "label": { "DE": "Germany" } }
+    },
+    "time": { "label": "Time", "category": { "index": {}, "label": {} } }
+  },
+  "extension": {
+    "lang": "EN",
+    "id": "NAMA_10_GDP",
+    "agencyId": "ESTAT",
+    "version": "1.0",
+    "datastructure": { "id": "NAMA_10_GDP", "agencyId": "ESTAT", "version": "138.0" },
+    "annotation": [
+      { "type": "CREATED", "date": "2014-09-04T14:58:03+0200" },
+      {
+        "type": "DISSEMINATION_DOI_XML",
+        "title": "<adms:identifier xmlns:adms=\"http://www.w3.org/ns/adms#\" xmlns:skos=\"http://www.w3.org/2004/02/skos/core.html\" xmlns:dct=\"http://purl.org/dc/terms/\" xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><adms:Identifier rdf:about=\"https://doi.org/10.2908/NAMA_10_GDP\"><skos:notation rdf:datatype=\"http://purl.org/spar/datacite/doi\">10.2908/NAMA_10_GDP</skos:notation><dct:creator rdf:resource=\"http://publications.europa.eu/resource/authority/corporate-body/ESTAT\"/><dct:issued rdf:datatype=\"http://www.w3.org/2001/XMLSchema#date\">2023-01-19</dct:issued></adms:Identifier></adms:identifier>"
+      },
+      { "type": "DISSEMINATION_OBJECT_TYPE", "title": "DATASET" },
+      { "type": "DISSEMINATION_TIMESTAMP_DATA", "date": "2026-09-21T23:00:00+0200" },
+      { "type": "DISSEMINATION_TIMESTAMP_GLOBAL", "date": "2026-09-24T23:00:00+0200" },
+      { "type": "DISSEMINATION_TIMESTAMP_PLANNED", "date": "2026-09-24T23:00:00+0200" },
+      {
+        "type": "ESMS_HTML",
+        "title": "Explanatory texts (metadata)",
+        "href": "https://ec.europa.eu/eurostat/cache/metadata/en/nama_10_gdp_esms.htm"
+      },
+      {
+        "type": "ESMS_SDMX",
+        "title": "Explanatory texts (metadata)",
+        "href": "https://ec.europa.eu/eurostat/api/dissemination/files?file=metadata/nama_10_gdp_esms.sdmx.zip"
+      },
+      {
+        "type": "FOOTNOTE",
+        "title": "Footnote (metadata)",
+        "href": "https://ec.europa.eu/eurostat/cache/metadata/Annexes/nama_10_gdp_esms_an_Gross_domestic_product_(GDP)_a.xlsx"
+      },
+      { "type": "OBS_COUNT", "title": "1098502" },
+      { "type": "OBS_PERIOD_OVERALL_LATEST", "title": "2025" },
+      { "type": "OBS_PERIOD_OVERALL_OLDEST", "title": "1975" },
+      { "type": "SOURCE_INSTITUTIONS", "text": "Eurostat" },
+      { "type": "UPDATE_DATA", "date": "2026-09-21T23:00:00+0200" },
+      { "type": "UPDATE_FOOTNOTES", "date": "2026-09-24T16:00:58Z" },
+      { "type": "UPDATE_STRUCTURE", "date": "2026-09-08T11:00:00+0200" }
+    ],
+    "positions-with-no-data": { "freq": [0], "unit": [0], "na_item": [0], "geo": [0], "time": [] }
+  }
+}

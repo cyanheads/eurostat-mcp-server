@@ -95,6 +95,17 @@ export function classifyXmlBody(xml: string, datasetCode: string): never {
       { reason: 'not_found', datasetCode, faultcode: code },
     );
   }
+  /**
+   * Fault 140 covers two unrelated refusals, told apart only by the fault string:
+   * `TIME_PERIOD_FILTER_SPEC_INVALID` for a period literal the endpoint cannot
+   * parse, `INVALID_QUERY_NB_FILTERS` for a key with the wrong number of positions.
+   */
+  if (code === '140' && detail.includes('TIME_PERIOD_FILTER_SPEC_INVALID')) {
+    throw validationError(
+      `Eurostat rejected the period range for "${datasetCode}". Eurostat fault ${code}: ${detail}`,
+      { reason: 'invalid_period', datasetCode, faultcode: code },
+    );
+  }
   if (code === '140') {
     throw validationError(
       `Eurostat rejected the dimension key: the number of filter positions did not match the dataset's dimensions. Eurostat fault ${code}: ${detail}`,
@@ -178,6 +189,9 @@ export function parseHeader(line: string): TsvHeader {
  * dimension in `dimensionOrder`, filtered or not, and never only for the
  * dimensions the caller named.
  *
+ * A filter key names its dimension in any case (`GEO` places the same as `geo`),
+ * as the Statistics API reads it; keys that differ only in case pool their values.
+ *
  * Returns `undefined` when no filter applies. An all-wildcard key is accepted
  * by Eurostat, but omitting the segment asks the same question without staking
  * the request on this server's copy of the dimension order being current.
@@ -189,7 +203,13 @@ export function buildKeyPath(
   const applied = Object.entries(filters).filter(([, values]) => values.length > 0);
   if (applied.length === 0) return;
 
-  const unknown = applied.map(([dim]) => dim).filter((dim) => !dimensionOrder.includes(dim));
+  const byDimension = new Map<string, string[]>();
+  const unknown: string[] = [];
+  for (const [key, values] of applied) {
+    const dim = dimensionOrder.find((d) => d.toLowerCase() === key.toLowerCase());
+    if (dim === undefined) unknown.push(key);
+    else byDimension.set(dim, [...(byDimension.get(dim) ?? []), ...values]);
+  }
   if (unknown.length > 0) {
     throw validationError(
       `Filter names ${unknown.map((d) => `"${d}"`).join(', ')}, which ${unknown.length === 1 ? 'is not a dimension' : 'are not dimensions'} of this dataset. Filterable dimensions, in key order: ${dimensionOrder.join(', ')}. The time dimension is filtered with since_period/until_period instead.`,
@@ -197,7 +217,7 @@ export function buildKeyPath(
     );
   }
 
-  return dimensionOrder.map((dim) => (filters[dim] ?? []).join('+')).join('.');
+  return dimensionOrder.map((dim) => (byDimension.get(dim) ?? []).join('+')).join('.');
 }
 
 /**

@@ -140,6 +140,31 @@ export interface QueryResult {
   /** Decoded observations — the requested prefix in linear-index order. */
   observations: Observation[];
   timeRange: { start?: string; end?: string };
+  /**
+   * Filter values the reply matched to nothing, keyed by dimension, spelled as sent.
+   * Absent when every value matched.
+   */
+  unmatchedValues?: UnmatchedValues;
+}
+
+/** Filter values that matched nothing, keyed by dimension code, spelled as sent. */
+export type UnmatchedValues = Record<string, string[]>;
+
+/**
+ * What an empty JSON-stat match says about why it is empty, carried on a
+ * `no_results` error's data. The members co-occur — an unmatched value can sit
+ * beside periods that carry no value — and all are absent when the reply says
+ * nothing more than "empty".
+ */
+export interface NoResultsDiagnosis {
+  /** Periods the reply selected, none carrying a value. Set only when every dimension matched. */
+  matchedPeriods?: string[];
+  /**
+   * Set when the requested range selected no period at all: the dataset's overall
+   * coverage from its annotations, each bound absent when Eurostat does not report it.
+   */
+  outsideCoverage?: { oldest?: string; latest?: string };
+  unmatchedValues?: UnmatchedValues;
 }
 
 /**

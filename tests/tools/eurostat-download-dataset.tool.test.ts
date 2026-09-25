@@ -9,7 +9,7 @@
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eurostatDownloadDataset } from '@/mcp-server/tools/definitions/eurostat-download-dataset.tool.js';
 import { setCanvas } from '@/services/canvas-accessor.js';
 import { withRealCanvas } from '../helpers/real-canvas.js';
@@ -25,7 +25,10 @@ vi.mock('@/services/eurostat-data/eurostat-data-service.js', async (importOrigin
   getEurostatDataService: vi.fn(),
 }));
 
-import { getEurostatBulkService } from '@/services/eurostat-bulk/eurostat-bulk-service.js';
+import {
+  EurostatBulkService,
+  getEurostatBulkService,
+} from '@/services/eurostat-bulk/eurostat-bulk-service.js';
 import type { BulkDownload, BulkRow } from '@/services/eurostat-bulk/types.js';
 import { getEurostatDataService } from '@/services/eurostat-data/eurostat-data-service.js';
 
@@ -246,7 +249,7 @@ describe('eurostatDownloadDataset — with a canvas', () => {
     expect(result.periodRange).toEqual({ start: '2022', end: '2024' });
   });
 
-  it('discloses a truncated inline preview on structuredContent and content[]', async () => {
+  it('discloses a short inline preview in the notice and the total, never as truncated (#49)', async () => {
     mockDownload(stubDownload(makeRows(4)));
     setCanvas(undefined);
 
@@ -255,21 +258,38 @@ describe('eurostatDownloadDataset — with a canvas', () => {
       preview_limit: 3,
     });
 
-    expect(result.structuredContent).toMatchObject({ truncated: true, shown: 3, cap: 3 });
-    expect(result.content).toContainEqual(
-      expect.objectContaining({
-        text: expect.stringContaining('**truncated:** true\n**shown:** 3\n**cap:** 3'),
-      }),
+    const structured = result.structuredContent as Record<string, unknown>;
+    expect(structured).not.toHaveProperty('truncated');
+    expect(structured).not.toHaveProperty('shown');
+    expect(structured).not.toHaveProperty('cap');
+    expect(structured).toMatchObject({
+      rowCount: 12,
+      totalCount: 12,
+      budgetExceeded: false,
+      notice: expect.stringContaining(
+        'preview_limit=3 returns the first 3 of 12 downloaded observations inline',
+      ),
+    });
+    const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+    expect(text).not.toMatch(/\*\*(truncated|shown|cap):\*\*/);
+    expect(text).toContain('**12 total**');
+    expect(text).toContain(
+      'preview_limit=3 returns the first 3 of 12 downloaded observations inline',
     );
   });
 
-  it('does not mark a complete inline preview as truncated', async () => {
+  it('adds no preview sentence when the preview holds every row, and still reports the total', async () => {
     mockDownload(stubDownload(makeRows(1)));
-    const ctx = createMockContext({ errors: eurostatDownloadDataset.errors, tenantId: 'default' });
 
-    await eurostatDownloadDataset.handler(parse({ preview_limit: 3 }), ctx);
+    const result = await runToolContract(eurostatDownloadDataset, {
+      dataset_code: 'nama_10_gdp',
+      preview_limit: 3,
+    });
 
-    expect(getEnrichment(ctx).truncated).toBeUndefined();
+    const structured = result.structuredContent as Record<string, unknown>;
+    expect(structured).toMatchObject({ rowCount: 3, totalCount: 3 });
+    expect(structured).not.toHaveProperty('truncated');
+    expect(structured.notice).not.toContain('preview_limit');
   });
 
   it('surfaces a budget-truncated download as a flag plus a notice naming the knob', async () => {
@@ -295,19 +315,30 @@ describe('eurostatDownloadDataset — with a canvas', () => {
     expect(result.structuredContent).toMatchObject({
       budgetExceeded: true,
       rowCount: 15,
-      truncated: true,
-      shown: 3,
-      cap: 3,
+      totalCount: 15,
       notice: expect.stringMatching(
-        /byte budget.*eurostat_dataframe_describe.*eurostat_dataframe_query/is,
+        /byte budget.*preview_limit=3 returns the first 3 of 15 downloaded observations inline.*eurostat_dataframe_describe.*eurostat_dataframe_query/is,
       ),
     });
+    expect(result.structuredContent).not.toHaveProperty('truncated');
     const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
-    expect(text).toContain('**truncated:** true');
-    expect(text).toContain('**shown:** 3');
-    expect(text).toContain('**cap:** 3');
+    expect(text).not.toContain('**truncated:**');
+    expect(text).toContain('**15 total**');
     expect(text).toContain('EUROSTAT_BULK_MAX_BYTES');
-    expect(text).toMatch(/eurostat_dataframe_describe.*eurostat_dataframe_query/is);
+    expect(text).toMatch(
+      /byte budget.*preview_limit=3 returns the first 3 of 15.*eurostat_dataframe_describe.*eurostat_dataframe_query/is,
+    );
+  });
+
+  it('keeps the no-canvas sentence after the budget and preview sentences', async () => {
+    setCanvas(undefined);
+    mockDownload(stubDownload(makeRows(5), { budgetExceeded: true, bytesRead: 52_428_912 }));
+    const ctx = createMockContext({ errors: eurostatDownloadDataset.errors, tenantId: 'default' });
+    await eurostatDownloadDataset.handler(parse({ preview_limit: 3 }), ctx);
+    expect(getEnrichment(ctx).notice).toMatch(
+      /^The byte budget stopped.*preview_limit=3 returns the first 3 of 15 downloaded observations inline.*without a dataframe canvas.*other 12 were counted and discarded/s,
+    );
+    expect(getEnrichment(ctx).totalCount).toBe(15);
   });
 
   it('reports a gzip-compressed body as compressed', async () => {
@@ -431,6 +462,41 @@ describe('eurostatDownloadDataset — without a canvas', () => {
     expect(getEnrichment(ctx).notice as string).toContain('26');
   });
 
+  /**
+   * The no-canvas sentence must not send the caller to a narrower query when the rows
+   * already fit inline: either they all came back, or preview_limit can reach them.
+   */
+  it('says every row came back when the preview holds the whole download', async () => {
+    mockDownload(stubDownload(makeRows(2)));
+    const ctx = createMockContext({ errors: eurostatDownloadDataset.errors, tenantId: 'default' });
+    await eurostatDownloadDataset.handler(parse({ preview_limit: 6 }), ctx);
+    expect(getEnrichment(ctx).notice).toBe(
+      'This deployment runs without a dataframe canvas, so nothing was staged; all 6 downloaded observations are returned inline.',
+    );
+  });
+
+  it('points at preview_limit rather than a narrower query when the download fits under its maximum', async () => {
+    mockDownload(stubDownload(makeRows(10)));
+    const ctx = createMockContext({ errors: eurostatDownloadDataset.errors, tenantId: 'default' });
+    await eurostatDownloadDataset.handler(parse({ preview_limit: 4 }), ctx);
+    const notice = getEnrichment(ctx).notice as string;
+    expect(notice).toContain(
+      'only the 4 observations returned inline are retained, and the other 26 were counted and discarded. Raise preview_limit to 30 to return every one inline, or set CANVAS_PROVIDER_TYPE=duckdb to keep the download.',
+    );
+    expect(notice).not.toContain('small enough to return whole');
+  });
+
+  it('suggests a narrower query only when the download exceeds what preview_limit can return', async () => {
+    mockDownload(stubDownload(makeRows(200)));
+    const ctx = createMockContext({ errors: eurostatDownloadDataset.errors, tenantId: 'default' });
+    await eurostatDownloadDataset.handler(parse({}), ctx);
+    const notice = getEnrichment(ctx).notice as string;
+    expect(notice).toContain(
+      'only the 50 observations returned inline are retained, and the other 550 were counted and discarded. Set CANVAS_PROVIDER_TYPE=duckdb to keep the download, or use eurostat_query_dataset with dimension filters to fetch a slice small enough to return whole.',
+    );
+    expect(notice).not.toContain('Raise preview_limit');
+  });
+
   it('carries both the budget notice and the no-canvas notice when both apply', async () => {
     mockDownload(stubDownload(makeRows(10), { budgetExceeded: true }));
     const ctx = createMockContext({ errors: eurostatDownloadDataset.errors, tenantId: 'default' });
@@ -468,6 +534,7 @@ describe('eurostatDownloadDataset — error contract', () => {
     ['not_found', 'not_found', JsonRpcErrorCode.NotFound],
     ['invalid_dimension', 'invalid_dimension', JsonRpcErrorCode.ValidationError],
     ['filter_arity', 'filter_arity', JsonRpcErrorCode.ValidationError],
+    ['invalid_period', 'invalid_period', JsonRpcErrorCode.ValidationError],
     ['async_queued', 'async_queued', JsonRpcErrorCode.ServiceUnavailable],
     ['upstream_fault', 'upstream_fault', JsonRpcErrorCode.ServiceUnavailable],
   ];
@@ -586,6 +653,362 @@ describe('eurostatDownloadDataset — format()', () => {
   it('names an unreported period range instead of rendering a blank', () => {
     const text = renderedText({ ...result, periodRange: {} });
     expect(text).toContain('not reported by Eurostat');
+  });
+});
+
+describe('eurostatDownloadDataset — notice text when the preview holds every row', () => {
+  let canvas: DataCanvas;
+  let teardown: () => Promise<void>;
+
+  beforeAll(() => {
+    ({ canvas, teardown } = withRealCanvas());
+  });
+  afterAll(async () => {
+    await teardown();
+  });
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const BUDGET_TEXT =
+    'The byte budget stopped this transfer after 52,428,912 bytes, so these 6 observations are the start of "nama_10_gdp" and not all of it. Add dimension filters or a since_period/until_period range to fit the dataset inside the budget, or raise EUROSTAT_BULK_MAX_BYTES.';
+
+  it('carries the staged sentence alone for a complete download', async () => {
+    setCanvas(canvas);
+    mockDownload(stubDownload(makeRows(2)));
+    const ctx = createMockContext({ errors: eurostatDownloadDataset.errors, tenantId: 'default' });
+    const result = await eurostatDownloadDataset.handler(parse({ preview_limit: 6 }), ctx);
+    expect(getEnrichment(ctx).notice).toBe(
+      `All 6 downloaded observations are staged as table "${result.tableName}" on canvas "${result.canvasId}". Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query.`,
+    );
+  });
+
+  it('puts the budget sentence ahead of the staged sentence', async () => {
+    setCanvas(canvas);
+    mockDownload(stubDownload(makeRows(2), { budgetExceeded: true, bytesRead: 52_428_912 }));
+    const ctx = createMockContext({ errors: eurostatDownloadDataset.errors, tenantId: 'default' });
+    const result = await eurostatDownloadDataset.handler(parse({ preview_limit: 6 }), ctx);
+    expect(getEnrichment(ctx).notice).toBe(
+      `${BUDGET_TEXT} All 6 downloaded observations are staged as table "${result.tableName}" on canvas "${result.canvasId}". Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query.`,
+    );
+  });
+
+  it('puts the budget sentence ahead of the no-canvas sentence', async () => {
+    setCanvas(undefined);
+    mockDownload(stubDownload(makeRows(2), { budgetExceeded: true, bytesRead: 52_428_912 }));
+    const ctx = createMockContext({ errors: eurostatDownloadDataset.errors, tenantId: 'default' });
+    await eurostatDownloadDataset.handler(parse({ preview_limit: 6 }), ctx);
+    expect(getEnrichment(ctx).notice).toBe(
+      `${BUDGET_TEXT} This deployment runs without a dataframe canvas, so nothing was staged; all 6 downloaded observations are returned inline.`,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Period inputs and SDMX faults on the real bulk service — fetch is stubbed, so the
+// request builder, the fault classifier, and the tool's contract mapping all run.
+// ---------------------------------------------------------------------------
+
+/** A two-period `une_rt_m` slice as the SDMX TSV endpoint serves it. */
+const UNE_TSV =
+  'freq,s_adj,age,unit,sex,geo\\TIME_PERIOD\t2026-06 \t2026-07 \r\n' +
+  'M,SA,TOTAL,PC_ACT,T,DE\t3.8 \t3.9 \r\n';
+
+const soapFault = (code: string, text: string): string =>
+  `<?xml version="1.0" encoding="UTF-8"?><S:Fault xmlns:S="http://schemas.xmlsoap.org/soap/envelope/"><faultcode>${code}</faultcode><faultstring>${text}</faultstring></S:Fault>`;
+
+/** Any fetch a test did not arrange fails loudly instead of returning undefined. */
+const unmockedFetch = async (input: unknown): Promise<Response> => {
+  throw new Error(`Unmocked fetch: ${String(input)}`);
+};
+
+describe('eurostatDownloadDataset — period inputs and SDMX faults (real bulk service)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(getEurostatBulkService).mockReturnValue(
+      new EurostatBulkService({} as never, {} as never),
+    );
+    setCanvas(undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const tsvReply = () => new Response(UNE_TSV, { status: 200 });
+  const requestedUrl = (call = 0): URL => new URL(String(fetchMock.mock.calls[call]?.[0]));
+
+  for (const [label, sent, expected] of [
+    ['an empty string', '', null],
+    ['a whitespace-only string', '   ', null],
+    ['a padded year', '  2020  ', '2020'],
+  ] as const) {
+    it(`sends ${label} as ${expected === null ? 'no bound' : `"${expected}"`}`, async () => {
+      fetchMock.mockImplementationOnce(async () => tsvReply());
+      await runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'une_rt_m',
+        since_period: sent,
+        until_period: sent,
+      });
+      expect(requestedUrl().searchParams.get('startPeriod')).toBe(expected);
+      expect(requestedUrl().searchParams.get('endPeriod')).toBe(expected);
+    });
+  }
+
+  for (const period of [
+    '2020',
+    '2020-01',
+    '2020-01-15',
+    '2020-Q1',
+    '2020-q1',
+    '2020-s1',
+    '2020-W1',
+    '2020-w01',
+    '2020-W53',
+    '2020-M01',
+    '2020-M1',
+    '2020-m01',
+    '2024-02-29',
+    '2020-T1',
+    '2026-D001',
+    '2024-D366',
+  ]) {
+    it(`passes "${period}" through on either bound`, async () => {
+      fetchMock.mockImplementation(async () => tsvReply());
+      await runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'une_rt_m',
+        since_period: period,
+      });
+      await runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'une_rt_m',
+        until_period: period,
+      });
+      expect(requestedUrl(0).searchParams.get('startPeriod')).toBe(period);
+      expect(requestedUrl(1).searchParams.get('endPeriod')).toBe(period);
+    });
+  }
+
+  describe('malformed period bounds (#47)', () => {
+    const REJECTED = [
+      '2020-13',
+      '2020-00',
+      '2020-Q5',
+      '2020-Q9',
+      '2020-S3',
+      '2020-W54',
+      '2021-W53',
+      '2026-02-30',
+      '2020-1',
+      '2020Q1',
+      '202001',
+      'banana',
+      '2020-Q05',
+      '2021-W053',
+    ];
+    for (const period of REJECTED) {
+      for (const bound of ['since_period', 'until_period'] as const) {
+        it(`rejects ${bound} "${period}" as invalid_period before any request`, async () => {
+          const result = await runToolContract(eurostatDownloadDataset, {
+            dataset_code: 'une_rt_m',
+            [bound]: period,
+          });
+          expect(fetchMock).not.toHaveBeenCalled();
+          expect(result.structuredContent).toMatchObject({
+            error: {
+              code: JsonRpcErrorCode.ValidationError,
+              message: expect.stringContaining(`${bound} "${period}"`),
+              data: {
+                reason: 'invalid_period',
+                recovery: { hint: expect.stringMatching(/YYYY-MM-DD.*YYYY-Qn.*YYYY-Wnn/) },
+              },
+            },
+          });
+          const text = result.content
+            .map((block) => ('text' in block ? block.text : ''))
+            .join('\n');
+          expect(text).toMatch(/Recovery:.*YYYY-Qn/s);
+        });
+      }
+    }
+
+    for (const [sent, canonical] of [
+      ['2020-Q01', '2020-Q1'],
+      ['2020-q01', '2020-q1'],
+      ['2020-S01', '2020-S1'],
+      ['2020-W001', '2020-W01'],
+      ['2020-M001', '2020-M01'],
+      ['2026-D1', '2026-D001'],
+      ['2020-A1', '2020'],
+    ] as const) {
+      it(`sends the zero-padded "${sent}" as "${canonical}" on either bound and echoes it`, async () => {
+        fetchMock.mockImplementation(async () => tsvReply());
+        const since = await runToolContract(eurostatDownloadDataset, {
+          dataset_code: 'une_rt_m',
+          since_period: sent,
+        });
+        const until = await runToolContract(eurostatDownloadDataset, {
+          dataset_code: 'une_rt_m',
+          until_period: ` ${sent} `,
+        });
+        expect(requestedUrl(0).searchParams.get('startPeriod')).toBe(canonical);
+        expect(requestedUrl(1).searchParams.get('endPeriod')).toBe(canonical);
+        expect(since.structuredContent).toMatchObject({
+          appliedQuery: { sincePeriod: canonical },
+        });
+        expect(until.structuredContent).toMatchObject({
+          appliedQuery: { untilPeriod: canonical },
+        });
+      });
+    }
+
+    it('rejects a bad period before the dimension-order lookup a filtered download makes', async () => {
+      const getDimensionOrder = vi.fn();
+      vi.mocked(getEurostatDataService).mockReturnValue({ getDimensionOrder } as never);
+      const result = await runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'une_rt_m',
+        filters: { geo: ['DE'] },
+        since_period: '2020-13',
+      });
+      expect(getDimensionOrder).not.toHaveBeenCalled();
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'invalid_period' } },
+      });
+    });
+
+    it('rejects an inverted range before any request, naming both bounds (#53)', async () => {
+      const getDimensionOrder = vi.fn();
+      vi.mocked(getEurostatDataService).mockReturnValue({ getDimensionOrder } as never);
+      const result = await runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'une_rt_m',
+        filters: { geo: ['DE'] },
+        since_period: '2024-01',
+        until_period: '2020-01',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(getDimensionOrder).not.toHaveBeenCalled();
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          message:
+            'since_period "2024-01" starts after until_period "2020-01" ends, so the range holds no period.',
+          data: { reason: 'invalid_period' },
+        },
+      });
+    });
+
+    it('sends a cross-frequency range that holds periods (#53)', async () => {
+      fetchMock.mockImplementationOnce(async () => tsvReply());
+      await runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'une_rt_m',
+        since_period: '2020-06',
+        until_period: '2020',
+      });
+      expect(requestedUrl().searchParams.get('startPeriod')).toBe('2020-06');
+      expect(requestedUrl().searchParams.get('endPeriod')).toBe('2020');
+    });
+
+    it('builds the same key for an upper-case filter key as for its lower-case form (#54)', async () => {
+      vi.mocked(getEurostatDataService).mockReturnValue({
+        getDimensionOrder: vi
+          .fn()
+          .mockResolvedValue(['freq', 's_adj', 'age', 'unit', 'sex', 'geo']),
+      } as never);
+      fetchMock.mockImplementation(async () => tsvReply());
+      const upper = await runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'une_rt_m',
+        filters: { GEO: ['DE'], Unit: ['PC_ACT'] },
+      });
+      await runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'une_rt_m',
+        filters: { geo: ['DE'], unit: ['PC_ACT'] },
+      });
+      expect(upper.isError).not.toBe(true);
+      expect(requestedUrl(0).pathname).toBe(requestedUrl(1).pathname);
+      expect(requestedUrl(0).pathname).toMatch(/\/une_rt_m\/\.\.\.PC_ACT\.\.DE$/);
+    });
+
+    it('maps fault 140 TIME_PERIOD_FILTER_SPEC_INVALID to invalid_period, not filter_arity', async () => {
+      fetchMock.mockImplementationOnce(
+        async () =>
+          new Response(
+            soapFault(
+              '140',
+              'TIME_PERIOD_FILTER_SPEC_INVALID: Impossible to apply time dimension filtering',
+            ),
+            { status: 400 },
+          ),
+      );
+      const result = await runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'une_rt_m',
+        since_period: '2020',
+      });
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          data: {
+            reason: 'invalid_period',
+            recovery: { hint: expect.stringContaining('YYYY-Qn') },
+          },
+        },
+      });
+      const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+      expect(text).not.toMatch(/filter positions/);
+    });
+
+    it('names the period range in the no_results hint for an empty table', async () => {
+      fetchMock.mockImplementationOnce(
+        async () =>
+          new Response('freq,unit,na_item,geo\\TIME_PERIOD\t1975 \t1976 \r\n', { status: 200 }),
+      );
+      const result = await runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'nama_10_gdp',
+        until_period: '1980',
+      });
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.NotFound,
+          data: {
+            reason: 'no_results',
+            recovery: {
+              hint: expect.stringMatching(/eurostat_get_dimension_values.*until_period "1980"/s),
+            },
+          },
+        },
+      });
+    });
+
+    it('keeps the no_results hint about filter values when no range was given', async () => {
+      fetchMock.mockImplementationOnce(
+        async () =>
+          new Response('freq,unit,na_item,geo\\TIME_PERIOD\t1975 \t1976 \r\n', { status: 200 }),
+      );
+      const result = await runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'nama_10_gdp',
+      });
+      const hint = (result.structuredContent as { error: { data: { recovery: { hint: string } } } })
+        .error.data.recovery.hint;
+      expect(hint).toContain('eurostat_get_dimension_values');
+      expect(hint).not.toMatch(/since_period "|until_period "/);
+    });
+  });
+
+  it('maps fault 140 INVALID_QUERY_NB_FILTERS to filter_arity', async () => {
+    fetchMock.mockImplementationOnce(
+      async () =>
+        new Response(soapFault('140', 'INVALID_QUERY_NB_FILTERS: Incorrect number of filters'), {
+          status: 400,
+        }),
+    );
+    const result = await runToolContract(eurostatDownloadDataset, { dataset_code: 'une_rt_m' });
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'filter_arity', recovery: { hint: expect.stringContaining('une_rt_m') } },
+      },
+    });
   });
 });
 

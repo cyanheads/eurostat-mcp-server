@@ -19,7 +19,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@cyanheads/mcp-ts-core/utils', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@cyanheads/mcp-ts-core/utils')>()),
-  fetchWithTimeout: vi.fn(),
+  // A request no test arranged fails loudly instead of resolving to undefined.
+  fetchWithTimeout: vi.fn(async (url: unknown) => {
+    throw new Error(`Unmocked fetchWithTimeout: ${String(url)}`);
+  }),
 }));
 
 import { fetchWithTimeout } from '@cyanheads/mcp-ts-core/utils';
@@ -59,6 +62,9 @@ const FAULT_100 =
   '<?xml version="1.0" encoding="UTF-8"?><S:Fault xmlns:S="http://schemas.xmlsoap.org/soap/envelope/"><faultcode>100</faultcode><faultstring>ERR_NOT_FOUND_2: DATA_SET:NO_SUCH is not available for dissemination.</faultstring></S:Fault>';
 const FAULT_140 =
   '<?xml version="1.0" encoding="UTF-8"?><S:Fault xmlns:S="http://schemas.xmlsoap.org/soap/envelope/"><faultcode>140</faultcode><faultstring>INVALID_QUERY_NB_FILTERS: Incorrect number of filters</faultstring></S:Fault>';
+/** Fault 140 again, but for a period literal the endpoint cannot parse (`startPeriod=banana`). */
+const FAULT_140_PERIOD =
+  '<?xml version="1.0" encoding="UTF-8"?><S:Fault xmlns:S="http://schemas.xmlsoap.org/soap/envelope/"><faultcode>140</faultcode><faultstring>TIME_PERIOD_FILTER_SPEC_INVALID: Impossible to apply time dimension filtering</faultstring></S:Fault>';
 const FAULT_150 =
   '<?xml version="1.0" encoding="UTF-8"?><S:Fault xmlns:S="http://schemas.xmlsoap.org/soap/envelope/"><faultcode>150</faultcode><faultstring>INVALID_QUERY_DIMENSION_VALUE: Query is invalid as per its structure&apos;s definition. The following values for dimension are not allowed: UNIT=NOTAUNIT.</faultstring></S:Fault>';
 const FAULT_UNKNOWN =
@@ -199,6 +205,14 @@ describe('buildKeyPath', () => {
     }
   });
 
+  it('places an upper-case filter key the same as its lower-case form (#54)', () => {
+    expect(buildKeyPath(order, { GEO: ['AT'], Na_Item: ['B1G'] })).toBe('..B1G.AT');
+  });
+
+  it('merges the values of two keys that differ only in case', () => {
+    expect(buildKeyPath(order, { geo: ['AT'], GEO: ['DE'] })).toBe('...AT+DE');
+  });
+
   it('omits the key segment entirely when nothing is filtered', () => {
     expect(buildKeyPath(order, {})).toBeUndefined();
     expect(buildKeyPath(order, { geo: [] })).toBeUndefined();
@@ -231,12 +245,26 @@ describe('classifyXmlBody', () => {
     }
   });
 
-  it('maps faultcode 140 to filter_arity', () => {
+  it('maps faultcode 140 INVALID_QUERY_NB_FILTERS to filter_arity', () => {
     try {
       classifyXmlBody(FAULT_140, 'nama_10_gdp');
       expect.unreachable('expected a throw');
     } catch (err) {
+      expect((err as McpError).code).toBe(JsonRpcErrorCode.ValidationError);
       expect((err as McpError).data).toMatchObject({ reason: 'filter_arity', faultcode: '140' });
+      expect((err as Error).message).toContain('INVALID_QUERY_NB_FILTERS');
+    }
+  });
+
+  it('maps faultcode 140 TIME_PERIOD_FILTER_SPEC_INVALID to invalid_period, not filter_arity', () => {
+    try {
+      classifyXmlBody(FAULT_140_PERIOD, 'nama_10_gdp');
+      expect.unreachable('expected a throw');
+    } catch (err) {
+      expect((err as McpError).code).toBe(JsonRpcErrorCode.ValidationError);
+      expect((err as McpError).data).toMatchObject({ reason: 'invalid_period', faultcode: '140' });
+      expect((err as Error).message).toContain('TIME_PERIOD_FILTER_SPEC_INVALID');
+      expect((err as Error).message).not.toMatch(/number of filter positions/);
     }
   });
 
@@ -611,6 +639,18 @@ describe('EurostatBulkService — streaming', () => {
       );
       await expect(drain(svc, 'no_such')).rejects.toMatchObject({
         data: { reason: 'not_found', faultcode: '100' },
+      });
+    });
+
+    it('classifies a period fault 140 carried on the thrown 400 body as invalid_period', async () => {
+      vi.mocked(fetchWithTimeout).mockRejectedValue(
+        new McpError(JsonRpcErrorCode.InvalidRequest, 'HTTP 400', {
+          body: FAULT_140_PERIOD,
+          status: 400,
+        }),
+      );
+      await expect(drain(svc)).rejects.toMatchObject({
+        data: { reason: 'invalid_period', faultcode: '140' },
       });
     });
 

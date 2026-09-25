@@ -1,6 +1,6 @@
 # eurostat-mcp-server - Directory Structure
 
-Generated on: 2026-09-22 04:59:54
+Generated on: 2026-09-25 10:53:25
 
 ```text
 eurostat-mcp-server/
@@ -169,13 +169,24 @@ eurostat-mcp-server/
 │   │   │   ├── sdmx-metadata.ts
 │   │   │   └── types.ts
 │   │   ├── canvas-accessor.ts
-│   │   └── eurostat-codelists.ts
+│   │   ├── eurostat-codelists.ts
+│   │   └── eurostat-periods.ts
 │   └── index.ts
 ├── tests/
 │   ├── fixtures/
 │   │   ├── eurostat-sdmx-metadata.ts
+│   │   ├── nama-10-gdp-de-since-2030.json
+│   │   ├── nama-10-gdp-de-until-1980.json
 │   │   ├── sts-inpr-m-ie-confidential.json
-│   │   └── sts-inpr-m-ie-empty.json
+│   │   ├── sts-inpr-m-ie-empty.json
+│   │   ├── une-rt-m-geo-de-lower-last1.json
+│   │   ├── une-rt-m-geo-de-lower-last3.json
+│   │   ├── une-rt-m-geo-de-xx-age-zzz-since-2026-01.json
+│   │   ├── une-rt-m-geo-de-xx-last1.json
+│   │   ├── une-rt-m-geo-de-xx-since-2024-01.json
+│   │   ├── une-rt-m-geo-xx-age-zzz-last1.json
+│   │   ├── une-rt-m-geo-xx-last1.json
+│   │   └── une-rt-m-unit-fake-last1.json
 │   ├── helpers/
 │   │   └── real-canvas.ts
 │   ├── integration/
@@ -188,6 +199,7 @@ eurostat-mcp-server/
 │   │   ├── eurostat-bulk-service.test.ts
 │   │   ├── eurostat-catalogue-service.test.ts
 │   │   ├── eurostat-data-service.test.ts
+│   │   ├── eurostat-periods.test.ts
 │   │   └── eurostat-sdmx-metadata.test.ts
 │   └── tools/
 │       ├── eurostat-browse-themes.tool.test.ts

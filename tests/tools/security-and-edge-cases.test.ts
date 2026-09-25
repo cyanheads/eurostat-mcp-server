@@ -437,18 +437,26 @@ describe('Injection resistance', () => {
       });
     }
 
-    it('survives injection in since_period and until_period', async () => {
-      const ctx = createMockContext({
-        errors: eurostatDownloadDataset.errors,
-        tenantId: 'default',
+    for (const [bound, injection] of [
+      ['since_period', "'; DROP TABLE; --"],
+      ['until_period', '../../../etc/passwd'],
+    ] as const) {
+      it(`rejects injection in ${bound} as invalid_period before any request`, async () => {
+        const ctx = createMockContext({
+          errors: eurostatDownloadDataset.errors,
+          tenantId: 'default',
+        });
+        const input = eurostatDownloadDataset.input.parse({
+          dataset_code: 'nama_10_gdp',
+          [bound]: injection,
+        });
+        await expect(eurostatDownloadDataset.handler(input, ctx)).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          data: { reason: 'invalid_period' },
+        });
+        expect(vi.mocked(getEurostatBulkService)().startDownload).not.toHaveBeenCalled();
       });
-      const input = eurostatDownloadDataset.input.parse({
-        dataset_code: 'nama_10_gdp',
-        since_period: "'; DROP TABLE; --",
-        until_period: '../../../etc/passwd',
-      });
-      await expect(eurostatDownloadDataset.handler(input, ctx)).resolves.toBeDefined();
-    });
+    }
 
     it('rejects a filter naming an unknown dimension rather than sending a wrong-arity key', async () => {
       vi.mocked(getEurostatBulkService).mockReturnValue({
@@ -577,7 +585,7 @@ describe('Oversized inputs', () => {
     expect(Object.keys(input.filters)).toHaveLength(1_001);
   });
 
-  it('download: oversized period strings are accepted by the schema and trimmed by the handler', async () => {
+  it('download: oversized period strings pass the schema and are rejected by the handler after trimming', async () => {
     vi.mocked(getEurostatBulkService).mockReturnValue({
       startDownload: vi.fn().mockImplementation(async () => minimalDownload()),
     } as never);
@@ -588,15 +596,35 @@ describe('Oversized inputs', () => {
       dataset_code: 'nama_10_gdp',
       since_period: `  ${'9'.repeat(5_000)}  `,
     });
-    await eurostatDownloadDataset.handler(input, ctx);
-    expect(startDownload).toHaveBeenCalledWith(
-      'nama_10_gdp',
-      [],
-      {},
-      '9'.repeat(5_000),
-      undefined,
-      expect.anything(),
-    );
+    expect(input.since_period).toHaveLength(5_004);
+    let err: unknown;
+    try {
+      await eurostatDownloadDataset.handler(input, ctx);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_period' },
+    });
+    // The message names the offending value without echoing all 5,000 characters of it.
+    expect((err as Error).message.length).toBeLessThan(200);
+    expect(startDownload).not.toHaveBeenCalled();
+  });
+
+  it('query: oversized period strings pass the schema and are rejected by the handler after trimming', async () => {
+    const queryDataset = vi.fn();
+    vi.mocked(getEurostatDataService).mockReturnValue({ queryDataset } as never);
+    const ctx = createMockContext({ errors: eurostatQueryDataset.errors });
+    const input = eurostatQueryDataset.input.parse({
+      dataset_code: 'nama_10_gdp',
+      until_period: `  ${'9'.repeat(5_000)}  `,
+    });
+    await expect(eurostatQueryDataset.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_period' },
+    });
+    expect(queryDataset).not.toHaveBeenCalled();
   });
 });
 

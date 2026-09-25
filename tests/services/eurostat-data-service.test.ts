@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseCell } from '@/services/eurostat-bulk/eurostat-bulk-service.js';
 import {
   EurostatDataService,
+  findUnmatchedValues,
   getEurostatDataService,
   initEurostatDataService,
   observationRowSchema,
@@ -392,14 +393,20 @@ describe('EurostatDataService — checkResponseErrors', () => {
     ).toThrow();
   });
 
-  it('async_response error carries reason in data', () => {
-    const data: JsonStatResponse = { warning: { status: 413, label: 'Too large' } };
+  /** The error `checkResponseErrors` throws for `data`; fails the test when it throws nothing. */
+  const thrownFor = (data: JsonStatResponse): McpError => {
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (svc as any).checkResponseErrors(data, 'https://example.com');
     } catch (err) {
-      expect((err as McpError).data).toMatchObject({ reason: 'async_response' });
+      return err as McpError;
     }
+    return expect.unreachable('expected checkResponseErrors to throw');
+  };
+
+  it('async_response error carries reason in data', () => {
+    const data: JsonStatResponse = { warning: { status: 413, label: 'Too large' } };
+    expect(thrownFor(data).data).toMatchObject({ reason: 'async_response' });
   });
 
   it('throws not_found on error id 100 (dataset not found)', () => {
@@ -446,24 +453,14 @@ describe('EurostatDataService — checkResponseErrors', () => {
     const data: JsonStatResponse = {
       error: [{ status: 400, id: 150, label: 'Invalid dimension' }],
     };
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (svc as any).checkResponseErrors(data, 'https://example.com');
-    } catch (err) {
-      expect((err as McpError).data).toMatchObject({ reason: 'invalid_dimension' });
-    }
+    expect(thrownFor(data).data).toMatchObject({ reason: 'invalid_dimension' });
   });
 
   it('throws conflicting_params on 400 without id 150', () => {
     const data: JsonStatResponse = {
       error: [{ status: 400, id: 999, label: 'Bad request' }],
     };
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (svc as any).checkResponseErrors(data, 'https://example.com');
-    } catch (err) {
-      expect((err as McpError).data).toMatchObject({ reason: 'conflicting_params' });
-    }
+    expect(thrownFor(data).data).toMatchObject({ reason: 'conflicting_params' });
   });
 
   it('throws serviceUnavailable for non-400/404 API errors', () => {
@@ -548,6 +545,10 @@ describe('getEurostatDataService', () => {
 // getDimensionValues — param building (fetch-stubbed, exercises the real HTTP path)
 // ---------------------------------------------------------------------------
 
+/** Default fetch stub: a request no test arranged fails loudly instead of returning undefined. */
+async function unmockedFetch(input: unknown): Promise<Response> {
+  throw new Error(`Unmocked fetch: ${String(input)}`);
+}
 /** A 200 JSON-stat Response. */
 function okResponse(body: object): Response {
   return new Response(JSON.stringify(body), {
@@ -724,7 +725,7 @@ describe('EurostatDataService — dataset-scoped SDMX metadata (#44)', () => {
 describe('EurostatDataService — getDimensionValues param building', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
   beforeEach(() => {
-    fetchMock = vi.fn();
+    fetchMock = vi.fn(unmockedFetch);
     vi.stubGlobal('fetch', fetchMock);
   });
   afterEach(() => {
@@ -809,7 +810,7 @@ describe('EurostatDataService — getDimensionValues param building', () => {
 describe('EurostatDataService — getDatasetInfo time coverage', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
   beforeEach(() => {
-    fetchMock = vi.fn();
+    fetchMock = vi.fn(unmockedFetch);
     vi.stubGlobal('fetch', fetchMock);
   });
   afterEach(() => {
@@ -854,7 +855,7 @@ describe('EurostatDataService — getDatasetInfo time coverage', () => {
 describe('EurostatDataService — queryDataset filter normalization', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
   beforeEach(() => {
-    fetchMock = vi.fn();
+    fetchMock = vi.fn(unmockedFetch);
     vi.stubGlobal('fetch', fetchMock);
   });
   afterEach(() => {
@@ -917,7 +918,7 @@ describe('EurostatDataService — queryDataset filter normalization', () => {
 describe('EurostatDataService — queryDataset time coverage', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
   beforeEach(() => {
-    fetchMock = vi.fn();
+    fetchMock = vi.fn(unmockedFetch);
     vi.stubGlobal('fetch', fetchMock);
   });
   afterEach(() => {
@@ -1009,7 +1010,7 @@ describe('EurostatDataService — queryDataset time coverage', () => {
 describe('EurostatDataService — queryDataset row cap (#27)', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
   beforeEach(() => {
-    fetchMock = vi.fn();
+    fetchMock = vi.fn(unmockedFetch);
     vi.stubGlobal('fetch', fetchMock);
   });
   afterEach(() => {
@@ -1094,7 +1095,7 @@ describe('EurostatDataService — queryDataset row cap (#27)', () => {
 describe('EurostatDataService — dataframe row source (#8)', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
   beforeEach(() => {
-    fetchMock = vi.fn();
+    fetchMock = vi.fn(unmockedFetch);
     vi.stubGlobal('fetch', fetchMock);
   });
   afterEach(() => {
@@ -1282,7 +1283,7 @@ const fixture = (name: string): JsonStatResponse =>
 describe('EurostatDataService — no-results guard (#36)', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
   beforeEach(() => {
-    fetchMock = vi.fn();
+    fetchMock = vi.fn(unmockedFetch);
     vi.stubGlobal('fetch', fetchMock);
   });
   afterEach(() => {
@@ -1370,7 +1371,7 @@ describe('EurostatDataService — no-results guard (#36)', () => {
 describe('EurostatDataService — fetchJson error classification', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
   beforeEach(() => {
-    fetchMock = vi.fn();
+    fetchMock = vi.fn(unmockedFetch);
     vi.stubGlobal('fetch', fetchMock);
   });
   afterEach(() => {
@@ -1453,5 +1454,348 @@ describe('EurostatDataService — fetchJson error classification', () => {
     await expect(query('nama_10_gdp', { zzzz: ['x'] })).rejects.toMatchObject({
       data: { errorSource: 'FetchHttpError' },
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Period rejections — Eurostat's own refusals of a period literal (#47)
+// ---------------------------------------------------------------------------
+
+describe("EurostatDataService — Eurostat's period rejections map to invalid_period (#47)", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const query = (sinceP?: string, untilP?: string) =>
+    new EurostatDataService(mockConfig, mockStorage).queryDataset(
+      'une_rt_m',
+      { geo: ['DE'] },
+      undefined,
+      sinceP,
+      untilP,
+      undefined,
+      'EN',
+      50,
+      createMockContext(),
+    );
+
+  for (const [label, body, sinceP, untilP] of [
+    [
+      "a 400 naming 'sinceTimePeriod'",
+      '{"error":[{"status":400,"id":400,"label":"Invalid value for \'sinceTimePeriod\' parameter."}]}',
+      '2020-13',
+      undefined,
+    ],
+    [
+      "a 400 naming 'untilTimePeriod'",
+      '{"error":[{"status":400,"id":400,"label":"Invalid value for \'untilTimePeriod\' parameter."}]}',
+      undefined,
+      '2020-Q9',
+    ],
+    [
+      'a 400 carrying error id 140',
+      '{"error":[{"status":400,"id":140,"label":"TIME_PERIOD_FILTER_SPEC_INVALID: Impossible to apply time dimension filtering"}]}',
+      '2020-1',
+      undefined,
+    ],
+  ] as const) {
+    it(`maps ${label} to invalid_period with the ValidationError code, in one attempt`, async () => {
+      fetchMock.mockResolvedValue(errorResponse(400, body));
+      await expect(query(sinceP, untilP)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'invalid_period' },
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+  }
+
+  it('still maps a 400 that is about something else to conflicting_params', async () => {
+    fetchMock.mockResolvedValue(
+      errorResponse(
+        400,
+        '{"error":[{"status":400,"id":400,"label":"Invalid value for \'lang\' parameter."}]}',
+      ),
+    );
+    await expect(query()).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'conflicting_params' },
+    });
+  });
+
+  it('keeps id 150 as invalid_dimension ahead of the period check', async () => {
+    fetchMock.mockResolvedValue(
+      errorResponse(
+        400,
+        '{"error":[{"status":400,"id":150,"label":"INVALID_QUERY_DIMENSION: Dimension \\"ZZZZ\\" is not defined"}]}',
+      ),
+    );
+    await expect(query('2020')).rejects.toMatchObject({ data: { reason: 'invalid_dimension' } });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sent filter values against the reply's category index (#48, #52)
+// ---------------------------------------------------------------------------
+
+describe('findUnmatchedValues', () => {
+  const reply = (index: Record<string, Record<string, number>>): JsonStatResponse => ({
+    id: Object.keys(index),
+    size: Object.values(index).map((codes) => Object.keys(codes).length),
+    dimension: Object.fromEntries(
+      Object.entries(index).map(([dim, codes]) => [dim, { category: { index: codes } }]),
+    ),
+  });
+
+  it('returns nothing when every sent value is in the index', () => {
+    expect(findUnmatchedValues({ geo: ['DE', 'FR'] }, reply({ geo: { DE: 0, FR: 1 } }))).toBe(
+      undefined,
+    );
+  });
+
+  it('names a value dropped beside a matched one, which leaves size at 1', () => {
+    expect(findUnmatchedValues({ geo: ['DE', 'XX'] }, reply({ geo: { DE: 0 } }))).toEqual({
+      geo: ['XX'],
+    });
+  });
+
+  it('compares case-insensitively and reports values as sent', () => {
+    expect(findUnmatchedValues({ geo: ['de', 'xx'] }, reply({ geo: { DE: 0 } }))).toEqual({
+      geo: ['xx'],
+    });
+  });
+
+  it('lists every dimension that dropped a value, in the order sent', () => {
+    expect(
+      findUnmatchedValues(
+        { age: ['TOTAL', 'ZZZ'], geo: ['XX'], unit: ['PC_ACT'] },
+        reply({ age: { TOTAL: 0 }, geo: {}, unit: { PC_ACT: 0 } }),
+      ),
+    ).toEqual({ age: ['ZZZ'], geo: ['XX'] });
+  });
+
+  it('reports a repeated unmatched value once', () => {
+    expect(findUnmatchedValues({ geo: ['XX', 'XX'] }, reply({ geo: {} }))).toEqual({
+      geo: ['XX'],
+    });
+  });
+
+  it('does not guess about a filtered dimension the reply does not describe', () => {
+    expect(findUnmatchedValues({ geo: ['XX'] }, reply({ unit: { PC_ACT: 0 } }))).toBeUndefined();
+  });
+
+  it('matches an upper-case filter key to its dimension and reports it under the key as sent (#54)', () => {
+    expect(findUnmatchedValues({ GEO: ['DE', 'XX'] }, reply({ geo: { DE: 0 } }))).toEqual({
+      GEO: ['XX'],
+    });
+    expect(findUnmatchedValues({ Geo: ['de'] }, reply({ geo: { DE: 0 } }))).toBeUndefined();
+  });
+});
+
+describe('EurostatDataService — no_results diagnosis from the envelope (#48)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const DE = { unit: ['PC_ACT'], s_adj: ['SA'], age: ['TOTAL'], sex: ['T'] };
+
+  const emptyMatch = async (
+    name: string,
+    filters: Record<string, string[]>,
+    period: { lastN?: number; sinceP?: string; untilP?: string } = {},
+  ): Promise<Record<string, unknown>> => {
+    fetchMock.mockResolvedValueOnce(okResponse(fixture(name)));
+    const err = await new EurostatDataService(mockConfig, mockStorage)
+      .queryDataset(
+        'une_rt_m',
+        filters,
+        undefined,
+        period.sinceP,
+        period.untilP,
+        period.lastN,
+        'EN',
+        50,
+        createMockContext(),
+      )
+      .catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: JsonRpcErrorCode.NotFound, data: { reason: 'no_results' } });
+    return (err as McpError).data as Record<string, unknown>;
+  };
+
+  it('names the unmatched value when it is the only one sent (size 0)', async () => {
+    const data = await emptyMatch('une-rt-m-geo-xx-last1', { geo: ['XX'] }, { lastN: 1 });
+    expect(data.unmatchedValues).toEqual({ geo: ['XX'] });
+    expect(data).not.toHaveProperty('matchedPeriods');
+    expect(data).not.toHaveProperty('outsideCoverage');
+  });
+
+  it('names an unmatched value beside a matched one, plus the valueless periods', async () => {
+    const data = await emptyMatch(
+      'une-rt-m-geo-de-xx-last1',
+      { geo: ['DE', 'XX'], ...DE },
+      { lastN: 1 },
+    );
+    expect(data.unmatchedValues).toEqual({ geo: ['XX'] });
+    expect(data.matchedPeriods).toEqual(['2026-08']);
+  });
+
+  it('lists two unmatched dimensions', async () => {
+    const data = await emptyMatch(
+      'une-rt-m-geo-xx-age-zzz-last1',
+      { geo: ['XX'], age: ['ZZZ'] },
+      { lastN: 1 },
+    );
+    expect(data.unmatchedValues).toEqual({ geo: ['XX'], age: ['ZZZ'] });
+  });
+
+  it('diagnoses an unmatched non-geo code the same way', async () => {
+    const data = await emptyMatch(
+      'une-rt-m-unit-fake-last1',
+      { geo: ['DE'], unit: ['QQQ_FAKE'] },
+      { lastN: 1 },
+    );
+    expect(data.unmatchedValues).toEqual({ unit: ['QQQ_FAKE'] });
+  });
+
+  it('does not report a lowercase valid code as unmatched', async () => {
+    const data = await emptyMatch(
+      'une-rt-m-geo-de-lower-last1',
+      { geo: ['de'], ...DE },
+      { lastN: 1 },
+    );
+    expect(data).not.toHaveProperty('unmatchedValues');
+    expect(data.matchedPeriods).toEqual(['2026-08']);
+  });
+
+  it('reports a period range outside coverage with the dataset-wide bounds', async () => {
+    fetchMock.mockResolvedValueOnce(okResponse(fixture('nama-10-gdp-de-since-2030')));
+    const err = await new EurostatDataService(mockConfig, mockStorage)
+      .queryDataset(
+        'nama_10_gdp',
+        { unit: ['CP_MEUR'], na_item: ['B1GQ'], geo: ['DE'] },
+        undefined,
+        '2030',
+        undefined,
+        undefined,
+        'EN',
+        50,
+        createMockContext(),
+      )
+      .catch((e: unknown) => e);
+    expect((err as McpError).data).toMatchObject({
+      reason: 'no_results',
+      outsideCoverage: { oldest: '1975', latest: '2025' },
+    });
+    expect((err as McpError).data).not.toHaveProperty('matchedPeriods');
+    expect((err as McpError).data).not.toHaveProperty('unmatchedValues');
+  });
+
+  it('lists the matched periods of a past range that carries no value for the slice', async () => {
+    fetchMock.mockResolvedValueOnce(okResponse(fixture('nama-10-gdp-de-until-1980')));
+    const err = await new EurostatDataService(mockConfig, mockStorage)
+      .queryDataset(
+        'nama_10_gdp',
+        { unit: ['CP_MEUR'], na_item: ['B1GQ'], geo: ['DE'] },
+        undefined,
+        undefined,
+        '1980',
+        undefined,
+        'EN',
+        50,
+        createMockContext(),
+      )
+      .catch((e: unknown) => e);
+    expect((err as McpError).data).toMatchObject({
+      matchedPeriods: ['1975', '1976', '1977', '1978', '1979', '1980'],
+    });
+  });
+
+  it('still returns the six observations of the all-confidential slice (#36)', async () => {
+    fetchMock.mockResolvedValueOnce(okResponse(fixture('sts-inpr-m-ie-confidential')));
+    const res = await new EurostatDataService(mockConfig, mockStorage).queryDataset(
+      'sts_inpr_m',
+      { indic_bt: ['PRD'], nace_r2: ['B'], s_adj: ['CA'], unit: ['I21'], geo: ['IE'] },
+      undefined,
+      '2023-01',
+      '2023-06',
+      undefined,
+      'EN',
+      50,
+      createMockContext(),
+    );
+    expect(res.obsCount).toBe(6);
+    expect(res).not.toHaveProperty('unmatchedValues');
+  });
+});
+
+describe('EurostatDataService — unmatched filter values on a successful query (#52)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const run = (name: string, filters: Record<string, string[]>, sinceP: string) => {
+    fetchMock.mockResolvedValueOnce(okResponse(fixture(name)));
+    return new EurostatDataService(mockConfig, mockStorage).queryDataset(
+      'une_rt_m',
+      filters,
+      undefined,
+      sinceP,
+      undefined,
+      undefined,
+      'EN',
+      50,
+      createMockContext(),
+    );
+  };
+
+  it('returns the matched observations and names the dropped value', async () => {
+    const res = await run(
+      'une-rt-m-geo-de-xx-since-2024-01',
+      { geo: ['DE', 'XX'], unit: ['PC_ACT'], s_adj: ['SA'], age: ['TOTAL'], sex: ['T'] },
+      '2024-01',
+    );
+    expect(res.obsCount).toBe(31);
+    expect(res.unmatchedValues).toEqual({ geo: ['XX'] });
+    expect(res.appliedFilters.geo).toEqual(['DE', 'XX']);
+  });
+
+  it('lists unmatched values in two dimensions', async () => {
+    const res = await run(
+      'une-rt-m-geo-de-xx-age-zzz-since-2026-01',
+      {
+        geo: ['DE', 'XX'],
+        unit: ['PC_ACT'],
+        s_adj: ['SA'],
+        age: ['TOTAL', 'ZZZ'],
+        sex: ['T'],
+      },
+      '2026-01',
+    );
+    expect(res.obsCount).toBe(7);
+    expect(res.unmatchedValues).toEqual({ geo: ['XX'], age: ['ZZZ'] });
+  });
+
+  it('omits the field when every value matched, lowercase included', async () => {
+    const res = await run(
+      'une-rt-m-geo-de-lower-last3',
+      { geo: ['de'], unit: ['PC_ACT'], s_adj: ['SA'], age: ['TOTAL'], sex: ['T'] },
+      '2026-06',
+    );
+    expect(res.obsCount).toBe(2);
+    expect(res).not.toHaveProperty('unmatchedValues');
   });
 });

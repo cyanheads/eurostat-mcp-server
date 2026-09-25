@@ -14,6 +14,7 @@ import {
 } from '@/services/eurostat-bulk/eurostat-bulk-service.js';
 import type { BulkRow } from '@/services/eurostat-bulk/types.js';
 import { getEurostatDataService } from '@/services/eurostat-data/eurostat-data-service.js';
+import { PERIOD_FORMS, resolvePeriods } from '@/services/eurostat-periods.js';
 
 /** Upper bound on rows echoed inline, whatever preview_limit asks for. */
 const PREVIEW_MAX = 500;
@@ -46,19 +47,19 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
       .record(z.string(), z.array(z.string()))
       .default({})
       .describe(
-        'Dimension filters as a map of dimension code → array of accepted values, applied by Eurostat before the body is sent. Example: {"unit": ["CP_MEUR"], "na_item": ["B1G"], "geo": ["DE", "FR"]}. Omit a dimension or pass an empty array to accept every value for it. Do not put "time" here — use since_period/until_period. Naming a dimension the dataset does not have is rejected with the dataset\'s dimension list rather than silently ignored.',
+        'Dimension filters as a map of dimension code → array of accepted values, applied by Eurostat before the body is sent. Example: {"unit": ["CP_MEUR"], "na_item": ["B1G"], "geo": ["DE", "FR"]}. Omit a dimension or pass an empty array to accept every value for it. Dimension codes match in any case ("GEO" is geo). Do not put "time" here — use since_period/until_period. Naming a dimension the dataset does not have is rejected with the dataset\'s dimension list rather than silently ignored.',
       ),
     since_period: z
       .string()
       .optional()
       .describe(
-        'Start of the period range (e.g., "2020", "2023-Q1", "2024-01"), sent as startPeriod. The most effective way to shrink a bulk response: it removes period columns from the TSV rather than blanking their cells.',
+        `Start of the period range, inclusive, sent as startPeriod. Accepted forms: ${PERIOD_FORMS} (e.g., "2020", "2023-Q1", "2024-01"). Extra leading zeros after the letter are dropped ("2020-W001" is sent as "2020-W01"), a day of the year is sent as three digits ("2026-D1" as "2026-D001"), YYYY-A1 is sent as YYYY, and a period of another frequency is mapped onto the dataset's own. A malformed or non-existent period (e.g., "2020-13") is rejected as invalid_period. The most effective way to shrink a bulk response: it removes period columns from the TSV rather than blanking their cells.`,
       ),
     until_period: z
       .string()
       .optional()
       .describe(
-        'End of the period range (e.g., "2024"), sent as endPeriod. Omit for data through the latest available period.',
+        'End of the period range, inclusive (e.g., "2024"), sent as endPeriod, in the same forms as since_period. Omit for data through the latest available period. The range must hold at least one day: a since_period that starts after until_period ends is rejected as invalid_period, while pairs of different frequencies are fine ("2020-06" to "2020").',
       ),
     preview_limit: z
       .number()
@@ -148,12 +149,11 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
       .describe('Rows written to the canvas table. Matches rowCount. Omitted alongside tableName.'),
   }),
   enrichment: {
-    truncated: z
-      .boolean()
-      .optional()
-      .describe('True when the inline observation preview omits rows.'),
-    shown: z.number().optional().describe('Observations returned in the inline preview.'),
-    cap: z.number().optional().describe('The preview_limit applied to inline observations.'),
+    totalCount: z
+      .number()
+      .describe(
+        'Observations the download produced — equal to rowCount. The inline observations array holds only the first preview_limit of them; budgetExceeded, not this count, says whether the download is the whole dataset.',
+      ),
     appliedQuery: z
       .object({
         filters: z
@@ -168,7 +168,7 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
       .string()
       .optional()
       .describe(
-        'Guidance for every staged result, including the required eurostat_dataframe_describe then eurostat_dataframe_query sequence, composed with byte-budget, no-canvas, or empty-result disclosure when applicable.',
+        'Guidance on every download: the staged table with the required eurostat_dataframe_describe then eurostat_dataframe_query sequence (or, without a canvas, what was returned inline and what was discarded), preceded by byte-budget disclosure when the budget stopped the transfer and by the inline-preview length when preview_limit returns fewer rows than were downloaded.',
       ),
   },
 
@@ -211,10 +211,16 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
     {
       reason: 'filter_arity',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Eurostat rejected the positional dimension key because it carried the wrong number of positions (SDMX faultcode 140), meaning the dataset structure has changed since the metadata call.',
+      when: 'Eurostat rejected the positional dimension key because it carried the wrong number of positions (SDMX faultcode 140, INVALID_QUERY_NB_FILTERS), meaning the dataset structure has changed since the metadata call.',
       recovery:
         'Retry without filters to download the whole dataset, or re-read the dimensions with eurostat_get_dataset_info.',
       thrownBy: 'service',
+    },
+    {
+      reason: 'invalid_period',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'since_period or until_period is not a period literal, or names a month, quarter, semester, trimester, week or day that does not exist, or since_period starts after until_period ends. Checked before any request — the bulk endpoint would otherwise roll an out-of-range period into a neighbouring one, and answer an inverted range with the whole series — and SDMX faultcode 140 TIME_PERIOD_FILTER_SPEC_INVALID maps here too.',
+      recovery: `Write since_period/until_period as ${PERIOD_FORMS}, for example "2020", "2020-01" or "2020-Q1", with since_period starting no later than until_period ends.`,
     },
     {
       reason: 'async_queued',
@@ -230,7 +236,7 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
       code: JsonRpcErrorCode.NotFound,
       when: 'The download completed but carried no populated observation cells.',
       recovery:
-        'Verify the filter values with eurostat_get_dimension_values — a combination that exists in no cell returns an empty body.',
+        "Verify the filter values with eurostat_get_dimension_values and keep since_period/until_period inside the series' coverage — a combination that exists in no cell and a range that misses the series both download as an empty table.",
     },
     {
       reason: 'upstream_fault',
@@ -250,8 +256,16 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
 
   async handler(input, ctx) {
     const bulk = getEurostatBulkService();
-    const sinceP = input.since_period?.trim() || undefined;
-    const untilP = input.until_period?.trim() || undefined;
+    // Trimmed, checked, and rewritten to canonical form: this is both what is sent and
+    // what appliedQuery echoes.
+    const periods = resolvePeriods({
+      since_period: input.since_period?.trim() || undefined,
+      until_period: input.until_period?.trim() || undefined,
+    });
+    if (!periods.ok) {
+      throw ctx.fail('invalid_period', periods.message, ctx.recoveryFor('invalid_period'));
+    }
+    const { since_period: sinceP, until_period: untilP } = periods;
     const filters = Object.fromEntries(
       Object.entries(input.filters).filter(([, values]) => values.length > 0),
     );
@@ -321,12 +335,20 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
     const firstPeriod = stats.periodsSeen[0];
     const lastPeriod = stats.periodsSeen.at(-1);
     if (stats.rowCount === 0) {
+      const range = [
+        ...(sinceP ? [`since_period "${sinceP}"`] : []),
+        ...(untilP ? [`until_period "${untilP}"`] : []),
+      ].join(' and ');
       throw ctx.fail(
         'no_results',
         `The download of "${input.dataset_code}" carried no observations.`,
         {
           recovery: {
-            hint: `Eurostat returned a table with no populated cells for "${input.dataset_code}". Verify the filter values with eurostat_get_dimension_values — a combination present in no cell downloads as an empty body.`,
+            hint: `Eurostat returned a table with no populated cells for "${input.dataset_code}". Verify the filter values with eurostat_get_dimension_values — a combination present in no cell downloads as an empty body.${
+              range
+                ? ` Also check that ${range} overlaps the series: a range outside the series' own coverage downloads as an empty table too.`
+                : ''
+            }`,
           },
         },
       );
@@ -349,26 +371,46 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
         url: download.url,
       },
     });
-    if (stats.rowCount > preview.length) {
-      ctx.enrich.truncated({ shown: preview.length, cap: input.preview_limit });
-    }
-
+    /**
+     * A preview shorter than the download is disclosed as a notice and a total, not
+     * as `truncated`: the download itself is complete, and `budgetExceeded` is what
+     * says when it is not. `notice` is last-wins, so every sentence is collected and
+     * written once.
+     */
+    ctx.enrich.total(stats.rowCount);
     const notices: string[] = [];
     if (stats.budgetExceeded) {
       notices.push(
         `The byte budget stopped this transfer after ${stats.bytesRead.toLocaleString()} bytes, so these ${stats.rowCount.toLocaleString()} observations are the start of "${input.dataset_code}" and not all of it. Add dimension filters or a since_period/until_period range to fit the dataset inside the budget, or raise EUROSTAT_BULK_MAX_BYTES.`,
       );
     }
-    if (!staged) {
+    if (stats.rowCount > preview.length) {
       notices.push(
-        `This deployment runs without a dataframe canvas, so nothing was staged: only the ${preview.length.toLocaleString()} observations returned inline are retained, and the other ${(stats.rowCount - preview.length).toLocaleString()} were counted and discarded. Set CANVAS_PROVIDER_TYPE=duckdb to keep the download, or use eurostat_query_dataset with dimension filters to fetch a slice small enough to return whole.`,
+        `preview_limit=${input.preview_limit.toLocaleString()} returns the first ${preview.length.toLocaleString()} of ${stats.rowCount.toLocaleString()} downloaded observations inline; it does not reduce the download.`,
+      );
+    }
+    if (!staged) {
+      /**
+       * A narrower query is advice only for a download larger than preview_limit can
+       * ever return; below that, the rows either all came back or are one larger
+       * preview_limit away.
+       */
+      const discarded = stats.rowCount - preview.length;
+      notices.push(
+        discarded === 0
+          ? `This deployment runs without a dataframe canvas, so nothing was staged; all ${stats.rowCount.toLocaleString()} downloaded observations are returned inline.`
+          : `This deployment runs without a dataframe canvas, so nothing was staged: only the ${preview.length.toLocaleString()} observations returned inline are retained, and the other ${discarded.toLocaleString()} were counted and discarded. ${
+              stats.rowCount <= PREVIEW_MAX
+                ? `Raise preview_limit to ${stats.rowCount.toLocaleString()} to return every one inline, or set CANVAS_PROVIDER_TYPE=duckdb to keep the download.`
+                : 'Set CANVAS_PROVIDER_TYPE=duckdb to keep the download, or use eurostat_query_dataset with dimension filters to fetch a slice small enough to return whole.'
+            }`,
       );
     } else {
       notices.push(
         `All ${staged.stagedRowCount.toLocaleString()} downloaded observations are staged as table "${staged.tableName}" on canvas "${staged.canvasId}". Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query.`,
       );
     }
-    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
+    ctx.enrich.notice(notices.join(' '));
 
     return {
       datasetCode: input.dataset_code,
@@ -421,6 +463,7 @@ type MappedReason =
   | 'async_queued'
   | 'filter_arity'
   | 'invalid_dimension'
+  | 'invalid_period'
   | 'not_found'
   | 'upstream_fault';
 
@@ -457,6 +500,12 @@ export function mapBulkFailure(
         reason,
         message,
         hint: `Eurostat expected a different number of filter positions for "${datasetCode}" than its metadata reports. Re-read the dimensions with eurostat_get_dataset_info, or retry without filters.`,
+      };
+    case 'invalid_period':
+      return {
+        reason,
+        message,
+        hint: `Eurostat could not read the period range for "${datasetCode}". Write since_period/until_period as ${PERIOD_FORMS}, for example "2020", "2020-01" or "2020-Q1".`,
       };
     case 'async_queued':
       return {

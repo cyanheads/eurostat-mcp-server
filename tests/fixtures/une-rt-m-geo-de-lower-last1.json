@@ -1,0 +1,108 @@
+{
+  "version": "2.0",
+  "class": "dataset",
+  "label": "Unemployment by sex and age - monthly data",
+  "source": "ESTAT",
+  "updated": "2026-09-22T11:00:00+0200",
+  "value": {},
+  "id": ["freq", "s_adj", "age", "unit", "sex", "geo", "time"],
+  "size": [1, 1, 1, 1, 1, 1, 1],
+  "dimension": {
+    "freq": {
+      "label": "Time frequency",
+      "category": { "index": { "M": 0 }, "label": { "M": "Monthly" } }
+    },
+    "s_adj": {
+      "label": "Seasonal adjustment",
+      "category": {
+        "index": { "SA": 0 },
+        "label": { "SA": "Seasonally adjusted data, not calendar adjusted data" }
+      }
+    },
+    "age": {
+      "label": "Age class",
+      "category": { "index": { "TOTAL": 0 }, "label": { "TOTAL": "Total" } }
+    },
+    "unit": {
+      "label": "Unit of measure",
+      "category": {
+        "index": { "PC_ACT": 0 },
+        "label": { "PC_ACT": "Percentage of population in the labour force" }
+      }
+    },
+    "sex": { "label": "Sex", "category": { "index": { "T": 0 }, "label": { "T": "Total" } } },
+    "geo": {
+      "label": "Geopolitical entity (reporting)",
+      "category": { "index": { "DE": 0 }, "label": { "DE": "Germany" } }
+    },
+    "time": {
+      "label": "Time",
+      "category": { "index": { "2026-08": 0 }, "label": { "2026-08": "2026-08" } }
+    }
+  },
+  "extension": {
+    "lang": "EN",
+    "id": "UNE_RT_M",
+    "agencyId": "ESTAT",
+    "version": "1.0",
+    "datastructure": { "id": "UNE_RT_M", "agencyId": "ESTAT", "version": "154.0" },
+    "annotation": [
+      { "type": "CREATED", "date": "2016-06-13T14:18:07+0200" },
+      {
+        "type": "DISSEMINATION_DOI_XML",
+        "title": "<adms:identifier xmlns:adms=\"http://www.w3.org/ns/adms#\" xmlns:skos=\"http://www.w3.org/2004/02/skos/core.html\" xmlns:dct=\"http://purl.org/dc/terms/\" xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><adms:Identifier rdf:about=\"https://doi.org/10.2908/UNE_RT_M\"><skos:notation rdf:datatype=\"http://purl.org/spar/datacite/doi\">10.2908/UNE_RT_M</skos:notation><dct:creator rdf:resource=\"http://publications.europa.eu/resource/authority/corporate-body/ESTAT\"/><dct:issued rdf:datatype=\"http://www.w3.org/2001/XMLSchema#date\">2023-01-19</dct:issued></adms:Identifier></adms:identifier>"
+      },
+      {
+        "type": "DISSEMINATION_EXPLANATORY_LINK",
+        "title": "text-category",
+        "href": "https://ec.europa.eu/eurostat/databrowser-backend/api/public/explanatory-notes/get/Info_note_LFSQ_20240604.pdf",
+        "text": "Information note"
+      },
+      {
+        "type": "DISSEMINATION_EXPLANATORY_LINK",
+        "title": "text-category",
+        "href": "https://ec.europa.eu/eurostat/databrowser-backend/api/public/explanatory-notes/get/Info_note_LFSQ_20240604.pdf"
+      },
+      {
+        "type": "DISSEMINATION_EXPLANATORY_LINK",
+        "title": "text-category",
+        "href": "https://ec.europa.eu/eurostat/databrowser-backend/api/public/explanatory-notes/get/Info_note_LFSQ_20240604.pdf"
+      },
+      { "type": "DISSEMINATION_OBJECT_TYPE", "title": "DATASET" },
+      { "type": "DISSEMINATION_TIMESTAMP_DATA", "date": "2026-09-22T11:00:00+0200" },
+      { "type": "DISSEMINATION_TIMESTAMP_GLOBAL", "date": "2026-09-22T11:00:00+0200" },
+      { "type": "DISSEMINATION_TIMESTAMP_PLANNED", "date": "2026-09-22T11:00:00+0200" },
+      {
+        "type": "ESMS_HTML",
+        "title": "Explanatory texts (metadata)",
+        "href": "https://ec.europa.eu/eurostat/cache/metadata/en/une_rt_m_esms.htm"
+      },
+      {
+        "type": "ESMS_SDMX",
+        "title": "Explanatory texts (metadata)",
+        "href": "https://ec.europa.eu/eurostat/api/dissemination/files?file=metadata/une_rt_m_esms.sdmx.zip"
+      },
+      {
+        "type": "FOOTNOTE",
+        "title": "Footnote (metadata)",
+        "href": "https://ec.europa.eu/eurostat/cache/metadata/Annexes/une_rt_m_esms_an_footnote.xlsx"
+      },
+      { "type": "OBS_COUNT", "title": "755986" },
+      { "type": "OBS_PERIOD_OVERALL_LATEST", "title": "2026-08" },
+      { "type": "OBS_PERIOD_OVERALL_OLDEST", "title": "1983-01" },
+      { "type": "SOURCE_INSTITUTIONS", "text": "Eurostat" },
+      { "type": "UPDATE_DATA", "date": "2026-09-22T11:00:00+0200" },
+      { "type": "UPDATE_FOOTNOTES", "date": "2026-08-31T13:45:02Z" },
+      { "type": "UPDATE_STRUCTURE", "date": "2026-09-04T23:00:00+0200" }
+    ],
+    "positions-with-no-data": {
+      "freq": [0],
+      "s_adj": [0],
+      "age": [0],
+      "unit": [0],
+      "sex": [0],
+      "geo": [0],
+      "time": [0]
+    }
+  }
+}
