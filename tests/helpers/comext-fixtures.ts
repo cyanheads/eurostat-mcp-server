@@ -4,7 +4,9 @@
  *
  * The fixtures under `tests/fixtures/comext/` are live responses recorded on
  * 2026-09-25. The DS-045409 dataflow and constraint are trimmed to a few codes
- * per dimension (the originals are 23 MB and 1 MB); every other file is verbatim.
+ * per dimension (the originals are 23 MB and 1 MB), and its TSV to the first
+ * three series; every other file is verbatim. `.gitattributes` stores them byte
+ * for byte, so the TSVs keep the CRLF line endings Eurostat sends.
  *
  * @module tests/helpers/comext-fixtures
  */

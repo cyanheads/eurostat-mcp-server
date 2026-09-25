@@ -11,6 +11,9 @@
 *.mcpb binary
 *.sqlite binary
 
+# Recorded upstream responses - stored byte for byte, CRLF line endings included
+tests/fixtures/comext/** -text
+
 # Machine-generated files - collapse in PR diffs, exclude from language stats
 bun.lock linguist-generated
 CHANGELOG.md linguist-generated

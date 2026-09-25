@@ -116,6 +116,14 @@ describe('EurostatBulkService — PRODCOM text cells (#46)', () => {
     }
   });
 
+  it('reads text cells at the CRLF line ends the recording carries', async () => {
+    expect(DS_059358_TSV).toMatch(/\tKG\r\n/);
+    expect(DS_059358_TSV).toMatch(/\t:C\r\n/);
+    const { rows } = await drain('DS-059358');
+    expect(rows.some((r) => r.conf_status === 'C')).toBe(true);
+    expect(rows.filter((r) => String(r.obs_value_text ?? '').includes('\r'))).toEqual([]);
+  });
+
   it('counts the text cells as missing values and keeps the numbers numeric', async () => {
     const { dl, rows } = await drain('DS-059358');
     const textCells = DS_059358_TSV.split('\n').filter((l) => /\t(:C|KG)\s*$/.test(l)).length;
