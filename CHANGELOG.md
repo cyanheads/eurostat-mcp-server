@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.8.0](changelog/0.8.x/0.8.0.md) — 2026-09-25 · ⚠️ Breaking
+
+Every tool now reaches Eurostat's Comext host for the DS-* detailed-trade and PRODCOM collections, and eurostat_get_dimension_values caps inline values at 2,000 while staging the full list as a code/label table on a caller's canvas.
+
 ## [0.7.0](changelog/0.7.x/0.7.0.md) — 2026-09-25 · ⚠️ Breaking
 
 Both data tools now reject malformed, non-existent, and inverted period ranges as invalid_period before any request; eurostat_query_dataset explains an empty match and names filter values that matched nothing; eurostat_download_dataset reports totalCount instead of truncated.

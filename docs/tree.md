@@ -1,6 +1,6 @@
 # eurostat-mcp-server - Directory Structure
 
-Generated on: 2026-09-25 11:48:07
+Generated on: 2026-09-25 14:02:55
 
 ```text
 eurostat-mcp-server/
@@ -31,6 +31,7 @@ eurostat-mcp-server/
 │   ├── 0.5.x/
 │   ├── 0.6.x/
 │   ├── 0.7.x/
+│   ├── 0.8.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -149,15 +150,16 @@ eurostat-mcp-server/
 │   │   │   └── definitions/
 │   │   │       └── eurostat-dataset.resource.ts
 │   │   └── tools/
-│   │       └── definitions/
-│   │           ├── eurostat-browse-themes.tool.ts
-│   │           ├── eurostat-dataframe-describe.tool.ts
-│   │           ├── eurostat-dataframe-query.tool.ts
-│   │           ├── eurostat-download-dataset.tool.ts
-│   │           ├── eurostat-get-dataset-info.tool.ts
-│   │           ├── eurostat-get-dimension-values.tool.ts
-│   │           ├── eurostat-query-dataset.tool.ts
-│   │           └── eurostat-search-datasets.tool.ts
+│   │       ├── definitions/
+│   │       │   ├── eurostat-browse-themes.tool.ts
+│   │       │   ├── eurostat-dataframe-describe.tool.ts
+│   │       │   ├── eurostat-dataframe-query.tool.ts
+│   │       │   ├── eurostat-download-dataset.tool.ts
+│   │       │   ├── eurostat-get-dataset-info.tool.ts
+│   │       │   ├── eurostat-get-dimension-values.tool.ts
+│   │       │   ├── eurostat-query-dataset.tool.ts
+│   │       │   └── eurostat-search-datasets.tool.ts
+│   │       └── narrowing-advice.ts
 │   ├── services/
 │   │   ├── eurostat-bulk/
 │   │   │   ├── eurostat-bulk-service.ts
@@ -171,10 +173,26 @@ eurostat-mcp-server/
 │   │   │   └── types.ts
 │   │   ├── canvas-accessor.ts
 │   │   ├── eurostat-codelists.ts
-│   │   └── eurostat-periods.ts
+│   │   ├── eurostat-hosts.ts
+│   │   ├── eurostat-periods.ts
+│   │   └── shared-load.ts
 │   └── index.ts
 ├── tests/
 │   ├── fixtures/
+│   │   ├── comext/
+│   │   │   ├── comext-dataflows.xml
+│   │   │   ├── ds-045409-constraint.xml
+│   │   │   ├── ds-045409-dataflow.xml
+│   │   │   ├── ds-045409-datastructure.xml
+│   │   │   ├── ds-045409-de-us-m-2026-06-07.tsv
+│   │   │   ├── ds-045409-eu27-us-total-2024-01-02.json
+│   │   │   ├── ds-045409-extraction-too-big.json
+│   │   │   ├── ds-045409-fault-413.xml
+│   │   │   ├── ds-059358-de-2022.json
+│   │   │   ├── ds-059358-de-2022.tsv
+│   │   │   ├── ds-999999-data.xml
+│   │   │   ├── ds-999999-dataflow.xml
+│   │   │   └── ds-999999-statistics.json
 │   │   ├── eurostat-sdmx-metadata.ts
 │   │   ├── nama-10-gdp-de-since-2030.json
 │   │   ├── nama-10-gdp-de-until-1980.json
@@ -189,6 +207,7 @@ eurostat-mcp-server/
 │   │   ├── une-rt-m-geo-xx-last1.json
 │   │   └── une-rt-m-unit-fake-last1.json
 │   ├── helpers/
+│   │   ├── comext-fixtures.ts
 │   │   └── real-canvas.ts
 │   ├── integration/
 │   │   └── session-mode.int.test.ts
@@ -199,11 +218,16 @@ eurostat-mcp-server/
 │   │   ├── canvas-accessor.test.ts
 │   │   ├── eurostat-bulk-service.test.ts
 │   │   ├── eurostat-catalogue-service.test.ts
+│   │   ├── eurostat-comext-bulk.test.ts
+│   │   ├── eurostat-comext-catalogue.test.ts
+│   │   ├── eurostat-comext-data.test.ts
 │   │   ├── eurostat-data-service.test.ts
+│   │   ├── eurostat-hosts.test.ts
 │   │   ├── eurostat-periods.test.ts
 │   │   └── eurostat-sdmx-metadata.test.ts
 │   └── tools/
 │       ├── eurostat-browse-themes.tool.test.ts
+│       ├── eurostat-comext-tools.test.ts
 │       ├── eurostat-dataframe-describe.tool.test.ts
 │       ├── eurostat-dataframe-query.tool.test.ts
 │       ├── eurostat-download-dataset.tool.test.ts
