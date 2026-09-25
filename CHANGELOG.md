@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.8.1](changelog/0.8.x/0.8.1.md) — 2026-09-25
+
+The Docker images and packageManager pin move to Bun 1.4.2.
+
 ## [0.8.0](changelog/0.8.x/0.8.0.md) — 2026-09-25 · ⚠️ Breaking
 
 Every tool now reaches Eurostat's Comext host for the DS-* detailed-trade and PRODCOM collections, and eurostat_get_dimension_values caps inline values at 2,000 while staging the full list as a code/label table on a caller's canvas.
