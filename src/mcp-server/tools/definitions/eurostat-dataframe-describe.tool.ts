@@ -87,7 +87,7 @@ export const eurostatDataframeDescribe = tool('eurostat_dataframe_describe', {
   async handler(input, ctx) {
     const canvas = getCanvas();
     if (!canvas) {
-      throw ctx.fail('canvas_disabled', undefined, ctx.recoveryFor('canvas_disabled'));
+      throw ctx.fail('canvas_disabled');
     }
 
     const instance = await acquireCanvas(canvas, input.canvas_id, ctx);

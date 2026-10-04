@@ -5,7 +5,7 @@
  */
 
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
-import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eurostatDataframeDescribe } from '@/mcp-server/tools/definitions/eurostat-dataframe-describe.tool.js';
@@ -106,17 +106,25 @@ describe('eurostatDataframeDescribe', () => {
   });
 
   it('fails with an actionable error when the deployment has no canvas', async () => {
+    // Through runToolContract, which fills the declared recovery hint as production does:
+    // the handler throws only the reason.
     setCanvas(undefined);
     try {
-      const input = eurostatDataframeDescribe.input.parse({ canvas_id: stagedCanvasId });
-      const err = (await Promise.resolve(eurostatDataframeDescribe.handler(input, ctx())).catch(
-        (e: unknown) => e,
-      )) as McpError;
-      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
-      expect(err.data).toMatchObject({ reason: 'canvas_disabled' });
-      expect((err.data as { recovery?: { hint?: string } }).recovery?.hint).toContain(
-        'eurostat_query_dataset',
-      );
+      const result = await runToolContract(eurostatDataframeDescribe, {
+        canvas_id: stagedCanvasId,
+      });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ServiceUnavailable,
+          data: {
+            reason: 'canvas_disabled',
+            recovery: { hint: expect.stringContaining('eurostat_query_dataset') },
+          },
+        },
+      });
+      const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+      expect(text).toMatch(/Recovery:.*eurostat_query_dataset/s);
     } finally {
       setCanvas(canvas);
     }

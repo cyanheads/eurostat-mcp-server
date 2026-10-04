@@ -6,7 +6,7 @@
 
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eurostatDataframeQuery } from '@/mcp-server/tools/definitions/eurostat-dataframe-query.tool.js';
 import { setCanvas } from '@/services/canvas-accessor.js';
@@ -124,21 +124,27 @@ describe('eurostatDataframeQuery', () => {
   it('fails with an actionable error when the deployment has no canvas', async () => {
     // The registration gate keeps this tool off tools/list without a canvas; the handler
     // still has to answer honestly rather than dereference an absent service.
+    // Run through runToolContract, which fills the declared recovery hint as production
+    // does: the handler throws only the reason.
     setCanvas(undefined);
     try {
-      const input = eurostatDataframeQuery.input.parse({
+      const result = await runToolContract(eurostatDataframeQuery, {
         canvas_id: canvasId,
         sql: 'SELECT 1',
       });
-      const err = (await Promise.resolve(eurostatDataframeQuery.handler(input, ctx())).catch(
-        (e: unknown) => e,
-      )) as McpError;
-      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
-      expect(err.data).toMatchObject({ reason: 'canvas_disabled' });
+      expect(result.isError).toBe(true);
       // The caller is told what to do instead, not just that something is off.
-      expect((err.data as { recovery?: { hint?: string } }).recovery?.hint).toContain(
-        'eurostat_query_dataset',
-      );
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ServiceUnavailable,
+          data: {
+            reason: 'canvas_disabled',
+            recovery: { hint: expect.stringContaining('eurostat_query_dataset') },
+          },
+        },
+      });
+      const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+      expect(text).toMatch(/Recovery:.*eurostat_query_dataset/s);
     } finally {
       setCanvas(canvas);
     }

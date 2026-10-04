@@ -284,7 +284,7 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
       until_period: input.until_period?.trim() || undefined,
     });
     if (!periods.ok) {
-      throw ctx.fail('invalid_period', periods.message, ctx.recoveryFor('invalid_period'));
+      throw ctx.fail('invalid_period', periods.message);
     }
     const { since_period: sinceP, until_period: untilP } = periods;
     const filters = Object.fromEntries(
