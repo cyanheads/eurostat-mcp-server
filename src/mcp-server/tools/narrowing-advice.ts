@@ -12,7 +12,8 @@ import { getEurostatDataService } from '@/services/eurostat-data/eurostat-data-s
  * order the request already read, if any; otherwise the structure definition is read
  * now, a few KB. The refusal itself carries no dimension list, and the hint is only
  * more specific with one, so a failed read leaves it generic rather than replacing the
- * refusal with a second error.
+ * refusal with a second error. A cancelled call is the exception: its abort is
+ * rethrown so it reaches the caller as a cancellation.
  */
 export async function dimensionsToNarrow(
   datasetCode: string,
@@ -23,6 +24,7 @@ export async function dimensionsToNarrow(
   try {
     return await getEurostatDataService().getDimensionOrder(datasetCode, ctx);
   } catch (error) {
+    if (ctx.signal.aborted) throw error;
     ctx.log.debug('Could not read dimensions for a too-large refusal hint', {
       datasetCode,
       error: error instanceof Error ? error.message : String(error),
