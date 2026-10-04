@@ -1,14 +1,18 @@
 /**
  * @fileoverview Tests for the DataCanvas accessor — presence reporting and the
- * translation of a scratch-directory permission failure into an actionable error.
+ * translation of a scratch-directory failure into an actionable error.
  * @module tests/services/canvas-accessor.test
  */
 
+import { chmodSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { CanvasInstance, DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
-import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
+import { configurationError, JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { acquireCanvas, getCanvas, setCanvas } from '@/services/canvas-accessor.js';
+import { withRealCanvas } from '../helpers/real-canvas.js';
 
 const ctx = () => createMockContext({ tenantId: 'default' });
 
@@ -19,6 +23,18 @@ const failingCanvas = (err: unknown): DataCanvas =>
 /** The shape Node throws when `mkdir` cannot write to the configured path. */
 const errno = (code: string, message: string): NodeJS.ErrnoException =>
   Object.assign(new Error(message), { code });
+
+/**
+ * The shape the framework's DuckDB provider throws when it cannot create its
+ * private scratch directory: a `ConfigurationError` with the filesystem error on
+ * `cause`.
+ */
+const scratchFailure = (cause: Error): McpError =>
+  configurationError(
+    'Canvas scratch directory could not be created: CANVAS_TEMP_PATH (the OS temp directory when unset) must be writable by the server process.',
+    undefined,
+    { cause },
+  );
 
 afterEach(() => {
   setCanvas(undefined);
@@ -42,28 +58,30 @@ describe('canvas accessor', () => {
     await expect(acquireCanvas(canvas, 'abc0123456', ctx())).resolves.toBe(instance);
   });
 
-  // `acquire` creates the scratch root before opening DuckDB, so CANVAS_TEMP_PATH is the
-  // path that fails here — a read-only mount or a directory the non-root container user
-  // does not own. A bare `EACCES … mkdir '/var/lib/…'` gives an operator nothing to act
-  // on; the variable that controls the path has to be named.
+  // The framework's message names CANVAS_TEMP_PATH but carries the errno only on `cause`,
+  // which never reaches the caller — so EACCES and ENOSPC would read the same. The re-throw
+  // keeps the ConfigurationError code and adds the errno and the run-without-canvas option.
   for (const code of ['EACCES', 'EPERM', 'EROFS', 'ENOSPC']) {
-    it(`names the configuration knob when the scratch directory fails with ${code}`, async () => {
-      const canvas = failingCanvas(errno(code, `mkdir '/var/lib/eurostat-mcp-server/canvas-tmp'`));
+    it(`names the errno and both configuration knobs when the scratch directory fails with ${code}`, async () => {
+      const fsErr = errno(code, `mkdir '/var/lib/eurostat-mcp-server/canvas-tmp'`);
+      const canvas = failingCanvas(scratchFailure(fsErr));
       const err = (await acquireCanvas(canvas, undefined, ctx()).catch(
         (e: unknown) => e,
       )) as McpError;
-      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err).toBeInstanceOf(McpError);
+      expect(err.code).toBe(JsonRpcErrorCode.ConfigurationError);
       expect(err.message).toContain('CANVAS_TEMP_PATH');
+      expect(err.message).toContain('CANVAS_PROVIDER_TYPE=none');
       expect(err.message).toContain(code);
       expect(err.data).toMatchObject({ reason: 'canvas_unavailable', errno: code });
+      expect((err.cause as McpError).cause).toBe(fsErr);
     });
   }
 
-  it('finds the errno through a wrapped cause chain', async () => {
-    const canvas = failingCanvas(
-      new Error('Canvas init failed', { cause: errno('EACCES', 'mkdir denied') }),
-    );
+  it('finds an errno thrown bare, without a wrapping error', async () => {
+    const canvas = failingCanvas(errno('EACCES', 'mkdir denied'));
     await expect(acquireCanvas(canvas, undefined, ctx())).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ConfigurationError,
       data: { reason: 'canvas_unavailable', errno: 'EACCES' },
     });
   });
@@ -78,9 +96,32 @@ describe('canvas accessor', () => {
     await expect(acquireCanvas(canvas, 'zzzzzzzzzz', ctx())).rejects.toBe(original);
   });
 
-  it('does not reinterpret an errno it was not written for', async () => {
-    const original = errno('ETIMEDOUT', 'connect timed out');
+  it('leaves a scratch failure with an errno it was not written for exactly as it was', async () => {
+    const original = scratchFailure(errno('ENOTDIR', 'mkdir: not a directory'));
     const canvas = failingCanvas(original);
     await expect(acquireCanvas(canvas, undefined, ctx())).rejects.toBe(original);
   });
+
+  // Pins the framework behaviour the mapping depends on: a real DuckDB canvas pointed at
+  // a parent it cannot write must still carry the errno on its error's cause chain.
+  // Root bypasses the permission bit, and Windows ignores it, so neither can reproduce it.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'maps a real canvas whose CANVAS_TEMP_PATH parent is not writable',
+    async () => {
+      const readOnly = mkdtempSync(join(tmpdir(), 'eurostat-canvas-readonly-'));
+      chmodSync(readOnly, 0o500);
+      const { canvas, teardown } = withRealCanvas({ tempRootPath: join(readOnly, 'scratch') });
+      try {
+        await expect(acquireCanvas(canvas, undefined, ctx())).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ConfigurationError,
+          message: expect.stringContaining('(EACCES)'),
+          data: { reason: 'canvas_unavailable', errno: 'EACCES' },
+        });
+      } finally {
+        await teardown();
+        chmodSync(readOnly, 0o700);
+        rmSync(readOnly, { recursive: true, force: true });
+      }
+    },
+  );
 });
