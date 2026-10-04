@@ -12,14 +12,14 @@
       "url": "https://eurostat.caseyjhand.com/mcp"
     }
   ],
-  "version": "0.8.1",
+  "version": "0.9.0",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/eurostat-mcp-server",
       "runtimeHint": "npx",
-      "version": "0.8.1",
+      "version": "0.9.0",
       "environmentVariables": [
         {
           "name": "MCP_LOG_LEVEL",
@@ -121,7 +121,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/eurostat-mcp-server",
       "runtimeHint": "npx",
-      "version": "0.8.1",
+      "version": "0.9.0",
       "environmentVariables": [
         {
           "name": "MCP_TRANSPORT_TYPE",

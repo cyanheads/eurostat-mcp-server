@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.9.0](changelog/0.9.x/0.9.0.md) — 2026-10-03
+
+Opt-in eurostat_dataframe_drop removes one staged table from a canvas, the server moves to mcp-ts-core 0.13.11, and an unwritable CANVAS_TEMP_PATH now fails as a configuration error naming its errno.
+
 ## [0.8.1](changelog/0.8.x/0.8.1.md) — 2026-09-25
 
 The Docker images and packageManager pin move to Bun 1.4.2.

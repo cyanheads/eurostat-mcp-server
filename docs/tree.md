@@ -1,6 +1,6 @@
 # eurostat-mcp-server - Directory Structure
 
-Generated on: 2026-09-25 14:02:55
+Generated on: 2026-10-04 06:41:22
 
 ```text
 eurostat-mcp-server/
@@ -32,6 +32,7 @@ eurostat-mcp-server/
 │   ├── 0.6.x/
 │   ├── 0.7.x/
 │   ├── 0.8.x/
+│   ├── 0.9.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -134,11 +135,12 @@ eurostat-mcp-server/
 │   ├── clean-mcpb.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
+│   ├── install-otel.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── prune-musl-packages.ts
 │   ├── release-github.ts
-│   ├── split-changelog.ts
 │   └── tree.ts
 ├── src/
 │   ├── config/
@@ -153,6 +155,7 @@ eurostat-mcp-server/
 │   │       ├── definitions/
 │   │       │   ├── eurostat-browse-themes.tool.ts
 │   │       │   ├── eurostat-dataframe-describe.tool.ts
+│   │       │   ├── eurostat-dataframe-drop.tool.ts
 │   │       │   ├── eurostat-dataframe-query.tool.ts
 │   │       │   ├── eurostat-download-dataset.tool.ts
 │   │       │   ├── eurostat-get-dataset-info.tool.ts
@@ -178,6 +181,8 @@ eurostat-mcp-server/
 │   │   └── shared-load.ts
 │   └── index.ts
 ├── tests/
+│   ├── config/
+│   │   └── server-config.test.ts
 │   ├── fixtures/
 │   │   ├── comext/
 │   │   │   ├── comext-dataflows.xml
@@ -210,7 +215,8 @@ eurostat-mcp-server/
 │   │   ├── comext-fixtures.ts
 │   │   └── real-canvas.ts
 │   ├── integration/
-│   │   └── session-mode.int.test.ts
+│   │   ├── session-mode.int.test.ts
+│   │   └── tool-registration.int.test.ts
 │   ├── prompts/
 │   ├── resources/
 │   │   └── eurostat-dataset.resource.test.ts
@@ -229,12 +235,14 @@ eurostat-mcp-server/
 │       ├── eurostat-browse-themes.tool.test.ts
 │       ├── eurostat-comext-tools.test.ts
 │       ├── eurostat-dataframe-describe.tool.test.ts
+│       ├── eurostat-dataframe-drop.tool.test.ts
 │       ├── eurostat-dataframe-query.tool.test.ts
 │       ├── eurostat-download-dataset.tool.test.ts
 │       ├── eurostat-get-dataset-info.tool.test.ts
 │       ├── eurostat-get-dimension-values.tool.test.ts
 │       ├── eurostat-query-dataset.tool.test.ts
 │       ├── eurostat-search-datasets.tool.test.ts
+│       ├── narrowing-advice.test.ts
 │       └── security-and-edge-cases.test.ts
 ├── .dockerignore
 ├── .env.example
