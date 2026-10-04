@@ -1,14 +1,15 @@
 /**
  * @fileoverview Tool registration gates. Boots the built server over HTTP under
- * each combination of the settings that gate the dataframe tools and checks the
- * two surfaces a gate controls: `tools/list`, which is what a client can call,
- * and the landing page, where a gated tool stays visible with the reason it is
- * off and the setting that turns it on.
+ * each combination of the settings that gate the dataframe tools, set in the
+ * environment or in a `.env` file, and checks the two surfaces a gate controls:
+ * `tools/list`, which is what a client can call, and the landing page, where a
+ * gated tool stays visible with the reason it is off and the setting that turns
+ * it on.
  * @module tests/integration/tool-registration.int.test
  */
 
 import { type ChildProcess, spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -81,12 +82,25 @@ interface SpawnedServer {
   output: () => string;
 }
 
+interface SpawnOptions {
+  /**
+   * Working directory, where the framework looks for `.env`. Defaults to the
+   * suite's `workDir`, which holds none, so a local file stays out.
+   */
+  cwd?: string;
+  /** Variables kept out of the child's environment, so a `.env` in `cwd` is what sets them. */
+  unset?: readonly string[];
+}
+
 /**
  * Spawns `dist/index.js` over HTTP with `gate` layered over the inherited
  * environment. Every gate variable is removed from what the child inherits first,
  * so the shell running the suite cannot decide a case.
  */
-function spawnServer(gate: Record<string, string>): SpawnedServer {
+function spawnServer(
+  gate: Record<string, string>,
+  { cwd = workDir, unset = [] }: SpawnOptions = {},
+): SpawnedServer {
   const {
     CANVAS_PROVIDER_TYPE: _canvas,
     EUROSTAT_DATAFRAME_DROP_ENABLED: _drop,
@@ -95,23 +109,24 @@ function spawnServer(gate: Record<string, string>): SpawnedServer {
     ...inherited
   } = process.env;
   const logsDir = mkdtempSync(join(workDir, 'logs-'));
+  const env: NodeJS.ProcessEnv = {
+    ...inherited,
+    MCP_TRANSPORT_TYPE: 'http',
+    MCP_HTTP_HOST: '127.0.0.1',
+    // The OS picks a free port; the server logs the one it bound.
+    MCP_HTTP_PORT: '0',
+    MCP_LOG_LEVEL: 'info',
+    LOGS_DIR: logsDir,
+    CANVAS_TEMP_PATH: join(workDir, 'canvas'),
+    // Nothing here should reach upstream; a stray call fails against a closed local port.
+    EUROSTAT_BASE_URL: 'http://127.0.0.1:9',
+    EUROSTAT_COMEXT_BASE_URL: 'http://127.0.0.1:9',
+    ...gate,
+  };
+  for (const name of unset) delete env[name];
   const child = spawn(process.execPath, [DIST_INDEX], {
-    // The framework loads `.env` from the working directory; an empty one keeps a local file out.
-    cwd: workDir,
-    env: {
-      ...inherited,
-      MCP_TRANSPORT_TYPE: 'http',
-      MCP_HTTP_HOST: '127.0.0.1',
-      // The OS picks a free port; the server logs the one it bound.
-      MCP_HTTP_PORT: '0',
-      MCP_LOG_LEVEL: 'info',
-      LOGS_DIR: logsDir,
-      CANVAS_TEMP_PATH: join(workDir, 'canvas'),
-      // Nothing here should reach upstream; a stray call fails against a closed local port.
-      EUROSTAT_BASE_URL: 'http://127.0.0.1:9',
-      EUROSTAT_COMEXT_BASE_URL: 'http://127.0.0.1:9',
-      ...gate,
-    },
+    cwd,
+    env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   children.add(child);
@@ -132,8 +147,11 @@ function spawnServer(gate: Record<string, string>): SpawnedServer {
 }
 
 /** Boots the server and resolves once it logs the port it is listening on. */
-async function startServer(gate: Record<string, string>): Promise<RunningServer> {
-  const { child, log, output } = spawnServer(gate);
+async function startServer(
+  gate: Record<string, string>,
+  options?: SpawnOptions,
+): Promise<RunningServer> {
+  const { child, log, output } = spawnServer(gate, options);
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     const port = LISTENING.exec(log())?.[1];
@@ -166,8 +184,9 @@ async function runToExit(
 async function withServer(
   gate: Record<string, string>,
   body: (port: number) => Promise<void>,
+  options?: SpawnOptions,
 ): Promise<void> {
-  const server = await startServer(gate);
+  const server = await startServer(gate, options);
   try {
     await body(server.port);
   } finally {
@@ -347,6 +366,46 @@ describe('dataframe tool registration', () => {
         });
       },
     );
+  });
+
+  /**
+   * The framework loads `./.env` on its first config read, and the server
+   * config is cached on its own first read. The drop gate goes through the
+   * server config before `createApp()`, so it sees the file only when a
+   * framework config read came first: today the framework's logger makes one as
+   * it is imported, and `src/index.ts` reads `config.canvas` ahead of the gate.
+   * With neither, the cached config is built without the file, and every
+   * `EUROSTAT_*` value set there is ignored, the drop flag included.
+   */
+  it('reads the gate settings from a .env file in the working directory', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'eurostat-dotenv-'));
+    const dotenv = {
+      CANVAS_PROVIDER_TYPE: 'duckdb',
+      EUROSTAT_DATAFRAME_DROP_ENABLED: 'true',
+      CANVAS_TEMP_PATH: join(cwd, 'canvas'),
+    };
+    try {
+      writeFileSync(
+        join(cwd, '.env'),
+        Object.entries(dotenv)
+          .map(([name, value]) => `${name}=${value}\n`)
+          .join(''),
+      );
+      await withServer(
+        {},
+        async (port) => {
+          expect(await listedTools(port)).toEqual([
+            ...CORE_TOOLS,
+            'eurostat_dataframe_describe',
+            'eurostat_dataframe_query',
+            'eurostat_dataframe_drop',
+          ]);
+        },
+        { cwd, unset: Object.keys(dotenv) },
+      );
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 
   it('fails startup with the configuration banner when the drop flag does not parse', async () => {
