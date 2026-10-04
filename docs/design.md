@@ -14,6 +14,7 @@
 | `eurostat_download_dataset` | Download a whole dataset through the SDMX 2.1 TSV bulk endpoint, expand the wide layout into one row per observation, and stage them on the dataframe canvas when one is configured. Server-side filtering via the positional dimension key; a streaming byte budget bounds the transfer. | `dataset_code`, `filters{}`, `since_period?`, `until_period?`, `preview_limit?`, `canvas_id?` | `readOnlyHint: true` |
 | `eurostat_dataframe_describe` | List the tables staged on a dataframe canvas with their row counts and column names and types. Registered only when the canvas is enabled. | `canvas_id` | `readOnlyHint: true` |
 | `eurostat_dataframe_query` | Run a single read-only SQL `SELECT` across the staged tables. Registered only when the canvas is enabled. | `canvas_id`, `sql` | `readOnlyHint: true` |
+| `eurostat_dataframe_drop` | Remove one staged table from a canvas, leaving the canvas and its other tables in place; `dropped: false` when nothing by that name is staged. Registered only when the canvas is enabled and `EUROSTAT_DATAFRAME_DROP_ENABLED` opts in. | `canvas_id`, `table_name` | `readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false` |
 
 ### Resources
 
@@ -37,7 +38,7 @@ Target users: economic researchers comparing EU countries or regions, journalist
 
 ## Requirements
 
-- Read-only; no writes to Eurostat
+- Read-only; no writes to Eurostat. The one mutation is the opt-in drop of a table this server staged on its own canvas
 - Dataset discovery by keyword search across the Eurostat catalogue
 - Theme tree navigation (second-level theme folders as practical root, hierarchical subthemes)
 - Dataset metadata: dimensions, valid dimension values, time range, obs count
@@ -84,10 +85,11 @@ Parsing is DOM-style: the first load of `DS-045409` builds its 23 MB body into a
 | `EUROSTAT_TOC_CACHE_TTL_MS` | No | How long a fetched catalogue TOC stays usable before the next catalogue call refreshes it, in ms (default: `43200000` — 12 hours) |
 | `EUROSTAT_BULK_TIMEOUT_MS` | No | HTTP timeout for one `download_dataset` transfer in ms, held separate because a bulk body streams for minutes (default: `120000` — 2 minutes) |
 | `EUROSTAT_BULK_MAX_BYTES` | No | Byte budget for one `download_dataset` transfer, counted on the decoded TSV and enforced while streaming (default: `52428800` — 50 MiB) |
-| `CANVAS_PROVIDER_TYPE` | No | `duckdb` enables the dataframe canvas — the two dataframe tools become callable, `query_dataset` stages a match above 5,000 observations, and `download_dataset` retains a whole bulk download rather than only its preview (default: `none`) |
-| `CANVAS_TEMP_PATH` | No | DuckDB spill directory; must be writable by the server process (default: `<os tmpdir>/mcp-canvas`) |
+| `CANVAS_PROVIDER_TYPE` | No | `duckdb` enables the dataframe canvas — `dataframe_describe` and `dataframe_query` become callable, `query_dataset` stages a match above 5,000 observations, and `download_dataset` retains a whole bulk download rather than only its preview (default: `none`) |
+| `CANVAS_TEMP_PATH` | No | Parent directory for DuckDB spill files; the provider creates a private `mcp-canvas-XXXXXX` directory inside it, so it must be writable by the server process (default: the OS temp directory) |
 | `CANVAS_TTL_MS` | No | Sliding lifetime of a staged canvas in ms (default: `86400000` — 24 hours) |
 | `CANVAS_DEFAULT_ROW_LIMIT` | No | Max rows one `dataframe_query` response carries before reporting `truncated` (default: `10000`) |
+| `EUROSTAT_DATAFRAME_DROP_ENABLED` | No | `true` makes `dataframe_drop` callable; takes effect only beside `CANVAS_PROVIDER_TYPE=duckdb`. Parsed with `z.stringbool()`, so `false` disables and an unrecognised value fails startup (default: `false`) |
 
 No API keys required. The canvas variables are framework-owned (`@cyanheads/mcp-ts-core`), not part of this server's own Zod config schema. `@duckdb/node-api` is a runtime dependency, so every install and the published image already carry the binding and `CANVAS_PROVIDER_TYPE` is the only switch.
 
@@ -481,7 +483,7 @@ Overspend truncates rather than throws. The caller has already paid for everythi
 
 ### `eurostat_dataframe_describe` / `eurostat_dataframe_query`
 
-The SQL surface over what `query_dataset`, `download_dataset`, and `get_dimension_values` stage. Both are wrapped in `disabledTool()` when `CANVAS_PROVIDER_TYPE` is `none`: they stay visible on the landing page and the server card — with the variable that turns them on — but are skipped at MCP registration, so clients never see a tool they cannot call, and an operator reading the README does not have to guess why it is missing.
+The SQL surface over what `query_dataset`, `download_dataset`, and `get_dimension_values` stage. Both are wrapped in `disabledTool()` when `CANVAS_PROVIDER_TYPE` is `none`: they stay visible on the landing page — with the variable that turns them on — but are skipped at MCP registration, so clients never see a tool they cannot call, and an operator reading the README does not have to guess why it is missing.
 
 `dataframe_query` passes caller SQL straight to the canvas. It is not pre-filtered here: the framework's gate rejects anything that is not a single `SELECT` (statement count, statement type, an EXPLAIN-plan operator allowlist, and a table-function deny-list covering file and external-data readers), and each rejection carries a typed reason. A second, weaker string filter in front of that would only shadow those reasons with a vaguer message. `denySystemCatalogs` is left off because `dataframe_describe` already exposes the catalog deliberately.
 
@@ -489,13 +491,32 @@ The SQL surface over what `query_dataset`, `download_dataset`, and `get_dimensio
 - `canvas_id: string` — the `canvasId` from a `query_dataset`, `download_dataset`, or `get_dimension_values` response, declared with `CanvasIdSchema`
 - `sql: string` (query only) — a single read-only `SELECT`
 
-**Output:** `describe` returns `canvas_id`, `expires_at`, and `tables[]` (`name`, `kind`, `row_count`, `expires_at?`, `columns[]`). `query` returns `canvas_id`, `columns[]`, `rows[]`, `row_count`, `truncated`. 64-bit integer results come back as strings — the framework's JSON-safe row shape — so `COUNT(*)` is a string unless cast.
+**Output:** `describe` returns `canvasId`, `expiresAt`, and `tables[]` (`name`, `kind`, `rowCount`, `expiresAt?`, `columns[]`). `query` returns `canvasId`, `columns[]`, `rows[]`, `rowCount`, `truncated`. 64-bit integer results come back as strings — the framework's JSON-safe row shape — so `COUNT(*)` is a string unless cast.
 
 **Errors:**
 - `canvas_disabled` (ServiceUnavailable, non-retryable): the deployment runs without a canvas. Recovery is `query_dataset` with narrower filters
 - `canvas_not_found` (NotFound): unknown or expired `canvas_id`; also what a canvas belonging to another tenant returns, so existence does not leak across tenants
 - `missing_table` (NotFound, query only): the SQL names a table that is not staged or has expired
 - SQL gate rejections surface as `ValidationError` with the framework's reason (`multi_statement`, `non_select_statement`, `denied_function`, `invalid_sql`, …)
+
+---
+
+### `eurostat_dataframe_drop`
+
+Removes one staged table through the canvas's own `drop()`, which looks the name up and issues `DROP TABLE` or `DROP VIEW` to match; the canvas and its other tables are untouched. It has two gates. Without a canvas it is wrapped in `disabledTool()` like the other two, and its hint names `EUROSTAT_DATAFRAME_DROP_ENABLED=true` beside `CANVAS_PROVIDER_TYPE=duckdb` when the flag is off too, so turning the canvas on alone is not a dead end. With a canvas it is still disabled until that flag is `true`, with a reason saying table cleanup is off in this deployment.
+
+**Input:**
+- `canvas_id: string` — declared with `CanvasIdSchema`, as on the other two
+- `table_name: string` — the name exactly as `dataframe_describe` lists it, declared with the framework's `CANVAS_IDENTIFIER_REGEX`, so a value no staged table could carry fails argument validation with a message pointing at `dataframe_describe`
+
+**Output:** `canvasId`, `tableName` (as sent), `dropped`, and `expiresAt` (the canvas's, slid forward by the call). `dropped: false` means nothing by that name was staged at call time — never staged, already dropped, expired, or a different case, since the lookup is exact — and an enrichment `notice` says so and points at `dataframe_describe`. A repeated drop is therefore a no-op rather than a failure, which is what makes `idempotentHint: true` honest.
+
+**Errors:**
+- `canvas_disabled` (ServiceUnavailable, non-retryable): the deployment runs without a canvas
+- `canvas_not_found` (NotFound): unknown or expired `canvas_id`; an expired canvas has already released every table it held
+- `identifier_reserved` (ValidationError): a bare SQL keyword such as `select`, which passes the identifier pattern but which no staged table can carry
+
+Both come from the canvas, which words them for staging — re-run the tool that staged the data, choose another table name. For a drop that advice restores what was meant to go, so the handler re-throws each through `ctx.fail` and the caller gets this tool's message and declared recovery.
 
 ---
 
@@ -604,7 +625,7 @@ The SQL surface over what `query_dataset`, `download_dataset`, and `get_dimensio
 
 **Canvas tables are in-memory and per-process:** a restart drops every staged table, and a `canvas_id` issued by one process is meaningless to another. Behind a load balancer, a follow-up `dataframe_query` must reach the same instance that staged the table. Both are properties of the framework's canvas, not of this server; a `canvas_id` that no longer resolves fails as `canvas_not_found` with a recovery hint to re-run the query.
 
-**No canvas from a `.mcpb` bundle:** the bundle strips platform-specific native bindings so it stays portable and inside the registry size cap, which removes DuckDB. A bundle install runs the five core tools; SQL analytics needs the npm, Docker, or from-source install.
+**No canvas from a `.mcpb` bundle:** the bundle strips platform-specific native bindings so it stays portable and inside the registry size cap, which removes DuckDB. A bundle install runs the six core tools; SQL analytics needs the npm, Docker, or from-source install.
 
 ---
 
@@ -650,6 +671,7 @@ The SQL surface over what `query_dataset`, `download_dataset`, and `get_dimensio
 | 2026-08-04 | No row cap on what is staged | The transfer timeout already bounds this path far below any size DuckDB struggles with — the largest response that fits in the 30 s default is ~1M observations, and DuckDB spills to the configured scratch directory rather than failing. A second cap would be a limit guarding a state the first one already prevents. |
 | 2026-08-04 | Register the dataframe tools via `disabledTool()` rather than omitting them | Omitting them hides the capability from the landing page and server card too, so an operator reading the README sees a tool the server never mentions. The wrapper keeps them off `tools/list` — clients still cannot call them — while rendering the reason and the variable that enables them, and it keeps the framework's canvas-consumer pairing check satisfied in both configurations. |
 | 2026-08-04 | Fail rather than degrade when staging errors | A canvas that quietly stops working looks identical to one that was never enabled, and the difference only surfaces as a capability silently missing. Acquire failures caused by an unwritable scratch directory are re-thrown naming `CANVAS_TEMP_PATH`, so the actionable case is actionable rather than a bare `EACCES`. |
+| 2026-10-03 | Re-throw an unwritable `CANVAS_TEMP_PATH` as `ConfigurationError` (`canvas_unavailable`), superseding `ServiceUnavailable` | Since framework 0.13.9 the provider creates a private `mcp-canvas-XXXXXX` directory inside `CANVAS_TEMP_PATH` and fails canvas creation as `ConfigurationError`, with the filesystem error on `cause`. Its message names the variable, but the errno never reaches the caller and `CANVAS_PROVIDER_TYPE=none` goes unmentioned, so the re-throw stays to add both. It keeps the framework's code: `ServiceUnavailable` counted a local misconfiguration as an upstream outage in `mcp.error.category`. |
 | 2026-08-04 | `dataframe_describe` omits the canvas's `approxSizeBytes` | The framework populates that field from DuckDB's `duckdb_tables().estimated_size`, which is an estimated row *cardinality*, not a byte size — measured, it comes back equal to `rowCount` (6,607 and 7,882 on two staged tables). Surfacing it would report a row count under a byte-shaped name, and `row_count` already carries that number exactly. |
 | 2026-08-04 | `@duckdb/node-api` as a runtime dependency, with no build-time gate on it | The canvas is already gated at runtime by `CANVAS_PROVIDER_TYPE` (`none` by default), so the ~110 MB binding sits inert until an operator turns the feature on. Gating the install on top of that — a dev dependency plus a Docker build arg — would mean the published image, which is built with no custom build args, could never list the dataframe tools at all. Shipping the binding in every install and image leaves one switch to reason about. The `.mcpb` bundle is the one surface that cannot run the canvas: it strips platform-specific native bindings to stay portable and inside the registry size cap. |
 | 2026-08-04 | Add `eurostat_download_dataset` over the SDMX 2.1 TSV endpoint rather than widening `query_dataset` | The two answer different questions and have different failure modes. `query_dataset` fetches a filtered slice as JSON-stat and decodes it in memory; the bulk path streams a whole dataset in a format with different error encoding (XML SOAP), different transport behaviour (undeclared gzip, chunked), and a size bound this server has to impose itself. Folding that into one tool would mean one description covering two shapes and one error contract covering both fault vocabularies. |
@@ -674,3 +696,6 @@ The SQL surface over what `query_dataset`, `download_dataset`, and `get_dimensio
 | 2026-09-25 | Match filter keys to dimension ids case-insensitively in every server-side check, and send the keys as given | Eurostat reads `GEO` as `geo`, so an exact-case check let `GEO` plus `geo_level` through and missed its unmatched values; the bulk key builder rejected it outright. Rewriting keys upstream is unnecessary — the Statistics API already accepts any case and the bulk key is positional — so only the checks change. |
 | 2026-09-25 | Disclose `download_dataset`'s short preview in `notice` and `totalCount`, not `truncated` | `truncated: true` on nearly every complete download read as "the data was cut short", which on this tool is `budgetExceeded`'s job, and it meant the opposite of `query_dataset`'s `truncated` for the same situation. `ctx.enrich.total` keeps the framework's capped-list disclosure satisfied. The no-canvas sentence stops recommending a narrower query when the rows already fit inline, where that advice was false. |
 | 2026-09-21 | Declare every `canvas_id` input with the framework's `CanvasIdSchema` | The minted 10-character shape then reaches `inputSchema`, so a caller sees it before calling, and an impossible id fails argument validation instead of a registry lookup. The accepted cost is on the two staging tools: a malformed id is now rejected even where a well-formed one would be ignored (no canvas, or a match at or below 5,000). |
+| 2026-10-03 | Ship `dataframe_drop` behind `EUROSTAT_DATAFRAME_DROP_ENABLED` (default `false`), wrapped in `disabledTool()` until the flag and the canvas are both on | A drop cannot be undone, and on a no-auth deployment holding a `canvas_id` is the only access check, so any caller with an id could remove a table another is still querying. Staged tables already expire with their canvas, which makes cleanup a convenience an operator opts into rather than a default. |
+| 2026-10-03 | Declare `dataframe_drop`'s `table_name` with the framework's `CANVAS_IDENTIFIER_REGEX` | A name no staged table could carry then fails argument validation with a message pointing at `dataframe_describe`, and the pattern reaches `inputSchema`. The canvas's own rejection of the same name carries a hint about choosing a new one, which a caller removing an existing table cannot act on. A bare SQL keyword still passes the pattern; the handler re-throws the canvas's `identifier_reserved`, and its `canvas_not_found`, through `ctx.fail` for the same reason. |
+| 2026-10-03 | Parse the server config in `setup()`, and read the drop flag ahead of `createApp()` without reporting a parse failure there | A tool made the first `getServerConfig()` call, so a bad value let the server report ready and then failed every call. The tool list needs the flag before `createApp()` runs, and an error thrown there escapes as an uncaught stack trace; `setup()` parses again and fails through the framework's configuration banner instead. |

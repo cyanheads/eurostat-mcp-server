@@ -57,6 +57,12 @@ const ServerConfigSchema = z.object({
     .describe(
       'Byte budget for one SDMX bulk download, measured on the decoded TSV rather than on the wire. Eurostat sends the body chunked with no Content-Length, so the budget is enforced while streaming and the transfer is aborted the moment it is reached. Defaults to 50 MiB.',
     ),
+  dataframeDropEnabled: z
+    .stringbool()
+    .default(false)
+    .describe(
+      'Register eurostat_dataframe_drop, which removes one staged table from a dataframe canvas. Off by default: a drop cannot be undone, and staged tables already expire with their canvas. Takes effect only with CANVAS_PROVIDER_TYPE=duckdb.',
+    ),
 });
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
@@ -70,6 +76,7 @@ export function getServerConfig(): z.infer<typeof ServerConfigSchema> {
     tocCacheTtlMs: 'EUROSTAT_TOC_CACHE_TTL_MS',
     bulkTimeoutMs: 'EUROSTAT_BULK_TIMEOUT_MS',
     bulkMaxBytes: 'EUROSTAT_BULK_MAX_BYTES',
+    dataframeDropEnabled: 'EUROSTAT_DATAFRAME_DROP_ENABLED',
   });
   return _config;
 }
