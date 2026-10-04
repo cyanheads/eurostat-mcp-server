@@ -18,18 +18,8 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/eurostat-mcp-server",
-      "runtimeHint": "bun",
+      "runtimeHint": "npx",
       "version": "0.8.1",
-      "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:stdio"
-        }
-      ],
       "environmentVariables": [
         {
           "name": "MCP_LOG_LEVEL",
@@ -96,7 +86,7 @@
         },
         {
           "name": "CANVAS_TEMP_PATH",
-          "description": "Directory DuckDB writes canvas spill files to. Must be writable by the server process. Defaults to a 'mcp-canvas' directory under the OS temp directory.",
+          "description": "Parent directory for DuckDB canvas spill files: a private 'mcp-canvas-XXXXXX' directory is created inside it, so it must be writable by the server process. Defaults to the OS temp directory.",
           "format": "string",
           "isRequired": false
         },
@@ -113,6 +103,13 @@
           "format": "string",
           "isRequired": false,
           "default": "10000"
+        },
+        {
+          "name": "EUROSTAT_DATAFRAME_DROP_ENABLED",
+          "description": "Set to 'true' to list eurostat_dataframe_drop, which removes one staged table from a dataframe canvas and leaves its other tables in place. Off by default because a drop cannot be undone; staged tables expire with their canvas either way. Takes effect only with CANVAS_PROVIDER_TYPE=duckdb.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "false"
         }
       ],
       "transport": {
@@ -123,19 +120,15 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/eurostat-mcp-server",
-      "runtimeHint": "bun",
+      "runtimeHint": "npx",
       "version": "0.8.1",
-      "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:http"
-        }
-      ],
       "environmentVariables": [
+        {
+          "name": "MCP_TRANSPORT_TYPE",
+          "description": "Selects the HTTP transport.",
+          "format": "string",
+          "value": "http"
+        },
         {
           "name": "MCP_HTTP_HOST",
           "description": "The hostname for the HTTP server.",
@@ -235,7 +228,7 @@
         },
         {
           "name": "CANVAS_TEMP_PATH",
-          "description": "Directory DuckDB writes canvas spill files to. Must be writable by the server process. Defaults to a 'mcp-canvas' directory under the OS temp directory.",
+          "description": "Parent directory for DuckDB canvas spill files: a private 'mcp-canvas-XXXXXX' directory is created inside it, so it must be writable by the server process. Defaults to the OS temp directory.",
           "format": "string",
           "isRequired": false
         },
@@ -252,6 +245,13 @@
           "format": "string",
           "isRequired": false,
           "default": "10000"
+        },
+        {
+          "name": "EUROSTAT_DATAFRAME_DROP_ENABLED",
+          "description": "Set to 'true' to list eurostat_dataframe_drop, which removes one staged table from a dataframe canvas and leaves its other tables in place. Off by default because a drop cannot be undone; staged tables expire with their canvas either way. Takes effect only with CANVAS_PROVIDER_TYPE=duckdb.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "false"
         }
       ],
       "transport": {
