@@ -14,7 +14,7 @@
 # output. A stage that compiles a native addon needs the target-arch toolchain
 # and cannot cross-compile this way — drop the flag there.
 # ==============================================================================
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.2 AS build
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.3 AS build
 
 WORKDIR /usr/src/app
 
@@ -46,7 +46,7 @@ RUN bun run build
 # A clean image rather than `FROM build`: the build stage's node_modules holds
 # devDependencies.
 # ==============================================================================
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.2 AS deps
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.3 AS deps
 
 WORKDIR /usr/src/app
 
@@ -118,7 +118,7 @@ RUN rm -rf node_modules/@socketsecurity/bun-security-scanner
 # dependencies and build artifacts. Its only Bun invocations are HEALTHCHECK
 # and CMD, which run on the real target at container start.
 # ==============================================================================
-FROM oven/bun:1.4.2-slim AS production
+FROM oven/bun:1.4.3-slim AS production
 
 WORKDIR /usr/src/app
 
@@ -147,7 +147,8 @@ COPY --from=build /usr/src/app/dist ./dist
 # Create and set permissions for the log and canvas directories, assigning ownership
 # to the 'bun' user. CANVAS_TEMP_PATH is the parent directory inside which the DuckDB
 # provider creates its private `mcp-canvas-XXXXXX` scratch directory for spill files,
-# and the framework sandboxes path exports to CANVAS_EXPORT_PATH. The export root is
+# and CANVAS_EXPORT_PATH is the only other place each canvas's DuckDB engine may read
+# or write files — its configuration locks that bound. The export root is
 # the one that breaks by default: it resolves under the working directory /usr/src/app,
 # which this non-root user does not own. Both are pointed at owned directories below
 # so neither depends on the image's writable-by-accident paths.
