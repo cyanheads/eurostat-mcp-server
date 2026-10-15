@@ -1,6 +1,6 @@
 # eurostat-mcp-server - Directory Structure
 
-Generated on: 2026-10-04 06:41:22
+Generated on: 2026-10-15 02:59:43
 
 ```text
 eurostat-mcp-server/
@@ -25,6 +25,7 @@ eurostat-mcp-server/
 │   └── settings.json
 ├── changelog/
 │   ├── 0.1.x/
+│   ├── 0.10.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
 │   ├── 0.4.x/
@@ -162,7 +163,8 @@ eurostat-mcp-server/
 │   │       │   ├── eurostat-get-dimension-values.tool.ts
 │   │       │   ├── eurostat-query-dataset.tool.ts
 │   │       │   └── eurostat-search-datasets.tool.ts
-│   │       └── narrowing-advice.ts
+│   │       ├── narrowing-advice.ts
+│   │       └── value-list-paging.ts
 │   ├── services/
 │   │   ├── eurostat-bulk/
 │   │   │   ├── eurostat-bulk-service.ts
@@ -176,7 +178,9 @@ eurostat-mcp-server/
 │   │   │   └── types.ts
 │   │   ├── canvas-accessor.ts
 │   │   ├── eurostat-codelists.ts
+│   │   ├── eurostat-filters.ts
 │   │   ├── eurostat-hosts.ts
+│   │   ├── eurostat-outage.ts
 │   │   ├── eurostat-periods.ts
 │   │   └── shared-load.ts
 │   └── index.ts
@@ -198,11 +202,18 @@ eurostat-mcp-server/
 │   │   │   ├── ds-999999-data.xml
 │   │   │   ├── ds-999999-dataflow.xml
 │   │   │   └── ds-999999-statistics.json
+│   │   ├── dimension-values/
+│   │   │   ├── avia-par-de-airp-pr.json
+│   │   │   ├── demo-r-pjangrp3-geo-nuts3.json
+│   │   │   ├── ds-045409-product-excerpt.json
+│   │   │   ├── nama-10-gdp-na-item.json
+│   │   │   └── sbs-ovw-act-nace-r2.json
 │   │   ├── eurostat-sdmx-metadata.ts
 │   │   ├── nama-10-gdp-de-since-2030.json
 │   │   ├── nama-10-gdp-de-until-1980.json
 │   │   ├── sts-inpr-m-ie-confidential.json
 │   │   ├── sts-inpr-m-ie-empty.json
+│   │   ├── toc-2026-10-14-excerpt.tsv
 │   │   ├── une-rt-m-geo-de-lower-last1.json
 │   │   ├── une-rt-m-geo-de-lower-last3.json
 │   │   ├── une-rt-m-geo-de-xx-age-zzz-since-2026-01.json

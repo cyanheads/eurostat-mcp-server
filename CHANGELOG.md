@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.10.0](changelog/0.10.x/0.10.0.md) — 2026-10-14 · ⚠️ Breaking
+
+Pages long dimension-value lists with filter and cursor, rejects filter keys named like API controls, reports upstream outages and partial or stale catalogues, fixes blank filters, time-selection conflicts and canvas recoveries, matches search terms across spacing beside punctuation, and adopts mcp-ts-core 0.13.15.
+
 ## [0.9.0](changelog/0.9.x/0.9.0.md) — 2026-10-03
 
 Opt-in eurostat_dataframe_drop removes one staged table from a canvas, the server moves to mcp-ts-core 0.13.11, and an unwritable CANVAS_TEMP_PATH now fails as a configuration error naming its errno.
