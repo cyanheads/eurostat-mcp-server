@@ -13,7 +13,7 @@ import {
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { fetchWithTimeout, withExtra, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import {
   CONF_STATUS_COLUMN,
@@ -26,7 +26,9 @@ import {
   OBS_VALUE_COLUMN,
   OBS_VALUE_TEXT_COLUMN,
 } from '@/services/eurostat-codelists.js';
+import { dropUnsetFilters } from '@/services/eurostat-filters.js';
 import { dataHostFor, isComextDataset } from '@/services/eurostat-hosts.js';
+import { isUpstreamOutage, upstreamOutage } from '@/services/eurostat-outage.js';
 import { awaitShared } from '@/services/shared-load.js';
 import {
   parseSdmxDatasetMetadata,
@@ -51,6 +53,43 @@ const CONF_SEPARATOR = '|';
 
 /** A Statistics API error label that names one of the two period parameters. */
 const PERIOD_PARAM_LABEL = /'(since|until)TimePeriod'/;
+
+/**
+ * Eurostat's refusal of two time selections in one request — a time-dimension filter
+ * beside a period parameter, or `time` beside `time_period`. Its label names the period
+ * parameters too, so it is matched ahead of {@link PERIOD_PARAM_LABEL}. The match is
+ * anchored on a time parameter because the same wording refuses `geo` beside `geoLevel`,
+ * which is not a time conflict.
+ */
+const TIME_SELECTION_CONFLICT_LABEL =
+  /'(?:TIME|TIME_PERIOD|\w+TimePeriod)' parameter.*cannot be set at the same time/;
+
+/** Quote an upstream label as a sentence: one closing period, whether or not Eurostat sent one. */
+function asSentence(label: string): string {
+  const trimmed = label.trim();
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+}
+
+/**
+ * Statistics API controls, keyed lower-case since Eurostat reads them in any case, with
+ * the tool input that sets each — none for `format`, which is always JSON. A filter key
+ * naming one would change the request's language, time selection, or geography level
+ * while bypassing that input's validation, or override it when it is set.
+ */
+const CONTROL_INPUTS = new Map<string, string | undefined>([
+  ['lang', 'lang'],
+  ['format', undefined],
+  ['geolevel', 'geo_level'],
+  ['sincetimeperiod', 'since_period'],
+  ['untiltimeperiod', 'until_period'],
+  ['lasttimeperiod', 'last_n_periods'],
+]);
+
+/** Filter keys that select the time dimension itself, lower-case. */
+const TIME_DIMENSION_KEYS = new Set(['time', 'time_period']);
+
+/** The dataset-scoped SDMX 2.1 structure resources read from Eurostat. */
+type SdmxStructureResource = 'contentconstraint' | 'dataflow' | 'datastructure';
 
 /**
  * How long parsed dataset metadata is reused. Eurostat publishes data at 11:00 and
@@ -254,10 +293,7 @@ export class EurostatDataService {
    * the current one. Its version moves with the dataset (`earn_ses_annual`'s is
    * 22.0), and a pinned `/1.0` returns the dataset's first structure instead.
    */
-  private buildSdmxUrl(
-    resource: 'contentconstraint' | 'dataflow' | 'datastructure',
-    datasetCode: string,
-  ): URL {
+  private buildSdmxUrl(resource: SdmxStructureResource, datasetCode: string): URL {
     const version = resource === 'datastructure' ? '' : '/1.0';
     const url = new URL(
       `${dataHostFor(datasetCode)}/sdmx/2.1/${resource}/ESTAT/${encodeURIComponent(datasetCode)}${version}`,
@@ -274,16 +310,18 @@ export class EurostatDataService {
    * and undefined for the shared metadata load, which no single caller may cancel.
    */
   private fetchSdmxXml(
-    url: URL,
+    resource: SdmxStructureResource,
     datasetCode: string,
     ctx: Context,
     signal: AbortSignal | undefined,
     timeoutMs = getServerConfig().requestTimeoutMs,
   ): Promise<string> {
+    const url = this.buildSdmxUrl(resource, datasetCode).toString();
+    const fetchCtx = withExtra(ctx, { endpoint: `sdmx-${resource}`, datasetCode });
     return withRetry(
       async () => {
         try {
-          const response = await fetchWithTimeout(url.toString(), timeoutMs, ctx, {
+          const response = await fetchWithTimeout(url, timeoutMs, fetchCtx, {
             ...(signal && { signal }),
             expectedStatuses: [404],
           });
@@ -301,11 +339,22 @@ export class EurostatDataService {
       },
       {
         operation: 'fetchSdmxMetadata',
-        context: ctx,
+        context: fetchCtx,
         baseDelayMs: 1000,
         ...(signal && { signal }),
       },
-    );
+    ).catch((error: unknown) => {
+      // A read the caller cancelled is the caller's outcome, whatever the last attempt saw.
+      if (signal?.aborted) throw error;
+      throw (
+        upstreamOutage(
+          error,
+          "Eurostat's SDMX structure endpoint",
+          `the ${resource} read of dataset "${datasetCode}"`,
+          { datasetCode },
+        ) ?? error
+      );
+    });
   }
 
   /**
@@ -374,19 +423,8 @@ export class EurostatDataService {
   private async loadSdmxMetadata(datasetCode: string, ctx: Context): Promise<SdmxDatasetMetadata> {
     const { metadataTimeoutMs } = getServerConfig();
     const [dataflowXml, constraintXml] = await Promise.all([
-      this.fetchSdmxXml(
-        this.buildSdmxUrl('dataflow', datasetCode),
-        datasetCode,
-        ctx,
-        undefined,
-        metadataTimeoutMs,
-      ),
-      this.fetchSdmxXml(
-        this.buildSdmxUrl('contentconstraint', datasetCode),
-        datasetCode,
-        ctx,
-        undefined,
-      ),
+      this.fetchSdmxXml('dataflow', datasetCode, ctx, undefined, metadataTimeoutMs),
+      this.fetchSdmxXml('contentconstraint', datasetCode, ctx, undefined),
     ]);
     /**
      * The parse's strings are slices of the response bodies, and a slice keeps its
@@ -399,13 +437,19 @@ export class EurostatDataService {
     );
   }
 
-  private fetchJson(url: URL, ctx: Context): Promise<JsonStatResponse> {
+  /**
+   * One Statistics API request, retried on transient failures. A 5xx or an unreachable
+   * host that outlasts the retries fails as a retryable `upstream_fault`; a call the
+   * caller cancelled keeps its cancellation.
+   */
+  private fetchJson(url: URL, datasetCode: string, ctx: Context): Promise<JsonStatResponse> {
     const { requestTimeoutMs } = getServerConfig();
+    const fetchCtx = withExtra(ctx, { endpoint: 'statistics-data' });
     return withRetry(
       async () => {
         let response: Awaited<ReturnType<typeof fetchWithTimeout>>;
         try {
-          response = await fetchWithTimeout(url.toString(), requestTimeoutMs, ctx, {
+          response = await fetchWithTimeout(url.toString(), requestTimeoutMs, fetchCtx, {
             signal: ctx.signal,
             // 400 (invalid dimension / conflicting params), 404 (unknown dataset) and 413
             // (extraction too large) are modeled outcomes reclassified below into the
@@ -421,6 +465,10 @@ export class EurostatDataService {
           // classifier so Eurostat's error array maps to the declared contract on the live
           // path too: id 100 → not_found, id 150 → invalid_dimension, other 400 →
           // conflicting_params. Both channels then carry the reason + recovery hint.
+          //
+          // On a 5xx, only a refusal this server models replaces the HTTP error: an error
+          // array naming nothing it models is the outage page, and the HTTP error is what
+          // marks it one.
           const errData =
             err instanceof McpError
               ? (err.data as { errorSource?: string; body?: string } | undefined)
@@ -433,7 +481,14 @@ export class EurostatDataService {
               // Body was truncated past the 500-byte cap or is non-JSON (e.g. an HTML
               // error page) — fall through and rethrow the raw HTTP error unchanged.
             }
-            if (parsed) this.checkResponseErrors(parsed, url.toString());
+            if (parsed) {
+              try {
+                this.checkResponseErrors(parsed, url.toString());
+              } catch (classified) {
+                const modeled = (classified as McpError).data?.reason !== undefined;
+                if (modeled || !isUpstreamOutage(err)) throw classified;
+              }
+            }
           }
           throw err;
         }
@@ -454,8 +509,15 @@ export class EurostatDataService {
         this.checkResponseErrors(parsed, url.toString());
         return parsed;
       },
-      { operation: 'fetchJsonStat', context: ctx, baseDelayMs: 1000, signal: ctx.signal },
-    );
+      { operation: 'fetchJsonStat', context: fetchCtx, baseDelayMs: 1000, signal: ctx.signal },
+    ).catch((error: unknown) => {
+      if (ctx.signal.aborted) throw error;
+      throw (
+        upstreamOutage(error, "Eurostat's Statistics API", `a query of dataset "${datasetCode}"`, {
+          datasetCode,
+        }) ?? error
+      );
+    });
   }
 
   private checkResponseErrors(data: JsonStatResponse, url: string): void {
@@ -494,34 +556,43 @@ export class EurostatDataService {
       }
       if (err.status === 404) {
         throw notFound(
-          `Dataset not found. Eurostat error: ${err.label}. Verify the dataset code with eurostat_search_datasets or eurostat_browse_themes.`,
+          `Dataset not found. Eurostat error: ${asSentence(err.label)} Verify the dataset code with eurostat_search_datasets or eurostat_browse_themes.`,
           { reason: 'not_found', eurostatError: err },
         );
       }
       if (err.status === 400) {
         if (err.id === 150) {
           throw validationError(
-            `Invalid dimension code. Eurostat error: ${err.label}. Use eurostat_get_dataset_info to see valid dimensions for this dataset.`,
+            `Invalid dimension code. Eurostat error: ${asSentence(err.label)} Use eurostat_get_dataset_info to see valid dimensions for this dataset.`,
             { reason: 'invalid_dimension', eurostatError: err },
           );
+        }
+        if (TIME_SELECTION_CONFLICT_LABEL.test(err.label)) {
+          throw validationError(`Bad request. Eurostat error: ${asSentence(err.label)}`, {
+            reason: 'conflicting_params',
+            eurostatError: err,
+            recovery: {
+              hint: 'Eurostat takes one time selection per request: keep one of filters.time, filters.time_period, since_period/until_period, or last_n_periods.',
+            },
+          });
         }
         // Eurostat's own refusal of a period literal: error id 140 for one it cannot parse
         // as a time filter, or a generic 400 whose label names the period parameter.
         if (err.id === 140 || PERIOD_PARAM_LABEL.test(err.label)) {
           throw validationError(
-            `Eurostat rejected the period range. Eurostat error: ${err.label}.`,
+            `Eurostat rejected the period range. Eurostat error: ${asSentence(err.label)}`,
             {
               reason: 'invalid_period',
               eurostatError: err,
             },
           );
         }
-        throw validationError(`Bad request. Eurostat error: ${err.label}.`, {
+        throw validationError(`Bad request. Eurostat error: ${asSentence(err.label)}`, {
           reason: 'conflicting_params',
           eurostatError: err,
         });
       }
-      throw serviceUnavailable(`Eurostat API error ${err.status}: ${err.label}.`, {
+      throw serviceUnavailable(`Eurostat API error ${err.status}: ${asSentence(err.label)}`, {
         eurostatError: err,
       });
     }
@@ -728,12 +799,7 @@ export class EurostatDataService {
    * order.
    */
   async getDimensionOrder(datasetCode: string, ctx: Context): Promise<string[]> {
-    const xml = await this.fetchSdmxXml(
-      this.buildSdmxUrl('datastructure', datasetCode),
-      datasetCode,
-      ctx,
-      ctx.signal,
-    );
+    const xml = await this.fetchSdmxXml('datastructure', datasetCode, ctx, ctx.signal);
     const order = parseSdmx(datasetCode, () => parseSdmxDimensionOrder(xml));
     if (order.length === 0) {
       throw serviceUnavailable(
@@ -821,12 +887,10 @@ export class EurostatDataService {
     previewLimit: number,
     ctx: Context,
   ): Promise<QueryExecution> {
-    // A zero-length filter array places no restriction on the request. Drop those entries once,
-    // up front, so the conflict check, the request URL, the log line, and the applied filters
+    // Blank values and zero-length arrays place no restriction on the request. Drop them once,
+    // up front, so the checks below, the request URL, the log line, and the applied filters
     // echoed back to the caller all describe the same query.
-    const appliedFilters = Object.fromEntries(
-      Object.entries(filters).filter(([, values]) => values.length > 0),
-    );
+    const appliedFilters = dropUnsetFilters(filters);
 
     ctx.log.info('Querying dataset', {
       datasetCode,
@@ -837,17 +901,67 @@ export class EurostatDataService {
       lastN,
     });
 
-    // Validate mutually exclusive params. Eurostat reads filter keys in any case, so `GEO` is geo.
+    // Eurostat reads filter keys in any case, so every check below matches them that way.
+    const controlKeys = Object.keys(appliedFilters).filter((key) =>
+      CONTROL_INPUTS.has(key.toLowerCase()),
+    );
+    if (controlKeys.length > 0) {
+      const one = controlKeys.length === 1;
+      const named = controlKeys.map((key) => `"${key}"`).join(', ');
+      const inputs = controlKeys.flatMap((key) => {
+        const input = CONTROL_INPUTS.get(key.toLowerCase());
+        return input ? [one ? input : `${input} for "${key}"`] : [];
+      });
+      throw validationError(
+        `Filter key${one ? '' : 's'} ${named} name${one ? 's' : ''} a Statistics API control, not a dimension of "${datasetCode}".`,
+        {
+          reason: 'invalid_dimension',
+          controlKeys,
+          recovery: {
+            hint:
+              inputs.length > 0
+                ? `Remove ${named} from filters and set ${inputs.join(', ')} instead.`
+                : `Remove ${named} from filters; the response format is fixed.`,
+          },
+        },
+      );
+    }
+
+    // Validate mutually exclusive params.
     if (geoLevel && Object.keys(appliedFilters).some((key) => key.toLowerCase() === 'geo')) {
       throw validationError(
         `"geo" filter and "geo_level" cannot be used together. Use one or the other: "geo" for specific country/region codes, "geo_level" for filtering by NUTS hierarchy level.`,
-        { reason: 'conflicting_params' },
+        {
+          reason: 'conflicting_params',
+          recovery: { hint: 'Use filters.geo or geo_level, not both.' },
+        },
       );
     }
     if (lastN && (sinceP || untilP)) {
       throw validationError(
         `"since_period"/"until_period" and "last_n_periods" are mutually exclusive — use one or the other.`,
-        { reason: 'conflicting_params' },
+        {
+          reason: 'conflicting_params',
+          recovery: { hint: 'Use since_period/until_period or last_n_periods, not both.' },
+        },
+      );
+    }
+    const periodInputs = [
+      ...(sinceP ? ['since_period'] : []),
+      ...(untilP ? ['until_period'] : []),
+      ...(lastN ? ['last_n_periods'] : []),
+    ];
+    const timeKey = Object.keys(appliedFilters).find((key) =>
+      TIME_DIMENSION_KEYS.has(key.toLowerCase()),
+    );
+    if (timeKey && periodInputs.length > 0) {
+      const inputs = periodInputs.join('/');
+      throw validationError(
+        `filters.${timeKey} and ${inputs} both select periods, and Eurostat accepts only one time selection per request.`,
+        {
+          reason: 'conflicting_params',
+          recovery: { hint: `Use filters.${timeKey} or ${inputs}, not both.` },
+        },
       );
     }
 
@@ -863,7 +977,7 @@ export class EurostatDataService {
     if (lastN) params.lastTimePeriod = String(lastN);
 
     const url = this.buildUrl(datasetCode, params);
-    const data = await this.fetchJson(url, ctx);
+    const data = await this.fetchJson(url, datasetCode, ctx);
 
     // Totals describe the whole match and are counted from the response's cell keys, so the
     // decode cap below cannot shrink them.

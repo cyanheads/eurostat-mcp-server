@@ -230,6 +230,15 @@ describe('buildKeyPath', () => {
     expect(buildKeyPath(order, { geo: [] })).toBeUndefined();
   });
 
+  it('drops blank and whitespace-only values instead of emitting an empty position (#61)', () => {
+    expect(buildKeyPath(order, { geo: ['', 'DE'] })).toBe('...DE');
+    expect(buildKeyPath(order, { geo: ['  ', 'AT', '\t'], unit: [''] })).toBe('...AT');
+    expect(buildKeyPath(order, { geo: [''] })).toBeUndefined();
+    expect(buildKeyPath(order, { geo: ['  '] })).toBeUndefined();
+    // A key whose values are all blank is unset, the same as an empty array: no rejection.
+    expect(buildKeyPath(order, { country: [''] })).toBeUndefined();
+  });
+
   it('rejects a filter naming a dimension the dataset does not have, listing the real ones', () => {
     try {
       buildKeyPath(order, { country: ['AT'] });
@@ -703,6 +712,137 @@ describe('EurostatBulkService — streaming', () => {
     const ctx = createMockContext();
     const dl = await svc.startDownload('nama_10_gdp', [], {}, undefined, undefined, ctx);
     expect(dl.url).toContain('/sdmx/2.1/data/nama_10_gdp?');
+  });
+});
+
+describe('EurostatBulkService — an unavailable SDMX data endpoint (#71)', () => {
+  let svc: EurostatBulkService;
+  beforeEach(() => {
+    // Reset, not clear: a queued `…Once` answer must not leak into the next test.
+    vi.mocked(fetchWithTimeout).mockReset();
+    vi.useFakeTimers();
+    svc = new EurostatBulkService(mockConfig, mockStorage);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** The error `fetchWithTimeout` throws for a non-2xx answer, as the framework shapes it. */
+  const httpFailure = (status: number, body: string) =>
+    new McpError(
+      status === 504 ? JsonRpcErrorCode.Timeout : JsonRpcErrorCode.ServiceUnavailable,
+      `Fetch failed for http://127.0.0.1/…?…. Status: ${status}`,
+      {
+        status,
+        statusText: 'Upstream Error',
+        body,
+        ...(status === 501 && { retryable: false }),
+        errorSource: 'FetchHttpError',
+      },
+    );
+  /** The error `fetchWithTimeout` throws for a host it cannot reach. */
+  const networkFailure = () =>
+    new McpError(
+      JsonRpcErrorCode.ServiceUnavailable,
+      'Network error during fetch GET http://127.0.0.1/…: ECONNREFUSED',
+      { originalErrorName: 'TypeError', errorSource: 'FetchNetworkErrorWrapper' },
+    );
+
+  /** Settle past the 1 s / 2 s / 4 s backoff (plus jitter) without waiting it out. */
+  async function settle<T>(run: Promise<T>): Promise<T | McpError> {
+    const outcome = run.then(
+      (value) => value,
+      (error: unknown) => error as McpError,
+    );
+    await vi.advanceTimersByTimeAsync(60_000);
+    return outcome;
+  }
+  const start = (ctx = createMockContext()) =>
+    svc.startDownload('nama_10_gdp', [], {}, undefined, undefined, ctx);
+
+  it.each([
+    ['a plain-text 503', 503, 'Service Unavailable'],
+    ['an HTML 503 page', 503, '<!DOCTYPE html><html><body><h1>503</h1></body></html>'],
+    ['a 502 carrying an XML body with no fault code', 502, '<error>Bad Gateway</error>'],
+    ['a 504 gateway timeout', 504, 'Gateway Timeout'],
+  ])('retries %s, then fails as a retryable upstream_fault', async (_label, status, body) => {
+    vi.mocked(fetchWithTimeout).mockRejectedValue(httpFailure(status, body));
+    const err = (await settle(start())) as McpError;
+    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err.data).toMatchObject({
+      reason: 'upstream_fault',
+      retryable: true,
+      status,
+      datasetCode: 'nama_10_gdp',
+    });
+    expect(err.message).toContain('SDMX data endpoint');
+    expect(err.message).toContain(`HTTP ${status}`);
+    expect(err.message).toContain('failed after 4 attempts');
+    expect(err.message).not.toContain('returned a fault');
+    expect(fetchWithTimeout).toHaveBeenCalledTimes(4);
+  });
+
+  it('retries a host it cannot reach, then fails as a retryable upstream_fault', async () => {
+    vi.mocked(fetchWithTimeout).mockRejectedValue(networkFailure());
+    const err = (await settle(start())) as McpError;
+    expect(err.data).toMatchObject({ reason: 'upstream_fault', retryable: true });
+    expect(err.message).toContain('could not be reached');
+    expect(fetchWithTimeout).toHaveBeenCalledTimes(4);
+  });
+
+  it('streams the download when the endpoint recovers inside the retry budget', async () => {
+    vi.mocked(fetchWithTimeout)
+      .mockRejectedValueOnce(httpFailure(503, 'Service Unavailable'))
+      .mockRejectedValueOnce(networkFailure())
+      .mockResolvedValueOnce(responseOf([utf8(NAMA_TSV)]));
+    const dl = (await settle(start())) as Awaited<ReturnType<typeof start>>;
+    const rows: BulkRow[] = [];
+    for await (const row of dl.rows()) rows.push(row);
+    expect(rows).toHaveLength(6);
+    expect(fetchWithTimeout).toHaveBeenCalledTimes(3);
+  });
+
+  it('marks a 501 not retryable, on one attempt', async () => {
+    vi.mocked(fetchWithTimeout).mockRejectedValue(httpFailure(501, 'Not Implemented'));
+    const err = (await settle(start())) as McpError;
+    expect(err.data).toMatchObject({ reason: 'upstream_fault', retryable: false, status: 501 });
+    expect(fetchWithTimeout).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a modeled SOAP fault on a 5xx as that fault, on one attempt', async () => {
+    vi.mocked(fetchWithTimeout).mockRejectedValue(httpFailure(500, FAULT_150));
+    const err = (await settle(start())) as McpError;
+    expect(err.data).toMatchObject({ reason: 'invalid_dimension', faultcode: '150' });
+    expect(fetchWithTimeout).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps an unmodeled fault on a 4xx as a non-retryable-flagged upstream_fault, on one attempt (characterization)', async () => {
+    vi.mocked(fetchWithTimeout).mockRejectedValue(httpFailure(400, FAULT_UNKNOWN));
+    const err = (await settle(start())) as McpError;
+    expect(err.data).toMatchObject({ reason: 'upstream_fault', faultcode: '999' });
+    expect((err.data as { retryable?: boolean }).retryable).toBeUndefined();
+    expect(fetchWithTimeout).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves a request timeout as thrown, on one attempt (characterization)', async () => {
+    const timedOut = new McpError(JsonRpcErrorCode.Timeout, 'fetch GET … timed out.', {
+      errorSource: 'FetchTimeout',
+    });
+    vi.mocked(fetchWithTimeout).mockRejectedValue(timedOut);
+    const err = await settle(start());
+    expect(err).toBe(timedOut);
+    expect(fetchWithTimeout).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves a cancelled download that saw a 503 as the caller’s outcome, not an outage', async () => {
+    const controller = new AbortController();
+    vi.mocked(fetchWithTimeout).mockImplementation(async () => {
+      controller.abort();
+      throw httpFailure(503, 'Service Unavailable');
+    });
+    const err = (await settle(start(createMockContext({ signal: controller.signal })))) as McpError;
+    expect((err.data as { reason?: string } | undefined)?.reason).not.toBe('upstream_fault');
+    expect(fetchWithTimeout).toHaveBeenCalledTimes(1);
   });
 });
 

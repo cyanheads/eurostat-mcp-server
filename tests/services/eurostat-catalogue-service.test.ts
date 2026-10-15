@@ -3,6 +3,7 @@
  * @module tests/services/eurostat-catalogue-service.test
  */
 
+import { readFileSync } from 'node:fs';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { encodeCursor } from '@cyanheads/mcp-ts-core/utils';
@@ -482,6 +483,233 @@ describe('EurostatCatalogueService — search', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Search — spacing around punctuation and the words that block a match (#69)
+// ---------------------------------------------------------------------------
+
+describe('EurostatCatalogueService — punctuation spacing and blocking words (#69)', () => {
+  /**
+   * Verbatim lines of the 2026-10-14 TOC: every placement, with its ancestor folders, of
+   * the datasets behind the issue's examples, plus labels spelling `Rev.2`, `Rev. 1.1`,
+   * `2015 = 100`, `R&D`, `non-EU`, `15-64`, and `%`.
+   */
+  const EXCERPT = readFileSync(
+    new URL('../fixtures/toc-2026-10-14-excerpt.tsv', import.meta.url),
+    'utf8',
+  );
+
+  function excerptService(): EurostatCatalogueService {
+    const svc = new EurostatCatalogueService(mockConfig, mockStorage);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const parsed = (svc as any).parseToc(EXCERPT);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (svc as any).cache = {
+      entries: parsed,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      codeIndex: (svc as any).buildCodeIndex(parsed),
+      loadedAt: new Date(),
+    };
+    return svc;
+  }
+
+  const codesFor = async (svc: EurostatCatalogueService, query: string) =>
+    (await svc.search(query, 100, undefined, createMockContext())).datasets.map((d) => d.code);
+
+  const SBS = ['sbs_sc_ovw', 'sbs_ovw_smc', 'egr_mne_n2sc', 'egr_mne_empw'];
+  const RATES_QUERY = 'unemployment rates by sex age annual data';
+
+  it('finds the spaced "Rev. 2" form of the first example (characterization)', async () => {
+    const svc = excerptService();
+    expect(
+      await codesFor(svc, 'Enterprise statistics by size class and NACE Rev. 2 activity'),
+    ).toEqual(SBS);
+  });
+
+  it('finds sbs_sc_ovw for "Rev.2", the same datasets as its spaced form', async () => {
+    const svc = excerptService();
+    expect(
+      await codesFor(svc, 'Enterprise statistics by size class and NACE Rev.2 activity'),
+    ).toEqual(SBS);
+  });
+
+  it('matches both catalogue spellings for "NACE Rev.2", and "Rev. 1.1" for "Rev.1.1"', async () => {
+    const svc = excerptService();
+    const rev2 = await codesFor(svc, 'NACE Rev.2');
+    expect(rev2).toContain('ei_isse_q'); // "(NACE Rev.2)"
+    expect(rev2).toEqual(expect.arrayContaining(['ei_isin_m', 'sbs_sc_ovw'])); // "(NACE Rev. 2)"
+    expect(await codesFor(svc, 'Rev.1.1')).toEqual(['htec_emp_reg']); // "NACE Rev. 1.1"
+    expect(await codesFor(svc, '2015=100')).toEqual(['ei_isin_m']); // "(2015 = 100)"
+  });
+
+  it('keeps the sets of queries that carry their own punctuation (characterization)', async () => {
+    const svc = excerptService();
+    expect(await codesFor(svc, 'R&D')).toEqual(['rd_p_persreg']);
+    expect(await codesFor(svc, 'non-EU')).toEqual(['migr_resshare', 'tesem090']);
+    expect(await codesFor(svc, '15-64')).toEqual(['tgs00007']);
+    expect(await codesFor(svc, '%')).toEqual(['ei_lmhr_m', 'migr_resshare']);
+    expect(await codesFor(svc, 'nama_10_gdp')).toEqual(['nama_10_gdp']);
+  });
+
+  it('names each word whose removal alone finds matches, with that count, in query order', async () => {
+    const result = await excerptService().search(RATES_QUERY, 20, undefined, createMockContext());
+    expect(result.totalMatches).toBe(0);
+    expect(result.wordRemovalCounts).toEqual([
+      { word: 'rates', totalMatches: 7 },
+      { word: 'sex', totalMatches: 3 },
+      { word: 'annual', totalMatches: 4 },
+    ]);
+  });
+
+  it('counts exactly what the search without that word finds, any placement included', async () => {
+    const svc = excerptService();
+    const ctx = createMockContext();
+    const { wordRemovalCounts } = await svc.search(RATES_QUERY, 20, undefined, ctx);
+    expect(wordRemovalCounts?.length).toBeGreaterThan(0);
+    for (const { word, totalMatches } of wordRemovalCounts ?? []) {
+      const without = RATES_QUERY.split(' ')
+        .filter((w) => w !== word)
+        .join(' ');
+      expect((await svc.search(without, 20, undefined, ctx)).totalMatches).toBe(totalMatches);
+    }
+  });
+
+  it('quotes each word as typed and names a repeated word once', async () => {
+    const result = await excerptService().search(
+      'Unemployment RATES rates by Sex age annual data',
+      20,
+      undefined,
+      createMockContext(),
+    );
+    expect(result.wordRemovalCounts?.map((c) => c.word)).toEqual(['RATES', 'Sex', 'annual']);
+  });
+
+  it('counts in one pass over the catalogue, never one search per word', async () => {
+    /**
+     * Dataset k holds every query word but the k-th from the end, so matching the query
+     * checks nearly every word of every dataset before it misses. Counting the removals in
+     * one pass costs about one more such scan; a search per word costs one per word, 200
+     * here. Compared on thread CPU against the same scan with a dataset that matches,
+     * where no removal is counted.
+     */
+    const words = Array.from({ length: 200 }, (_, i) => `w${String(i).padStart(3, '0')}`);
+    const query = words.join(' ');
+    const lacking = Array.from({ length: 64 }, (_, k) =>
+      tocLine(
+        `    ${words.filter((_, i) => i !== words.length - 1 - k).join(' ')}`,
+        `lacks_${k}`,
+        'dataset',
+      ),
+    );
+    const counting = await makeLoadedService([tocLine('Root', 'root', 'folder'), ...lacking]);
+    const matching = await makeLoadedService([
+      tocLine('Root', 'root', 'folder'),
+      ...lacking,
+      tocLine(`    ${query}`, 'has_all', 'dataset'),
+    ]);
+
+    const result = await counting.search(query, 10, undefined, createMockContext());
+    expect(result.totalMatches).toBe(0);
+    expect(result.wordRemovalCounts).toEqual(
+      words.slice(-64).map((word) => ({ word, totalMatches: 1 })),
+    );
+
+    const bestCpuMs = async (svc: EurostatCatalogueService) => {
+      const ctx = createMockContext();
+      await svc.search(query, 10, undefined, ctx); // builds the search text before timing
+      let best = Number.POSITIVE_INFINITY;
+      for (let run = 0; run < 3; run++) {
+        const before = process.threadCpuUsage();
+        await svc.search(query, 10, undefined, ctx);
+        const { user, system } = process.threadCpuUsage(before);
+        best = Math.min(best, (user + system) / 1000);
+      }
+      return best;
+    };
+    const countingMs = await bestCpuMs(counting);
+    const matchingMs = await bestCpuMs(matching);
+    expect(countingMs / Math.max(matchingMs, 0.05)).toBeLessThan(16);
+  });
+
+  it('names no word for a one-word query, a matching query, or one no single removal rescues', async () => {
+    const svc = excerptService();
+    const ctx = createMockContext();
+    expect(await svc.search('zebra', 20, undefined, ctx)).toEqual({
+      datasets: [],
+      totalMatches: 0,
+    });
+    expect(
+      (await svc.search('unemployment', 20, undefined, ctx)).wordRemovalCounts,
+    ).toBeUndefined();
+    expect(await svc.search('zebra crossings unemployment', 20, undefined, ctx)).toEqual({
+      datasets: [],
+      totalMatches: 0,
+    });
+    expect(await svc.search('rates rates', 20, undefined, ctx)).not.toHaveProperty(
+      'wordRemovalCounts',
+    );
+  });
+
+  /**
+   * Thread CPU ms of the cheapest of three cold searches — the first over a snapshot, which
+   * builds its search text — over a catalogue whose one dataset carries `label`.
+   */
+  async function coldSearchCpuMs(label: string, query: string): Promise<number> {
+    let best = Number.POSITIVE_INFINITY;
+    for (let run = 0; run < 3; run++) {
+      const svc = await makeLoadedService([
+        tocLine('Root', 'root', 'folder'),
+        tocLine(`    ${label}`, 'long_label', 'dataset'),
+      ]);
+      const ctx = createMockContext();
+      const before = process.threadCpuUsage();
+      await svc.search(query, 10, undefined, ctx);
+      const { user, system } = process.threadCpuUsage(before);
+      best = Math.min(best, (user + system) / 1000);
+    }
+    return best;
+  }
+
+  const SIZES = [5_000, 20_000, 80_000, 320_000];
+  const shapes: Record<string, (n: number) => { label: string; query: string }> = {
+    'a long run of spaces between letters': (n) => ({
+      label: `a${' '.repeat(n)}b`,
+      query: 'zzz yyy',
+    }),
+    'mixed blank characters between letters': (n) => ({
+      label: `x${'   '.repeat(n / 3)}y`,
+      query: 'zzz yyy',
+    }),
+    'repeated openers with spaces': (n) => ({
+      label: `a${' ('.repeat(n / 2)}b`,
+      query: 'zzz yyy',
+    }),
+    'a caller query of repeated openers and spaces': (n) => ({
+      label: 'Short label',
+      query: `${'( '.repeat(n / 2)}zzz yyy`,
+    }),
+    'a caller query of distinct words': (n) => ({
+      label: 'Short label',
+      query: Array.from({ length: n / 8 }, (_, i) => `w${i}`).join(' '),
+    }),
+  };
+
+  for (const [shape, make] of Object.entries(shapes)) {
+    it(`stays linear on ${shape}`, async () => {
+      await coldSearchCpuMs('warm ( up', 'warm up'); // compile the regexes before timing
+      const times: number[] = [];
+      for (const n of SIZES) {
+        const { label, query } = make(n);
+        const ms = await coldSearchCpuMs(label, query);
+        // Checked per size: a quadratic search fails here rather than running for minutes.
+        expect(ms).toBeLessThan(250);
+        times.push(ms);
+      }
+      const [smallest = 0, largest = 0] = [times[0], times[times.length - 1]];
+      expect(largest / Math.max(smallest, 0.05)).toBeLessThan(256);
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Browse — duplicate folder codes across theme branches (#32)
 // ---------------------------------------------------------------------------
 
@@ -817,6 +1045,60 @@ describe('EurostatCatalogueService — TOC cache TTL (#23)', () => {
     expect(result.items.map((i) => i.code)).toEqual(['econ']);
   });
 
+  it('reports no load time for a catalogue inside its TTL or freshly refreshed (characterization)', async () => {
+    const svc = await makeLoadedService(loadedToc);
+    stubFetch(svc, upstreamToc);
+    const ctx = createMockContext();
+
+    expect(await svc.browse(undefined, ctx)).not.toHaveProperty('catalogueLoadedAt');
+    expireCache(svc);
+    expect(await svc.search('trade volumes', 10, undefined, ctx)).not.toHaveProperty(
+      'catalogueLoadedAt',
+    );
+    expect(await svc.browse('econ', ctx)).not.toHaveProperty('catalogueLoadedAt');
+  });
+
+  it('reports when the catalogue it serves was loaded while a failed refresh holds it in service (#63)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const svc = await makeLoadedService(loadedToc);
+      vi
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .spyOn(svc as any, 'fetchAndParseToc')
+        .mockRejectedValueOnce(new Error('Eurostat unreachable'))
+        .mockRejectedValueOnce(new Error('Eurostat unreachable'))
+        .mockImplementationOnce(async () => makeCache(svc, upstreamToc));
+      expireCache(svc);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const loadedAt = ((svc as any).cache.loadedAt as Date).toISOString();
+      const ctx = createMockContext();
+
+      // The call whose refresh failed, then calls inside the cooldown, a search and every browse.
+      expect(await svc.search('economy', 10, undefined, ctx)).toMatchObject({
+        catalogueLoadedAt: loadedAt,
+      });
+      vi.setSystemTime(Date.now() + 30_000);
+      expect(await svc.browse(undefined, ctx)).toMatchObject({ catalogueLoadedAt: loadedAt });
+      expect(await svc.browse('econ', ctx)).toMatchObject({ catalogueLoadedAt: loadedAt });
+      expect(await svc.search('zebra', 10, undefined, ctx)).toMatchObject({
+        totalMatches: 0,
+        catalogueLoadedAt: loadedAt,
+      });
+
+      // The retry past the cooldown fails again: still the same copy, still disclosed.
+      vi.setSystemTime(Date.now() + 31_000);
+      expect(await svc.browse(undefined, ctx)).toMatchObject({ catalogueLoadedAt: loadedAt });
+
+      // A refresh that succeeds ends the disclosure.
+      vi.setSystemTime(Date.now() + 61_000);
+      const recovered = await svc.browse(undefined, ctx);
+      expect(recovered.items.map((i) => i.code)).toEqual(['econ', 'trd']);
+      expect(recovered).not.toHaveProperty('catalogueLoadedAt');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('surfaces a cold-start fetch failure to the caller', async () => {
     const svc = new EurostatCatalogueService(mockConfig, mockStorage);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -894,6 +1176,82 @@ describe('EurostatCatalogueService — TOC cache TTL (#23)', () => {
     expireCache(svc);
     await svc.browse(undefined, ctx);
     expect(fetchSpy).toHaveBeenCalledTimes(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// An unavailable catalogue host on a cold start (#71)
+// ---------------------------------------------------------------------------
+
+describe('EurostatCatalogueService — an unavailable catalogue host on a cold start (#71)', () => {
+  /**
+   * Run `call` against a stubbed `fetch`, past the TOC's 1 s / 2 s / 4 s backoff (plus
+   * jitter) without waiting it out, and return what it settled to with the fetch stub.
+   */
+  async function coldStart(
+    respond: (url: URL) => Promise<Response>,
+    call: (svc: EurostatCatalogueService) => Promise<unknown>,
+  ) {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async (input: unknown) => respond(new URL(String(input))));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const outcome = call(new EurostatCatalogueService(mockConfig, mockStorage)).then(
+        (value) => value,
+        (error: unknown) => error,
+      );
+      await vi.advanceTimersByTimeAsync(60_000);
+      const tocCalls = fetchMock.mock.calls.filter(([input]) =>
+        String(input).includes('/catalogue/toc/'),
+      ).length;
+      return {
+        outcome: (await outcome) as { code?: number; data?: Record<string, unknown> },
+        tocCalls,
+      };
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  }
+  const unavailable = async () =>
+    new Response('Service Unavailable', { status: 503, statusText: 'Service Unavailable' });
+
+  it('fails a TOC answering 503 on every attempt as a retryable upstream_fault', async () => {
+    const { outcome, tocCalls } = await coldStart(unavailable, (svc) =>
+      svc.browse(undefined, createMockContext()),
+    );
+    expect(outcome.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(outcome.data).toMatchObject({ reason: 'upstream_fault', retryable: true, status: 503 });
+    expect((outcome as unknown as Error).message).toContain('HTTP 503');
+    expect(tocCalls).toBe(4);
+  });
+
+  it('fails an unreachable host the same way, for search too', async () => {
+    const { outcome, tocCalls } = await coldStart(
+      async () => {
+        throw new TypeError('fetch failed');
+      },
+      (svc) => svc.search('gdp', 10, undefined, createMockContext()),
+    );
+    expect(outcome.data).toMatchObject({ reason: 'upstream_fault', retryable: true });
+    expect((outcome as unknown as Error).message).toContain('could not be reached');
+    expect(tocCalls).toBe(4);
+  });
+
+  it('answers from the TOC alone when only the Comext dataflow list is down (characterization)', async () => {
+    const { outcome } = await coldStart(
+      async (url) =>
+        url.pathname.includes('/catalogue/toc/')
+          ? new Response(
+              buildTsv([
+                tocLine('Database by themes', 'data', 'folder'),
+                tocLine('    GDP and main components', 'nama_10_gdp', 'dataset'),
+              ]),
+            )
+          : unavailable(),
+      (svc) => svc.search('gdp', 10, undefined, createMockContext()),
+    );
+    expect(outcome).toMatchObject({ totalMatches: 1, comextListMissing: true });
   });
 });
 

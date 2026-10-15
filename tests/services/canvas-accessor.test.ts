@@ -11,7 +11,12 @@ import type { CanvasInstance, DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { configurationError, JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { acquireCanvas, getCanvas, setCanvas } from '@/services/canvas-accessor.js';
+import {
+  acquireCanvas,
+  getCanvas,
+  isCanvasFailure,
+  setCanvas,
+} from '@/services/canvas-accessor.js';
 import { withRealCanvas } from '../helpers/real-canvas.js';
 
 const ctx = () => createMockContext({ tenantId: 'default' });
@@ -124,4 +129,32 @@ describe('canvas accessor', () => {
       }
     },
   );
+});
+
+describe('isCanvasFailure', () => {
+  it('matches a typed canvas error on its reason alone', () => {
+    const notFound = new McpError(JsonRpcErrorCode.NotFound, 'Canvas not found or expired.', {
+      reason: 'canvas_not_found',
+    });
+    expect(isCanvasFailure(notFound, 'canvas_not_found')).toBe(true);
+    expect(isCanvasFailure(notFound, 'missing_table')).toBe(false);
+  });
+
+  it('rejects anything that is not an McpError, whatever data it carries', () => {
+    const lookalike = Object.assign(new Error('Canvas not found'), {
+      data: { reason: 'canvas_not_found' },
+    });
+    expect(isCanvasFailure(lookalike, 'canvas_not_found')).toBe(false);
+    expect(isCanvasFailure(undefined, 'canvas_not_found')).toBe(false);
+  });
+
+  it('rejects an McpError with another reason or none', () => {
+    const gate = new McpError(JsonRpcErrorCode.ValidationError, 'Canvas query must be SELECT', {
+      reason: 'non_select_statement',
+    });
+    expect(isCanvasFailure(gate, 'missing_table')).toBe(false);
+    expect(isCanvasFailure(new McpError(JsonRpcErrorCode.NotFound, 'x'), 'missing_table')).toBe(
+      false,
+    );
+  });
 });

@@ -6,6 +6,60 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getEurostatCatalogueService } from '@/services/eurostat-catalogue/eurostat-catalogue-service.js';
+import { outageAnswer } from '@/services/eurostat-outage.js';
+
+const COMEXT_NOT_SEARCHED =
+  'The Comext dataflow list could not be loaded, so the DS-* collections (detailed trade and PRODCOM) were not searched; the merge is retried about once a minute. eurostat_get_dataset_info reads a DS-* code directly.';
+
+const BROADEN_HINT =
+  'Try a broader term or use eurostat_browse_themes to explore themes without text search.';
+
+/**
+ * The `no_match` recovery: first what the catalogue could not answer for (the unmerged
+ * Comext list, or a DS-* code no source lists), then the expired copy a failed refresh
+ * left in service, then each word whose removal alone finds matches, and the broaden hint
+ * only when neither a count nor a code points elsewhere.
+ */
+function noMatchHint({
+  catalogueLoadedAt,
+  comextListMissing,
+  undisseminatedCodes,
+  wordRemovalCounts,
+}: {
+  catalogueLoadedAt?: string;
+  comextListMissing?: boolean;
+  undisseminatedCodes?: string[];
+  wordRemovalCounts?: Array<{ totalMatches: number; word: string }>;
+}): string {
+  const codes = undisseminatedCodes?.join(', ');
+  const plural = (undisseminatedCodes?.length ?? 0) > 1;
+  const hint: string[] = [];
+  if (comextListMissing) {
+    hint.push(
+      codes
+        ? `The Comext dataflow list could not be loaded, so the DS-* collections (detailed trade and PRODCOM) were not searched and ${codes} could not be checked against it; the merge is retried about once a minute. Call eurostat_get_dataset_info with ${plural ? 'each code to check them' : 'the code to check it'} directly.`
+        : COMEXT_NOT_SEARCHED,
+    );
+  } else if (codes) {
+    hint.push(
+      `Broadening will not find ${codes}: a collection on neither list is not disseminated. Search for its subject instead — "prodcom" or "CN8", for example — to find the DS-* collections Eurostat does disseminate.`,
+    );
+  }
+  if (catalogueLoadedAt) {
+    hint.push(
+      `The catalogue could not be refreshed, so this search ran against the copy loaded at ${catalogueLoadedAt}; datasets Eurostat added or changed since then were not searched.`,
+    );
+  }
+  if (wordRemovalCounts?.length) {
+    for (const { word, totalMatches } of wordRemovalCounts) {
+      hint.push(`Without "${word}": ${totalMatches} ${totalMatches === 1 ? 'match' : 'matches'}.`);
+    }
+    hint.push('Search again without one of those words to see its matches.');
+  } else if (!codes) {
+    hint.push(BROADEN_HINT);
+  }
+  return hint.join(' ');
+}
 
 export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
   title: 'Search Eurostat Datasets',
@@ -18,7 +72,7 @@ export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
       .min(1)
       .regex(/\S/, 'Query must contain at least one non-whitespace search term.')
       .describe(
-        'Search terms — at least one non-whitespace token is required. Split on whitespace into tokens; every token must match (AND), case-insensitively, somewhere across the dataset label, theme breadcrumb, or code. Word order does not matter, so "business demography NUTS 3" or "regional economic accounts" resolve without naming a label verbatim.',
+        'Search terms — at least one non-whitespace token is required. Split on whitespace into tokens; every token must match (AND), case-insensitively, somewhere across the dataset label, theme breadcrumb, or code. Spacing beside punctuation in the catalogue is ignored, so "Rev.2" also finds "Rev. 2" and "2015=100" finds "2015 = 100"; a token keeps its own punctuation, as in "R&D", "non-EU", or "DS-045409". Word order does not matter, so "business demography NUTS 3" or "regional economic accounts" resolve without naming a label verbatim. When nothing matches, the error names each word whose removal alone would find matches.',
       ),
     limit: z
       .number()
@@ -110,15 +164,33 @@ export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
       .describe(
         'Opaque cursor for the next page of matches. Pass it back as cursor with the same query; it stops working once the catalogue refreshes. Omitted on the last page.',
       ),
+    comextListMissing: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when the Comext dataflow list could not be loaded, so the DS-* collections (detailed trade and PRODCOM) were not searched and totalMatches counts the dissemination table of contents alone. Omitted when both sources were searched.',
+      ),
+    catalogueLoadedAt: z
+      .string()
+      .optional()
+      .describe(
+        'When the catalogue that answered was loaded (ISO 8601). Present only when a refresh failed and that older copy is still in service; omitted otherwise.',
+      ),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Names each part of the catalogue this answer is missing — the Comext collections, or updates since a refresh failed — and what to do about it. Omitted when the whole catalogue answered.',
+      ),
   },
 
   errors: [
     {
       reason: 'no_match',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No datasets matched the query string — including a query naming a DS-* code that neither the dissemination table of contents nor the Comext dataflow list carries, which is a collection Eurostat does not disseminate.',
+      when: 'No datasets matched the query string — including a query naming a DS-* code that neither the dissemination table of contents nor the Comext dataflow list carries, which is a collection Eurostat does not disseminate, and any query while the Comext dataflow list cannot be loaded and only the table of contents is searched.',
       recovery:
-        'Try a broader or different search term, or eurostat_browse_themes to explore without text search. A DS-* code on neither list is not disseminated, so search for its subject (e.g. "prodcom", "CN8") to find the collections that are.',
+        'Try a broader or different search term, or eurostat_browse_themes to explore without text search; for a multi-word query the hint names each word whose removal alone finds matches, with the count. A DS-* code on neither list is not disseminated, so search for its subject (e.g. "prodcom", "CN8") to find the collections that are. While the Comext dataflow list cannot be loaded, eurostat_get_dataset_info reads a DS-* code directly.',
     },
     {
       reason: 'invalid_cursor',
@@ -126,6 +198,13 @@ export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
       when: 'The cursor is malformed, came from a different query, or came from a catalogue snapshot that has since refreshed.',
       recovery:
         'Repeat the search without a cursor, then page using the nextCursor that call returns.',
+    },
+    {
+      reason: 'upstream_fault',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: "The server had no catalogue loaded yet, and Eurostat's table of contents answered HTTP 5xx or could not be reached on every retry, which the error marks retryable. Once a catalogue is loaded, a failed refresh serves that copy instead.",
+      recovery:
+        "Retry in a few minutes: the catalogue load failed on Eurostat's side and runs again on the next call.",
     },
   ],
 
@@ -135,16 +214,32 @@ export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
     try {
       found = await svc.search(input.query, input.limit, input.cursor, ctx);
     } catch (err) {
-      if ((err as McpError).data?.reason === 'invalid_cursor') {
+      const data = (err as McpError).data;
+      if (data?.reason === 'invalid_cursor') {
         throw ctx.fail('invalid_cursor', (err as Error).message, {
           recovery: {
             hint: `Repeat the search for "${input.query}" without a cursor, then page using the nextCursor it returns.`,
           },
         });
       }
+      if (data?.reason === 'upstream_fault' && data.retryable === true) {
+        throw ctx.fail('upstream_fault', (err as Error).message, {
+          retryable: true,
+          recovery: {
+            hint: `Eurostat's table of contents ${outageAnswer(data.status)} on every attempt, so there is no catalogue to search yet — an upstream outage, not a fault in the query. The load runs again on the next call, so retry in a few minutes.`,
+          },
+        });
+      }
       throw err;
     }
-    const { datasets, totalMatches, nextCursor, undisseminatedCodes, comextListMissing } = found;
+    const {
+      datasets,
+      totalMatches,
+      nextCursor,
+      undisseminatedCodes,
+      comextListMissing,
+      catalogueLoadedAt,
+    } = found;
 
     if (datasets.length === 0) {
       /**
@@ -159,15 +254,7 @@ export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
         codes && !comextListMissing
           ? `No datasets matched "${input.query}": ${codes} ${plural ? 'are' : 'is'} on neither the Eurostat dissemination catalogue nor the Comext dataflow list, so Eurostat does not disseminate ${plural ? 'them' : 'it'} through this API.`
           : `No datasets matched "${input.query}".`,
-        {
-          recovery: {
-            hint: !codes
-              ? 'Try a broader term or use eurostat_browse_themes to explore themes without text search.'
-              : comextListMissing
-                ? `The Comext dataflow list could not be loaded, so ${codes} could not be checked against it. Call eurostat_get_dataset_info with the code to check it directly.`
-                : `Broadening will not find ${codes}: a collection on neither list is not disseminated. Search for its subject instead — "prodcom" or "CN8", for example — to find the DS-* collections Eurostat does disseminate.`,
-          },
-        },
+        { recovery: { hint: noMatchHint(found) } },
       );
     }
 
@@ -183,7 +270,18 @@ export const eurostatSearchDatasets = tool('eurostat_search_datasets', {
       totalMatches,
       truncated: hasMore,
       ...(hasMore && { nextCursor }),
+      ...(comextListMissing && { comextListMissing }),
+      ...(catalogueLoadedAt && { catalogueLoadedAt }),
     });
+    // `notice` is last-wins, so every sentence is collected here and written once.
+    const notices: string[] = [];
+    if (comextListMissing) notices.push(COMEXT_NOT_SEARCHED);
+    if (catalogueLoadedAt) {
+      notices.push(
+        `The catalogue could not be refreshed, so these results come from the copy loaded at ${catalogueLoadedAt}; datasets Eurostat added or changed since then are not reflected.`,
+      );
+    }
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
     return {
       datasets,
       nextStep: `Pass a "code" value to eurostat_get_dataset_info to inspect dimensions, to eurostat_query_dataset to fetch a slice, or to eurostat_download_dataset to pull the whole dataset.`,

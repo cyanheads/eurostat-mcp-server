@@ -5,6 +5,7 @@
  * @module tests/tools/security-and-edge-cases.test
  */
 
+import type { z } from '@cyanheads/mcp-ts-core';
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
@@ -1001,6 +1002,100 @@ describe('Edge cases', () => {
       await expect(eurostatQueryDataset.handler(input, ctx)).rejects.toMatchObject({
         data: { reason: 'invalid_dimension' },
       });
+    });
+  });
+
+  describe('eurostatQueryDataset — filter keys cannot override the dedicated inputs (#62)', () => {
+    let fetchMock: ReturnType<typeof vi.fn>;
+    beforeEach(() => {
+      fetchMock = vi.fn(async (input: unknown) => {
+        throw new Error(`Unmocked fetch: ${String(input)}`);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      vi.mocked(getEurostatDataService).mockReturnValue(
+        new EurostatDataService({} as never, {} as never),
+      );
+    });
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    const controlInputs: Array<
+      [string, Omit<z.input<typeof eurostatQueryDataset.input>, 'dataset_code'>]
+    > = [
+      ['lang beside lang: "EN"', { filters: { geo: ['DE'], lang: ['FR'] }, lang: 'EN' }],
+      [
+        'LASTTIMEPERIOD beside last_n_periods',
+        { filters: { geo: ['DE'], LASTTIMEPERIOD: ['3'] }, last_n_periods: 1 },
+      ],
+      [
+        'GEOLEVEL beside geo_level',
+        { filters: { unit: ['MIO_EUR'], GEOLEVEL: ['nuts1'] }, geo_level: 'country' },
+      ],
+      ['FORMAT', { filters: { geo: ['DE'], FORMAT: ['XML'] } }],
+    ];
+    for (const [label, input] of controlInputs) {
+      it(`rejects ${label} before any request`, async () => {
+        const result = await runToolContract(eurostatQueryDataset, {
+          dataset_code: 'nama_10_gdp',
+          ...input,
+        });
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          error: { data: { reason: 'invalid_dimension' } },
+        });
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+    }
+
+    it('tells a FORMAT key to go, since no input sets the response format', async () => {
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'nama_10_gdp',
+        filters: { geo: ['DE'], FORMAT: ['XML'] },
+      });
+      const error = (
+        result.structuredContent as {
+          error: { message: string; data: { recovery: { hint: string } } };
+        }
+      ).error;
+      expect(error.message).toBe(
+        'Filter key "FORMAT" names a Statistics API control, not a dimension of "nama_10_gdp".',
+      );
+      expect(error.data.recovery.hint).toBe(
+        'Remove "FORMAT" from filters; the response format is fixed.',
+      );
+      const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+      expect(text).toContain(`Recovery: ${error.data.recovery.hint}`);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('never sends an empty parameter for a blank filter value (#61)', async () => {
+      fetchMock.mockImplementationOnce(
+        async () =>
+          new Response(
+            JSON.stringify({
+              label: 'GDP',
+              id: ['geo', 'time'],
+              size: [1, 1],
+              dimension: {
+                geo: { category: { index: { DE: 0 }, label: { DE: 'Germany' } } },
+                time: { category: { index: { '2024': 0 }, label: { '2024': '2024' } } },
+              },
+              value: { '0': 1 },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+      );
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'nama_10_gdp',
+        filters: { geo: ['', 'DE'], unit: [' '] },
+        last_n_periods: 1,
+      });
+      expect(result.isError).not.toBe(true);
+      const url = String(fetchMock.mock.calls[0]?.[0]);
+      expect(url).not.toMatch(/[?&](geo|unit)=(&|$)/);
+      expect(new URL(url).searchParams.getAll('geo')).toEqual(['DE']);
+      expect(new URL(url).searchParams.has('unit')).toBe(false);
     });
   });
 

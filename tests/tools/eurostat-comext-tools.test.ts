@@ -6,9 +6,11 @@
  * @module tests/tools/eurostat-comext-tools.test
  */
 
+import { readFileSync } from 'node:fs';
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { decodeCursor, encodeCursor } from '@cyanheads/mcp-ts-core/utils';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eurostatDatasetResource } from '@/mcp-server/resources/definitions/eurostat-dataset.resource.js';
 import { eurostatBrowseThemes } from '@/mcp-server/tools/definitions/eurostat-browse-themes.tool.js';
@@ -20,7 +22,10 @@ import { eurostatQueryDataset } from '@/mcp-server/tools/definitions/eurostat-qu
 import { eurostatSearchDatasets } from '@/mcp-server/tools/definitions/eurostat-search-datasets.tool.js';
 import { setCanvas } from '@/services/canvas-accessor.js';
 import { initEurostatBulkService } from '@/services/eurostat-bulk/eurostat-bulk-service.js';
-import { initEurostatCatalogueService } from '@/services/eurostat-catalogue/eurostat-catalogue-service.js';
+import {
+  getEurostatCatalogueService,
+  initEurostatCatalogueService,
+} from '@/services/eurostat-catalogue/eurostat-catalogue-service.js';
 import { initEurostatDataService } from '@/services/eurostat-data/eurostat-data-service.js';
 import {
   SDMX_CONSTRAINT_XML,
@@ -483,7 +488,7 @@ describe('eurostat_get_dataset_info on DS-045409 (#46)', () => {
 
 // ---------------------------------------------------------------------------
 
-describe('eurostat_get_dimension_values inline cap (#46)', () => {
+describe('eurostat_get_dimension_values paging long lists (#46, #64)', () => {
   let canvas: DataCanvas;
   let teardown: () => Promise<void>;
   beforeAll(() => {
@@ -493,32 +498,83 @@ describe('eurostat_get_dimension_values inline cap (#46)', () => {
     await teardown();
   });
 
+  type Page = {
+    matchCount?: number;
+    nextCursor?: string;
+    notice?: string;
+    totalCount: number;
+    values: Array<{ code: string; label: string }>;
+  };
   const product = (extra: Record<string, unknown> = {}) =>
     runToolContract(eurostatGetDimensionValues, {
       dataset_code: 'DS-045409',
       dimension: 'product',
       ...extra,
-    });
+    } as never);
+  /** UTF-8 bytes of the larger response surface, enrichment trailer included. */
+  const largerSurface = (result: Result) =>
+    Math.max(
+      Buffer.byteLength(JSON.stringify(result.structuredContent), 'utf8'),
+      Buffer.byteLength(text(result), 'utf8'),
+    );
+  /**
+   * Every code of a walk through nextCursor from the first page to the last, bounded so it
+   * cannot run away; then one call past the end, with a cursor resuming after the last code,
+   * which must answer an empty page that closes the list.
+   */
+  async function walkCodes(call: (extra: Record<string, unknown>) => Promise<Result>) {
+    const codes: string[] = [];
+    let cursor: string | undefined;
+    for (let pages = 0; pages < 40; pages++) {
+      const result = await call(cursor ? { cursor } : {});
+      expect(result.isError).not.toBe(true);
+      expect(largerSurface(result)).toBeLessThanOrEqual(64_000);
+      const page = structured<Page>(result);
+      codes.push(...page.values.map(({ code }) => code));
+      if (!page.nextCursor) {
+        expect(page).not.toHaveProperty('truncated');
+        expect(cursor, 'the walk never left the first page').toEqual(expect.any(String));
+        const issued = decodeCursor(cursor as string, createMockContext());
+        const past = await call({ cursor: encodeCursor({ ...issued, after: codes.at(-1) }) });
+        expect(past.isError).not.toBe(true);
+        expect(structured<Page>(past).values).toEqual([]);
+        expect(structured(past)).not.toHaveProperty('nextCursor');
+        expect(structured(past)).not.toHaveProperty('truncated');
+        expect(structured<Page>(past).notice).toContain(
+          'follow the code this cursor resumes after: the list ends there.',
+        );
+        return codes;
+      }
+      cursor = page.nextCursor;
+    }
+    throw new Error('more than 40 pages');
+  }
 
-  it('returns the first 2,000 of 37,069 inline and discloses the cut without a canvas', async () => {
+  it('pages the 37,069 CN8 codes within the budget and reaches any of them without a canvas', async () => {
     upstream.productCount = 37_069;
     const result = await product();
-    const body = structured<{ totalCount: number; values: Array<{ code: string }> }>(result);
-    expect(body.values).toHaveLength(2_000);
+    const body = structured<Page>(result);
     expect(body.values[0]?.code).toBe('P000000');
-    expect(body.values.at(-1)?.code).toBe('P001999');
-    expect(structured(result)).toMatchObject({
-      totalCount: 37_069,
-      truncated: true,
-      shown: 2_000,
-      cap: 2_000,
-    });
-    expect(structured<{ notice: string }>(result).notice).toContain(
-      'This deployment runs without a dataframe canvas, so the other 35,069 cannot be listed',
+    expect(body.values.length).toBeLessThan(37_069);
+    expect(structured(result)).toMatchObject({ totalCount: 37_069, truncated: true });
+    expect(largerSurface(result)).toBeLessThanOrEqual(64_000);
+    expect(body.notice).toContain(
+      `Values 1–${body.values.length.toLocaleString('en-US')} of 37,069 "product" values`,
     );
-    expect(text(result)).toContain('**Total values:** 37069 — the first 2000 are listed below');
-    expect(text(result)).toContain('The first 2,000 of 37,069 "product" values of "DS-045409"');
-    expect(text(result)).not.toContain('P002000');
+    expect(body.notice).toContain('Pass nextCursor as cursor for the next page');
+    expect(body.notice).not.toContain('canvas_id');
+    expect(text(result)).toContain(`**Total values:** 37069 — ${body.values.length} listed below`);
+
+    // Past the 2,000 a count cap once stopped at: by filter, and by cursor to the last code.
+    const last = structured<Page>(await product({ filter: 'p037068' }));
+    expect(last).toMatchObject({
+      values: [{ code: 'P037068', label: 'P037068' }],
+      matchCount: 1,
+      totalCount: 37_069,
+    });
+    expect(await walkCodes(product)).toEqual(
+      Array.from({ length: 37_069 }, (_, i) => `P${String(i).padStart(6, '0')}`),
+    );
   });
 
   it('points at canvas_id when a canvas is configured but none was passed', async () => {
@@ -527,11 +583,11 @@ describe('eurostat_get_dimension_values inline cap (#46)', () => {
     const result = await product();
     expect(structured(result)).not.toHaveProperty('tableName');
     expect(structured<{ notice: string }>(result).notice).toContain(
-      'call again with canvas_id set to the canvasId of a eurostat_query_dataset or eurostat_download_dataset response',
+      'pass canvas_id — the canvasId of a eurostat_query_dataset or eurostat_download_dataset response — to stage all 37,069',
     );
   });
 
-  it('stages every value past the cap when canvas_id is passed', async () => {
+  it('stages all 37,069 values when canvas_id is passed, beside the first page', async () => {
     setCanvas(canvas);
     upstream.productCount = 37_069;
     const instance = await canvas.acquire(undefined, createMockContext({ tenantId: 'default' }));
@@ -541,32 +597,38 @@ describe('eurostat_get_dimension_values inline cap (#46)', () => {
       tableName: string;
       values: unknown[];
     }>(result);
-    expect(body.values).toHaveLength(2_000);
+    expect(body.values.length).toBeLessThan(37_069);
     expect(body.stagedRowCount).toBe(37_069);
+    expect(largerSurface(result)).toBeLessThanOrEqual(64_000);
     const counted = await instance.query(
       `SELECT count(*) AS n, max(code) AS last FROM ${body.tableName}`,
     );
     expect(counted.rows).toEqual([{ n: '37069', last: 'P037068' }]);
     expect(structured<{ notice: string }>(result).notice).toContain(
-      `All 37,069 are staged as table "${body.tableName}"`,
+      `Every one of the 37,069 values is staged as table "${body.tableName}"`,
     );
-    expect(text(result)).toContain(`All 37,069 are staged as table "${body.tableName}"`);
+    expect(text(result)).toContain(
+      `Every one of the 37,069 values is staged as table "${body.tableName}"`,
+    );
   });
 
-  it('returns exactly 2,000 values whole, with no truncation fields', async () => {
-    upstream.productCount = 2_000;
+  it('returns a list within the budget whole, with no paging fields', async () => {
+    upstream.productCount = 500;
     const result = await product();
-    expect(structured<{ values: unknown[] }>(result).values).toHaveLength(2_000);
-    for (const key of ['truncated', 'shown', 'cap', 'notice']) {
+    expect(structured<{ values: unknown[] }>(result).values).toHaveLength(500);
+    for (const key of ['truncated', 'nextCursor', 'notice', 'matchCount']) {
       expect(structured(result)).not.toHaveProperty(key);
     }
     expect(text(result)).not.toContain('listed below');
   });
 
-  it('cuts 2,001 values to 2,000', async () => {
-    upstream.productCount = 2_001;
-    const result = await product();
-    expect(structured(result)).toMatchObject({ totalCount: 2_001, truncated: true, shown: 2_000 });
+  it('pages 2,000 codes, whole under the old count cap, at the byte budget instead', async () => {
+    upstream.productCount = 2_000;
+    const first = await product();
+    expect(structured(first)).toMatchObject({ totalCount: 2_000, truncated: true });
+    expect(await walkCodes(product)).toEqual(
+      Array.from({ length: 2_000 }, (_, i) => `P${String(i).padStart(6, '0')}`),
+    );
   });
 
   it('leaves a short dimension unchanged', async () => {
@@ -585,14 +647,16 @@ describe('eurostat_get_dimension_values inline cap (#46)', () => {
     });
   });
 
-  it('applies the same cap on the main host', async () => {
+  it('pages the main host the same way, every code once and in order', async () => {
     upstream.mainUnitCount = 2_500;
-    const result = await runToolContract(eurostatGetDimensionValues, {
-      dataset_code: 'earn_ses_annual',
-      dimension: 'unit',
-    });
-    expect(structured<{ values: unknown[] }>(result).values).toHaveLength(2_000);
-    expect(structured(result)).toMatchObject({ totalCount: 2_500, truncated: true });
+    const unit = (extra: Record<string, unknown>) =>
+      runToolContract(eurostatGetDimensionValues, {
+        dataset_code: 'earn_ses_annual',
+        dimension: 'unit',
+        ...extra,
+      } as never);
+    expect(structured(await unit({}))).toMatchObject({ totalCount: 2_500, truncated: true });
+    expect(await walkCodes(unit)).toEqual(Array.from({ length: 2_500 }, (_, i) => `U${i}`));
   });
 });
 
@@ -640,6 +704,145 @@ describe('search and browse over both sources (#46, #45)', () => {
     const result = await runToolContract(eurostatSearchDatasets, { query: 'DS-045409' });
     expect(errorData(result).message).toBe('No datasets matched "DS-045409".');
     expect(hintOf(result)).toContain('Call eurostat_get_dataset_info with the code');
+  });
+
+  describe('over the recorded 2026-10-14 catalogue excerpt (#69)', () => {
+    beforeEach(() => {
+      const excerpt = readFileSync(
+        new URL('../fixtures/toc-2026-10-14-excerpt.tsv', import.meta.url),
+        'utf8',
+      );
+      fetchMock.mockImplementation(async (input: unknown) =>
+        routeOf(input).route === 'toc' ? new Response(excerpt) : respond(input),
+      );
+    });
+
+    it('finds sbs_sc_ovw for "NACE Rev.2" spelled without the space', async () => {
+      const result = await runToolContract(eurostatSearchDatasets, {
+        query: 'Enterprise statistics by size class and NACE Rev.2 activity',
+      });
+      expect(
+        structured<{ datasets: Array<{ code: string }> }>(result).datasets.map((d) => d.code),
+      ).toEqual(['sbs_sc_ovw', 'sbs_ovw_smc', 'egr_mne_n2sc', 'egr_mne_empw']);
+      expect(text(result)).toContain('**Code:** sbs_sc_ovw');
+    });
+
+    it('names the words that block a zero-match search, with their counts', async () => {
+      const result = await runToolContract(eurostatSearchDatasets, {
+        query: 'unemployment rates by sex age annual data',
+      });
+      expect(errorData(result)).toMatchObject({
+        code: JsonRpcErrorCode.NotFound,
+        data: { reason: 'no_match' },
+      });
+      expect(hintOf(result)).toBe(
+        'Without "rates": 7 matches. Without "sex": 3 matches. Without "annual": 4 matches. Search again without one of those words to see its matches.',
+      );
+      expect(text(result)).toContain('Without "annual": 4 matches.');
+    });
+  });
+
+  describe('while the Comext list cannot be loaded (#63)', () => {
+    const listDown = () =>
+      fetchMock.mockImplementation(async (input: unknown) =>
+        routeOf(input).route === 'dataflow-list'
+          ? new Response('down', { status: 503 })
+          : respond(input),
+      );
+    const listRequests = () => requests().filter((r) => r.route === 'dataflow-list').length;
+
+    it('keeps the TOC results and discloses the unsearched collections on both surfaces', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        listDown();
+        const result = await runToolContract(eurostatSearchDatasets, { query: 'trade' });
+        const found = structured<{ datasets: Array<{ code: string }>; notice: string }>(result);
+        expect(found.datasets.map((d) => d.code)).toEqual(['ext_st_eu27_2020sitc']);
+        expect(found).toMatchObject({ totalMatches: 1, comextListMissing: true });
+        expect(found.notice).toContain('were not searched');
+        expect(text(result)).toContain(found.notice);
+
+        // Inside the cooldown the list is not re-requested, and the disclosure holds.
+        vi.setSystemTime(Date.now() + 30_000);
+        const again = await runToolContract(eurostatSearchDatasets, { query: 'trade' });
+        expect(structured(again)).toMatchObject({ comextListMissing: true });
+        expect(listRequests()).toBe(1);
+
+        // Once the merge lands, the disclosure goes.
+        fetchMock.mockImplementation(async (input: unknown) => respond(input));
+        vi.setSystemTime(Date.now() + 31_000);
+        const merged = await runToolContract(eurostatSearchDatasets, { query: 'trade' });
+        expect(structured(merged)).not.toHaveProperty('comextListMissing');
+        expect(structured(merged)).not.toHaveProperty('notice');
+        expect(structured<{ totalMatches: number }>(merged).totalMatches).toBeGreaterThan(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('leads a no_match hint for the collections’ own names with the disclosure', async () => {
+      listDown();
+      const result = await runToolContract(eurostatSearchDatasets, { query: 'prodcom' });
+      expect(errorData(result)).toMatchObject({ data: { reason: 'no_match' } });
+      expect(hintOf(result)).toMatch(/^The Comext dataflow list could not be loaded/);
+      expect(hintOf(result)).toContain('Try a broader term');
+      expect(text(result)).toContain('were not searched');
+    });
+
+    it('flags a browse of ext_go and icts, and leaves other folders alone', async () => {
+      listDown();
+      for (const theme_code of ['ext_go', 'icts']) {
+        const result = await runToolContract(eurostatBrowseThemes, { theme_code });
+        expect(structured(result)).toMatchObject({ comextListMissing: true });
+        expect(text(result)).toContain('DS-* collections filed in this folder are not listed');
+      }
+      for (const input of [{}, { theme_code: 'external' }]) {
+        const result = await runToolContract(eurostatBrowseThemes, input);
+        expect(structured(result)).not.toHaveProperty('comextListMissing');
+        expect(structured(result)).not.toHaveProperty('notice');
+      }
+    });
+
+    for (const theme_code of ['ext_go_detail', 'prom', 'comext', 'DS-045409']) {
+      it(`says ${theme_code} comes from the list that could not be loaded`, async () => {
+        listDown();
+        const result = await runToolContract(eurostatBrowseThemes, { theme_code });
+        expect(errorData(result)).toMatchObject({
+          code: JsonRpcErrorCode.NotFound,
+          data: { reason: 'not_found' },
+        });
+        expect(errorData(result).message).toContain(
+          'comes from the Comext dataflow list, which could not be loaded',
+        );
+        expect(hintOf(result)).toContain('retried about once a minute');
+        expect(hintOf(result)).not.toContain('without theme_code');
+      });
+    }
+
+    it('discloses a TOC a failed refresh could not replace', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        const first = await runToolContract(eurostatSearchDatasets, { query: 'trade' });
+        expect(structured(first)).not.toHaveProperty('catalogueLoadedAt');
+        const loadedAt = new Date().toISOString();
+        const svc = getEurostatCatalogueService();
+        // The private TOC load the refresh runs.
+        vi.spyOn(svc as any, 'fetchAndParseToc').mockRejectedValue(new Error('TOC unreachable'));
+        vi.setSystemTime(Date.now() + 13 * 60 * 60 * 1000);
+
+        for (const result of [
+          await runToolContract(eurostatSearchDatasets, { query: 'trade' }),
+          await runToolContract(eurostatBrowseThemes, { theme_code: 'external' }),
+        ]) {
+          const body = structured<{ catalogueLoadedAt: string; notice: string }>(result);
+          expect(body.catalogueLoadedAt).toBe(loadedAt);
+          expect(body.notice).toContain('could not be refreshed');
+          expect(text(result)).toContain(body.notice);
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   it('lists ext_go_detail when browsing ext_go', async () => {

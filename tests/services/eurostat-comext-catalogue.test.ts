@@ -233,6 +233,85 @@ describe('EurostatCatalogueService — Comext failure isolation (#46)', () => {
   });
 });
 
+describe('EurostatCatalogueService — disclosing an unmerged Comext list (#63)', () => {
+  const down = () => new Response('upstream down', { status: 503 });
+  const notFoundOf = (svc: EurostatCatalogueService, code: string) =>
+    svc.browse(code, ctx()).then(
+      () => undefined,
+      (error: { message: string; data: Record<string, unknown> }) => error,
+    );
+
+  it('flags nothing while both sources are merged (characterization)', async () => {
+    const svc = service();
+    expect(await svc.search('trade', 100, undefined, ctx())).not.toHaveProperty(
+      'comextListMissing',
+    );
+    expect(await svc.search('zebra', 100, undefined, ctx())).not.toHaveProperty(
+      'comextListMissing',
+    );
+    for (const code of [undefined, 'ext_go', 'icts', 'ext_go_detail']) {
+      expect(await svc.browse(code, ctx())).not.toHaveProperty('comextListMissing');
+    }
+    expect((await notFoundOf(svc, 'comext'))?.data).toEqual({
+      reason: 'not_found',
+      themeCode: 'comext',
+    });
+  });
+
+  it('flags every search while the list is unmerged, through the cooldown, until the merge lands', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    comextReply = down;
+    const svc = service();
+
+    const trade = await svc.search('trade', 100, undefined, ctx());
+    expect(trade).toMatchObject({ totalMatches: 2, comextListMissing: true });
+    expect(await svc.search('prodcom', 100, undefined, ctx())).toMatchObject({
+      totalMatches: 0,
+      comextListMissing: true,
+    });
+    vi.setSystemTime(Date.now() + 30_000);
+    expect(await svc.search('trade', 100, undefined, ctx())).toMatchObject({
+      comextListMissing: true,
+    });
+    expect(routes().filter((r) => r === 'dataflow-list')).toHaveLength(1);
+
+    comextReply = () => xml(COMEXT_LIST);
+    vi.setSystemTime(Date.now() + 31_000);
+    const merged = await svc.search('trade', 100, undefined, ctx());
+    expect(merged.totalMatches).toBe(2 + TRADE_CODES.length + PRODCOM_CODES.length);
+    expect(merged).not.toHaveProperty('comextListMissing');
+  });
+
+  it('flags a browse of ext_go or icts while the list is unmerged, and no other folder', async () => {
+    comextReply = down;
+    const svc = service();
+    for (const code of ['ext_go', 'icts']) {
+      expect(await svc.browse(code, ctx())).toMatchObject({ comextListMissing: true });
+    }
+    for (const code of [undefined, 'external', 'ext_go_agg', 'sts']) {
+      expect(await svc.browse(code, ctx())).not.toHaveProperty('comextListMissing');
+    }
+  });
+
+  it('says a Comext folder or DS-* code is missing because the list could not be loaded', async () => {
+    comextReply = down;
+    const svc = service();
+    for (const code of ['ext_go_detail', 'prom', 'comext', 'DS-045409']) {
+      const error = await notFoundOf(svc, code);
+      expect(error?.data).toEqual({
+        reason: 'not_found',
+        themeCode: code,
+        comextListMissing: true,
+      });
+      expect(error?.message).toContain(
+        'comes from the Comext dataflow list, which could not be loaded',
+      );
+    }
+    const unknown = await notFoundOf(svc, 'zebra_crossings');
+    expect(unknown?.data).toEqual({ reason: 'not_found', themeCode: 'zebra_crossings' });
+  });
+});
+
 describe('EurostatCatalogueService — the merge retry across concurrent callers', () => {
   it('sends one Comext list request for every caller arriving once the cooldown has passed', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });

@@ -104,7 +104,7 @@ export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
     {
       reason: 'upstream_fault',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: "Eurostat returned a dataset structure or content constraint this server cannot read: malformed, truncated, not XML, or missing the requested dataset's dataflow.",
+      when: "Eurostat returned a dataset structure or content constraint this server cannot read — malformed, truncated, not XML, or missing the requested dataset's dataflow — or the structure endpoint answered HTTP 5xx or could not be reached on every retry, which the error marks retryable.",
       recovery:
         'Retry in a few minutes, since a failed structure read is not cached. If it fails the same way, eurostat_query_dataset reads the observations, with dimension codes and labels, from a separate endpoint.',
     },
@@ -121,6 +121,15 @@ export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
         throw ctx.fail('not_found', (err as Error).message, {
           recovery: {
             hint: `Dataset "${input.dataset_code}" not found. Use eurostat_search_datasets or eurostat_browse_themes to find a valid code.`,
+          },
+        });
+      }
+      if (reason === 'upstream_fault' && (err as McpError).data?.retryable === true) {
+        const status = (err as McpError).data?.status;
+        throw ctx.fail('upstream_fault', (err as Error).message, {
+          retryable: true,
+          recovery: {
+            hint: `Eurostat's SDMX structure endpoint ${typeof status === 'number' ? `answered HTTP ${status}` : 'could not be reached'} for "${input.dataset_code}" on every attempt — an upstream outage, not a fault in the request. A failed read is not cached, so retry in a few minutes.`,
           },
         });
       }

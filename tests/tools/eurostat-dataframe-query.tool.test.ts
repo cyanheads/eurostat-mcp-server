@@ -7,7 +7,7 @@
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { eurostatDataframeQuery } from '@/mcp-server/tools/definitions/eurostat-dataframe-query.tool.js';
 import { setCanvas } from '@/services/canvas-accessor.js';
 import {
@@ -106,6 +106,105 @@ describe('eurostatDataframeQuery', () => {
     await expect(eurostatDataframeQuery.handler(input, ctx())).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
       data: { reason: 'canvas_not_found' },
+    });
+  });
+
+  describe('declared recoveries reach the caller, not the canvas service hints', () => {
+    const declared = (reason: string) =>
+      eurostatDataframeQuery.errors?.find((e) => e.reason === reason)?.recovery;
+    const call = (input: { canvas_id: string; sql: string }) =>
+      runToolContract(eurostatDataframeQuery, input, { context: { tenantId: 'default' } });
+    const textOf = (result: Awaited<ReturnType<typeof call>>) =>
+      result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+
+    it('canvas_not_found carries the declared recovery on both surfaces', async () => {
+      const hint = declared('canvas_not_found');
+      expect(hint).toContain('without canvas_id');
+
+      const result = await call({ canvas_id: 'qwertyuiop', sql: 'SELECT 1' });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.NotFound,
+          data: { reason: 'canvas_not_found', canvasId: 'qwertyuiop', recovery: { hint } },
+        },
+      });
+      expect(textOf(result)).toContain(`Recovery: ${hint}`);
+      expect(textOf(result)).not.toContain('stage fresh data');
+    });
+
+    it('canvas_not_found raised by the query itself, after the acquire, carries the declared recovery too', async () => {
+      // Only Date is faked: the canvas reads its clock from Date.now, and DuckDB needs real timers.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      const shortLived = withRealCanvas({ ttlMs: 50 });
+      try {
+        // The acquire hands back a live handle; the canvas then lapses before the SQL runs.
+        const stale = await shortLived.canvas.acquire(undefined, ctx());
+        vi.setSystemTime(Date.now() + 1_000);
+        const acquire = vi.spyOn(shortLived.canvas, 'acquire').mockResolvedValue(stale);
+
+        const result = await call({ canvas_id: stale.canvasId, sql: 'SELECT 1' });
+        expect(acquire).toHaveBeenCalledOnce();
+        expect(result.structuredContent).toMatchObject({
+          error: {
+            code: JsonRpcErrorCode.NotFound,
+            data: {
+              reason: 'canvas_not_found',
+              canvasId: stale.canvasId,
+              recovery: { hint: declared('canvas_not_found') },
+            },
+          },
+        });
+        expect(textOf(result)).not.toContain('stage fresh data');
+      } finally {
+        await shortLived.teardown();
+        setCanvas(canvas);
+        vi.useRealTimers();
+      }
+    });
+
+    for (const [label, sql, table] of [
+      ['a FROM', 'SELECT * FROM df_nope0001', 'df_nope0001'],
+      [
+        'the second side of a JOIN',
+        'SELECT * FROM df_test0001 JOIN df_nope0002 USING (geo)',
+        'df_nope0002',
+      ],
+      ['a CTE body', 'WITH x AS (SELECT * FROM df_nope0003) SELECT * FROM x', 'df_nope0003'],
+    ] as const) {
+      it(`missing_table in ${label} carries the declared recovery and names the table`, async () => {
+        const hint = declared('missing_table');
+        expect(hint).toContain('eurostat_dataframe_describe');
+
+        const result = await call({ canvas_id: canvasId, sql });
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          error: {
+            code: JsonRpcErrorCode.NotFound,
+            message: expect.stringContaining(`"${table}"`),
+            data: { reason: 'missing_table', tableName: table, recovery: { hint } },
+          },
+        });
+        const text = textOf(result);
+        expect(text).toContain(`"${table}"`);
+        expect(text).toContain(`Recovery: ${hint}`);
+        expect(text).not.toContain('Re-run the tool that produced this table');
+      });
+    }
+
+    it('leaves a SQL gate rejection with its own reason and hint, even when it names a missing table', async () => {
+      const result = await call({ canvas_id: canvasId, sql: 'DROP TABLE df_nope0001' });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          data: {
+            reason: 'non_select_statement',
+            recovery: { hint: expect.stringContaining('Rewrite as a single SELECT') },
+          },
+        },
+      });
+      expect(textOf(result)).not.toContain(declared('missing_table'));
     });
   });
 

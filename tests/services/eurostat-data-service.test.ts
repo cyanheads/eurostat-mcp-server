@@ -475,6 +475,50 @@ describe('EurostatDataService — checkResponseErrors', () => {
     ).toThrow();
   });
 
+  /**
+   * Every message that quotes Eurostat's label ends it with one full stop, whether the
+   * label brings its own or not. Live labels do both: the time-selection refusal ends
+   * "…Please choose one or the other." while id 150's ends "…is not defined".
+   */
+  describe('quotes the upstream label with a single closing period', () => {
+    const sites: Array<[string | undefined, { status: number; id: number }, string]> = [
+      ['not_found', { status: 404, id: 100 }, 'ERR_NOT_FOUND_4: XYZ is not available'],
+      [
+        'invalid_dimension',
+        { status: 400, id: 150 },
+        'INVALID_QUERY_DIMENSION: Dimension "PRECISION" is not defined',
+      ],
+      [
+        'conflicting_params',
+        { status: 400, id: 400 },
+        "'TIME' parameter, 'TIME_PERIOD' parameter, 'lastTimePeriod' parameter and 'sinceTimePeriod' parameter cannot be set at the same time. Please choose one or the other",
+      ],
+      ['invalid_period', { status: 400, id: 400 }, "Invalid value for 'sinceTimePeriod' parameter"],
+      [
+        'invalid_period',
+        { status: 400, id: 140 },
+        'TIME_PERIOD_FILTER_SPEC_INVALID: Impossible to apply time dimension filtering',
+      ],
+      ['conflicting_params', { status: 400, id: 400 }, "Invalid value for 'lang' parameter"],
+      [undefined, { status: 500, id: 0 }, 'Internal error'],
+    ];
+
+    for (const [reason, shape, stem] of sites) {
+      for (const [ending, label] of [
+        ['ending in a period', `${stem}.`],
+        ['ending without one', stem],
+      ] as const) {
+        it(`HTTP ${shape.status} id ${shape.id} → ${reason ?? 'unclassified'}, label ${ending}`, () => {
+          const err = thrownFor({ error: [{ ...shape, label }] });
+          if (reason) expect(err.data).toMatchObject({ reason });
+          expect(err.message).toContain(`${stem}.`);
+          expect(err.message).not.toContain(`${stem}..`);
+          expect(err.message).not.toMatch(/\.\./);
+        });
+      }
+    }
+  });
+
   it('does not throw when data has no errors or warnings', () => {
     const data: JsonStatResponse = { label: 'OK', id: ['geo'], size: [1], value: {} };
     expect(() =>
@@ -970,6 +1014,121 @@ describe('EurostatDataService — getDimensionOrder (#57)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// An unavailable structure endpoint — every caller of the SDMX structure fetch
+// ---------------------------------------------------------------------------
+
+describe('EurostatDataService — an unavailable SDMX structure endpoint', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  const svc = () => new EurostatDataService(mockConfig, mockStorage);
+  const unavailable = () =>
+    new Response('Service Unavailable', { status: 503, statusText: 'Service Unavailable' });
+
+  /**
+   * Settle `run` past the retry backoff without waiting it out. Four attempts back off
+   * 1 s, 2 s and 4 s, each up to 25% longer with jitter, so 60 s clears every schedule.
+   */
+  async function settle<T>(run: Promise<T>): Promise<T | McpError> {
+    const outcome = run.then(
+      (value) => value,
+      (error: unknown) => error as McpError,
+    );
+    await vi.advanceTimersByTimeAsync(60_000);
+    return outcome;
+  }
+
+  it('fails the dimension-order read as a retryable upstream_fault once every attempt answered 503', async () => {
+    fetchMock.mockImplementation(async () => unavailable());
+    const err = (await settle(
+      svc().getDimensionOrder('DS-045409', createMockContext()),
+    )) as McpError;
+    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err.data).toMatchObject({
+      reason: 'upstream_fault',
+      retryable: true,
+      status: 503,
+      datasetCode: 'DS-045409',
+    });
+    expect(err.message).toContain('"DS-045409"');
+    expect(err.message).toContain('HTTP 503');
+    // The retry loop ran to exhaustion before the failure was classified.
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it('fails the dataset metadata load the same way, after retrying both structure reads', async () => {
+    fetchMock.mockImplementation(async () => unavailable());
+    const err = (await settle(svc().getDatasetInfo('DS-045409', createMockContext()))) as McpError;
+    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err.data).toMatchObject({ reason: 'upstream_fault', retryable: true, status: 503 });
+    const paths = fetchMock.mock.calls.map(([input]) => new URL(String(input)).pathname);
+    expect(paths.filter((p) => p.includes('/dataflow/'))).toHaveLength(4);
+    expect(paths.filter((p) => p.includes('/contentconstraint/'))).toHaveLength(4);
+  });
+
+  it('fails the dimension-values metadata load the same way', async () => {
+    fetchMock.mockImplementation(async () => unavailable());
+    const err = (await settle(
+      svc().getDimensionValues('nama_10_gdp', 'geo', undefined, createMockContext()),
+    )) as McpError;
+    expect(err.data).toMatchObject({ reason: 'upstream_fault', retryable: true, status: 503 });
+  });
+
+  it('classifies a network failure that outlasts the retries as a retryable upstream_fault', async () => {
+    fetchMock.mockImplementation(async () => {
+      throw new TypeError('fetch failed');
+    });
+    const err = (await settle(
+      svc().getDimensionOrder('nama_10_gdp', createMockContext()),
+    )) as McpError;
+    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err.data).toMatchObject({ reason: 'upstream_fault', retryable: true });
+    expect(err.message).toContain('could not be reached');
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it('still answers when the endpoint recovers inside the retry budget', async () => {
+    fetchMock
+      .mockImplementationOnce(async () => unavailable())
+      .mockImplementationOnce(async () => unavailable())
+      .mockImplementation(async () => xmlResponse(sdmxDataStructureXml()));
+    await expect(
+      settle(svc().getDimensionOrder('earn_ses_annual', createMockContext())),
+    ).resolves.toEqual(EARN_SES_ANNUAL_DIMENSIONS);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('leaves a 404 as not_found, on one attempt', async () => {
+    fetchMock.mockImplementation(async () => errorResponse(404, DSD_NOT_FOUND));
+    const err = (await settle(
+      svc().getDimensionOrder('nonexistent_xyz', createMockContext()),
+    )) as McpError;
+    expect(err.data).toMatchObject({ reason: 'not_found' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves a cancelled read as a cancellation, not an upstream fault', async () => {
+    const controller = new AbortController();
+    fetchMock.mockImplementation(async () => {
+      controller.abort();
+      return unavailable();
+    });
+    const err = (await settle(
+      svc().getDimensionOrder('nama_10_gdp', createMockContext({ signal: controller.signal })),
+    )) as McpError;
+    expect((err.data as { reason?: string } | undefined)?.reason).not.toBe('upstream_fault');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // queryDataset — filter normalization (fetch-stubbed)
 // ---------------------------------------------------------------------------
 
@@ -1029,6 +1188,259 @@ describe('EurostatDataService — queryDataset filter normalization', () => {
     expect(paramsOf(0).get('geoLevel')).toBe('country');
     expect(paramsOf(0).has('geo')).toBe(false);
     expect(res.appliedFilters).toEqual({});
+  });
+
+  const query = (filters: Record<string, string[]>, lastN?: number) =>
+    svc().queryDataset(
+      'nama_10_gdp',
+      filters,
+      undefined,
+      undefined,
+      undefined,
+      lastN,
+      'EN',
+      50,
+      createMockContext(),
+    );
+
+  it('sends a non-blank value exactly as given, padding included', async () => {
+    fetchMock.mockResolvedValue(okResponse(oneObservation()));
+    const res = await query({ geo: [' DE'] });
+    expect(paramsOf(0).getAll('geo')).toEqual([' DE']);
+    expect(res.appliedFilters).toEqual({ geo: [' DE'] });
+  });
+
+  for (const key of ['time', 'TIME', 'time_period', 'Time_Period']) {
+    it(`sends a ${key} filter as a time-dimension filter when no period input is set`, async () => {
+      fetchMock.mockResolvedValue(okResponse(oneObservation()));
+      const res = await query({ unit: ['CP_MEUR'], [key]: ['2020'] });
+      expect(paramsOf(0).getAll(key)).toEqual(['2020']);
+      expect(paramsOf(0).has('lastTimePeriod')).toBe(false);
+      expect(res.appliedFilters).toEqual({ unit: ['CP_MEUR'], [key]: ['2020'] });
+    });
+  }
+
+  it('leaves an unknown non-control filter key for Eurostat to judge', async () => {
+    fetchMock.mockResolvedValue(okResponse(oneObservation()));
+    await query({ precision: ['1'] }, 1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(paramsOf(0).getAll('precision')).toEqual(['1']);
+  });
+
+  it('drops blank and whitespace-only values, and a dimension left with none (#61)', async () => {
+    fetchMock.mockResolvedValue(okResponse(oneObservation()));
+    const res = await query({ unit: ['', 'CP_MEUR', '  '], geo: ['', '  '], na_item: [' \t'] }, 1);
+    const p = paramsOf(0);
+    expect(p.getAll('unit')).toEqual(['CP_MEUR']);
+    expect(p.has('geo')).toBe(false);
+    expect(p.has('na_item')).toBe(false);
+    expect(res.appliedFilters).toEqual({ unit: ['CP_MEUR'] });
+  });
+
+  it('does not treat a blank-only geo array as conflicting with geo_level (#61)', async () => {
+    fetchMock.mockResolvedValue(okResponse(oneObservation()));
+    const res = await svc().queryDataset(
+      'nama_10_gdp',
+      { geo: ['', '  '] },
+      'country',
+      undefined,
+      undefined,
+      1,
+      'EN',
+      50,
+      createMockContext(),
+    );
+    expect(paramsOf(0).get('geoLevel')).toBe('country');
+    expect(paramsOf(0).has('geo')).toBe(false);
+    expect(res.appliedFilters).toEqual({});
+  });
+});
+
+// ---------------------------------------------------------------------------
+// queryDataset — filter keys that name a Statistics API control (#62)
+// ---------------------------------------------------------------------------
+
+describe('EurostatDataService — queryDataset rejects control-named filter keys (#62)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const query = (filters: Record<string, string[]>) =>
+    new EurostatDataService(mockConfig, mockStorage).queryDataset(
+      'nama_10_gdp',
+      filters,
+      undefined,
+      undefined,
+      undefined,
+      1,
+      'EN',
+      50,
+      createMockContext(),
+    );
+
+  const DEDICATED = ['lang', 'geo_level', 'since_period', 'until_period', 'last_n_periods'];
+
+  for (const [key, input] of [
+    ['lang', 'lang'],
+    ['LANG', 'lang'],
+    ['Lang', 'lang'],
+    ['geoLevel', 'geo_level'],
+    ['GEOLEVEL', 'geo_level'],
+    ['sinceTimePeriod', 'since_period'],
+    ['SINCETIMEPERIOD', 'since_period'],
+    ['untilTimePeriod', 'until_period'],
+    ['UntilTimePeriod', 'until_period'],
+    ['lastTimePeriod', 'last_n_periods'],
+    ['LASTTIMEPERIOD', 'last_n_periods'],
+    ['lasttimeperiod', 'last_n_periods'],
+  ] as const) {
+    it(`rejects filters.${key} as invalid_dimension naming ${input}, before any request`, async () => {
+      const err = (await query({ unit: ['CP_MEUR'], [key]: ['3'] }).catch((e) => e)) as McpError;
+      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err.data).toMatchObject({ reason: 'invalid_dimension' });
+      expect(err.message).toContain(`"${key}"`);
+      // Whole hint: `lang` names both the key and its input, so a substring check for the
+      // input passes on a hint that never says which input to set.
+      expect((err.data as { recovery: { hint: string } }).recovery.hint).toBe(
+        `Remove "${key}" from filters and set ${input} instead.`,
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  }
+
+  for (const key of ['format', 'FORMAT']) {
+    it(`rejects filters.${key} as invalid_dimension naming no dedicated input`, async () => {
+      const err = (await query({ [key]: ['JSON'] }).catch((e) => e)) as McpError;
+      expect(err.data).toMatchObject({ reason: 'invalid_dimension' });
+      const hint = (err.data as { recovery: { hint: string } }).recovery.hint;
+      expect(hint).toContain(`"${key}"`);
+      for (const input of DEDICATED) expect(hint).not.toMatch(new RegExp(`\\b${input}\\b`));
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  }
+
+  it('names every control key in one rejection', async () => {
+    const err = (await query({ lang: ['FR'], GEOLEVEL: ['nuts1'] }).catch((e) => e)) as McpError;
+    expect((err.data as { recovery: { hint: string } }).recovery.hint).toBe(
+      'Remove "lang", "GEOLEVEL" from filters and set lang for "lang", geo_level for "GEOLEVEL" instead.',
+    );
+  });
+
+  it('treats a control key carrying only blank values as unset, not as a rejection', async () => {
+    fetchMock.mockResolvedValue(
+      okResponse({ ...jsonStat({ geo: ['DE'], time: ['2024'] }), value: { '0': 1 } }),
+    );
+    const res = await query({ geo: ['DE'], lang: [''], LASTTIMEPERIOD: [] });
+    const p = new URL(String(fetchMock.mock.calls[0]?.[0])).searchParams;
+    expect(p.getAll('lang')).toEqual(['EN']);
+    expect(p.has('LASTTIMEPERIOD')).toBe(false);
+    expect(res.appliedFilters).toEqual({ geo: ['DE'] });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// queryDataset — a time filter beside a period input (#70)
+// ---------------------------------------------------------------------------
+
+describe('EurostatDataService — queryDataset time filter vs period inputs (#70)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const query = (
+    filters: Record<string, string[]>,
+    sinceP: string | undefined,
+    untilP: string | undefined,
+    lastN: number | undefined,
+  ) =>
+    new EurostatDataService(mockConfig, mockStorage).queryDataset(
+      'nama_10_gdp',
+      filters,
+      undefined,
+      sinceP,
+      untilP,
+      lastN,
+      'EN',
+      50,
+      createMockContext(),
+    );
+
+  for (const key of ['time', 'TIME', 'time_period', 'Time_Period']) {
+    for (const [input, sinceP, untilP, lastN] of [
+      ['since_period', '2020', undefined, undefined],
+      ['until_period', undefined, '2022', undefined],
+      ['last_n_periods', undefined, undefined, 1],
+    ] as const) {
+      it(`rejects filters.${key} with ${input} as conflicting_params before any request`, async () => {
+        const err = (await query({ geo: ['DE'], [key]: ['2020'] }, sinceP, untilP, lastN).catch(
+          (e) => e,
+        )) as McpError;
+        expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+        expect(err.data).toMatchObject({ reason: 'conflicting_params' });
+        const hint = (err.data as { recovery: { hint: string } }).recovery.hint;
+        expect(hint).toContain(`filters.${key}`);
+        expect(hint).toContain(input);
+        expect(hint).not.toContain('geo_level');
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+    }
+  }
+
+  it('names both bounds when since_period and until_period are set', async () => {
+    const err = (await query({ time: ['2020'] }, '2019', '2021', undefined).catch(
+      (e) => e,
+    )) as McpError;
+    const hint = (err.data as { recovery: { hint: string } }).recovery.hint;
+    expect(hint).toContain('since_period');
+    expect(hint).toContain('until_period');
+  });
+
+  it('treats a blank-only time filter as unset beside last_n_periods', async () => {
+    fetchMock.mockResolvedValue(
+      okResponse({ ...jsonStat({ geo: ['DE'], time: ['2024'] }), value: { '0': 1 } }),
+    );
+    await query({ geo: ['DE'], time: ['  '] }, undefined, undefined, 1);
+    const p = new URL(String(fetchMock.mock.calls[0]?.[0])).searchParams;
+    expect(p.get('lastTimePeriod')).toBe('1');
+    expect(p.has('time')).toBe(false);
+  });
+
+  it('keeps the period-input rule and its own hint for since_period with last_n_periods', async () => {
+    const err = (await query({}, '2020', undefined, 5).catch((e) => e)) as McpError;
+    expect(err.data).toMatchObject({ reason: 'conflicting_params' });
+    const hint = (err.data as { recovery: { hint: string } }).recovery.hint;
+    expect(hint).toMatch(/since_period.*last_n_periods/);
+    expect(hint).not.toContain('filters.');
+    expect(hint).not.toContain('geo_level');
+  });
+
+  it('gives the geo rule a hint naming only geo and geo_level', async () => {
+    const err = (await new EurostatDataService(mockConfig, mockStorage)
+      .queryDataset(
+        'nama_10_gdp',
+        { geo: ['DE'] },
+        'country',
+        undefined,
+        undefined,
+        1,
+        'EN',
+        50,
+        createMockContext(),
+      )
+      .catch((e) => e)) as McpError;
+    const hint = (err.data as { recovery: { hint: string } }).recovery.hint;
+    expect(hint).toMatch(/filters\.geo.*geo_level/);
+    expect(hint).not.toMatch(/period/);
   });
 });
 
@@ -1579,6 +1991,152 @@ describe('EurostatDataService — fetchJson error classification', () => {
 });
 
 // ---------------------------------------------------------------------------
+// An unavailable Statistics API — the observation fetch behind queryDataset (#71)
+// ---------------------------------------------------------------------------
+
+describe('EurostatDataService — an unavailable Statistics API (#71)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  const query = (ctx = createMockContext()) =>
+    new EurostatDataService(mockConfig, mockStorage).queryDataset(
+      'nama_10_gdp',
+      { geo: ['DE'] },
+      undefined,
+      undefined,
+      undefined,
+      1,
+      'EN',
+      50,
+      ctx,
+    );
+  const answering = (status: number, body: string, statusText = 'Service Unavailable') =>
+    new Response(body, { status, statusText });
+
+  /** Settle past the 1 s / 2 s / 4 s backoff (plus jitter) without waiting it out. */
+  async function settle<T>(run: Promise<T>): Promise<T | McpError> {
+    const outcome = run.then(
+      (value) => value,
+      (error: unknown) => error as McpError,
+    );
+    await vi.advanceTimersByTimeAsync(60_000);
+    return outcome;
+  }
+
+  it('fails as a retryable upstream_fault once every attempt answered a plain-text 503', async () => {
+    fetchMock.mockImplementation(async () => answering(503, 'Service Unavailable'));
+    const err = (await settle(query())) as McpError;
+    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err.data).toMatchObject({
+      reason: 'upstream_fault',
+      retryable: true,
+      status: 503,
+      datasetCode: 'nama_10_gdp',
+    });
+    expect(err.message).toContain('Statistics API');
+    expect(err.message).toContain('HTTP 503');
+    expect(err.message).toContain('"nama_10_gdp"');
+    expect(err.message).toContain('failed after 4 attempts');
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it.each([
+    ['an HTML 502 page', 502, '<!DOCTYPE html><html><body>Bad Gateway</body></html>'],
+    ['a 504 gateway timeout', 504, 'Gateway Timeout'],
+    [
+      'a 500 whose JSON error body names no failure this server models',
+      500,
+      '{"error":[{"status":500,"id":0,"label":"Internal error"}]}',
+    ],
+  ])('classifies %s on every attempt the same way', async (_label, status, body) => {
+    fetchMock.mockImplementation(async () => answering(status, body, 'Upstream Error'));
+    const err = (await settle(query())) as McpError;
+    expect(err.data).toMatchObject({ reason: 'upstream_fault', retryable: true, status });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it('classifies a host that cannot be reached on any attempt as a retryable upstream_fault', async () => {
+    fetchMock.mockImplementation(async () => {
+      throw new TypeError('fetch failed');
+    });
+    const err = (await settle(query())) as McpError;
+    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err.data).toMatchObject({ reason: 'upstream_fault', retryable: true });
+    expect(err.message).toContain('could not be reached');
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it('marks a 501 not retryable, on one attempt', async () => {
+    fetchMock.mockImplementation(async () => answering(501, 'Not Implemented', 'Not Implemented'));
+    const err = (await settle(query())) as McpError;
+    expect(err.data).toMatchObject({ reason: 'upstream_fault', retryable: false, status: 501 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('answers when the API recovers inside the retry budget', async () => {
+    fetchMock
+      .mockImplementationOnce(async () => answering(503, 'Service Unavailable'))
+      .mockImplementationOnce(async () => answering(503, 'Service Unavailable'))
+      .mockImplementation(async () =>
+        okResponse(
+          buildJsonStat([{ code: 'DE', label: 'Germany' }], [{ code: '2024', label: '2024' }], {
+            0: 4305.3,
+          }),
+        ),
+      );
+    const result = (await settle(query())) as Awaited<ReturnType<typeof query>>;
+    expect(result.obsCount).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps a modeled refusal on a 5xx body as that refusal, on one attempt', async () => {
+    // A body naming a failure this server models wins over the HTTP status it arrived on.
+    fetchMock.mockImplementation(async () =>
+      answering(
+        500,
+        '{"error":[{"status":400,"id":150,"label":"INVALID_QUERY_DIMENSION: Dimension \\"ZZZZ\\" is not defined"}]}',
+      ),
+    );
+    const err = (await settle(query())) as McpError;
+    expect(err.data).toMatchObject({ reason: 'invalid_dimension' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves an HTML page answered on HTTP 200 reasonless, after the retries (characterization)', async () => {
+    fetchMock.mockImplementation(
+      async () =>
+        new Response('<!DOCTYPE html><html><body>Maintenance</body></html>', { status: 200 }),
+    );
+    const err = (await settle(query())) as McpError;
+    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err.message).toContain('returned HTML instead of JSON');
+    expect((err.data as { reason?: string; retryable?: boolean } | undefined)?.reason).toBe(
+      undefined,
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it('leaves a cancelled query that saw a 503 as the caller’s outcome, not an outage (characterization)', async () => {
+    const controller = new AbortController();
+    fetchMock.mockImplementation(async () => {
+      controller.abort();
+      return answering(503, 'Service Unavailable');
+    });
+    const err = (await settle(query(createMockContext({ signal: controller.signal })))) as McpError;
+    expect((err.data as { reason?: string } | undefined)?.reason).not.toBe('upstream_fault');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Period rejections — Eurostat's own refusals of a period literal (#47)
 // ---------------------------------------------------------------------------
 
@@ -1646,6 +2204,72 @@ describe("EurostatDataService — Eurostat's period rejections map to invalid_pe
       code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'conflicting_params' },
     });
+  });
+
+  for (const param of ['sinceTimePeriod', 'untilTimePeriod']) {
+    it(`maps Eurostat's "cannot be set at the same time" refusal naming '${param}' to conflicting_params (#70)`, async () => {
+      // Two time-dimension filters reach Eurostat untouched; its refusal names the
+      // period parameters too, which is not a malformed period.
+      fetchMock.mockResolvedValue(
+        errorResponse(
+          400,
+          JSON.stringify({
+            error: [
+              {
+                status: 400,
+                id: 400,
+                label: `'TIME' parameter, 'TIME_PERIOD' parameter, 'lastTimePeriod' parameter and '${param}' parameter cannot be set at the same time. Please choose one or the other.`,
+              },
+            ],
+          }),
+        ),
+      );
+      const err = (await new EurostatDataService(mockConfig, mockStorage)
+        .queryDataset(
+          'nama_10_gdp',
+          { time: ['2020'], time_period: ['2021'] },
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          'EN',
+          50,
+          createMockContext(),
+        )
+        .catch((e) => e)) as McpError;
+      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err.data).toMatchObject({ reason: 'conflicting_params' });
+      const hint = (err.data as { recovery: { hint: string } }).recovery.hint;
+      expect(hint).toMatch(/one time selection/);
+      expect(hint).not.toContain('geo_level');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+  }
+
+  it("leaves Eurostat's geo/geoLevel refusal to the generic conflicting_params, without the time hint", async () => {
+    // The same "cannot be set at the same time" wording, about geography rather than time.
+    fetchMock.mockResolvedValue(
+      errorResponse(
+        400,
+        JSON.stringify({
+          error: [
+            {
+              status: 400,
+              id: 400,
+              label:
+                "'geo' parameter and 'geoLevel' parameter cannot be set at the same time. Please choose one or the other.",
+            },
+          ],
+        }),
+      ),
+    );
+    const err = (await query().catch((e) => e)) as McpError;
+    expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(err.data).toMatchObject({ reason: 'conflicting_params' });
+    // No service hint: the tool's generic conflicting_params recovery applies.
+    expect((err.data as { recovery?: unknown }).recovery).toBeUndefined();
+    expect(err.message).toContain("'geo' parameter and 'geoLevel' parameter");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('keeps id 150 as invalid_dimension ahead of the period check', async () => {

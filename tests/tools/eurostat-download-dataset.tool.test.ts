@@ -574,6 +574,29 @@ describe('eurostatDownloadDataset — error contract', () => {
     });
   }
 
+  it('counts a dimension whose values are all blank as unfiltered in the too-large hint (#61)', async () => {
+    mockDimensionOrder();
+    vi.mocked(getEurostatBulkService).mockReturnValue({
+      startDownload: vi.fn().mockRejectedValue(
+        new McpError(JsonRpcErrorCode.ServiceUnavailable, 'too big', {
+          reason: 'extraction_too_big',
+        }),
+      ),
+    } as never);
+    const result = await runToolContract(eurostatDownloadDataset, {
+      dataset_code: 'nama_10_gdp',
+      filters: { unit: ['CP_MEUR'], geo: [''] },
+    });
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: {
+          reason: 'extraction_too_big',
+          recovery: { hint: expect.stringContaining('Filter on freq, na_item, geo —') },
+        },
+      },
+    });
+  });
+
   it('lets an unmodelled failure bubble unchanged', async () => {
     const raw = new McpError(JsonRpcErrorCode.Timeout, 'request timed out');
     vi.mocked(getEurostatBulkService).mockReturnValue({
@@ -938,6 +961,54 @@ describe('eurostatDownloadDataset — period inputs and SDMX faults (real bulk s
       expect(requestedUrl(0).pathname).toMatch(/\/une_rt_m\/\.\.\.PC_ACT\.\.DE$/);
     });
 
+    it('builds the key for ["", "DE"] as for ["DE"], with no empty position (#61)', async () => {
+      vi.mocked(getEurostatDataService).mockReturnValue({
+        getDimensionOrder: vi
+          .fn()
+          .mockResolvedValue(['freq', 's_adj', 'age', 'unit', 'sex', 'geo']),
+      } as never);
+      fetchMock.mockImplementation(async () => tsvReply());
+      const blank = await runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'une_rt_m',
+        filters: { geo: ['', 'DE', '  '], unit: ['PC_ACT'] },
+      });
+      await runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'une_rt_m',
+        filters: { geo: ['DE'], unit: ['PC_ACT'] },
+      });
+      expect(blank.isError).not.toBe(true);
+      expect(requestedUrl(0).pathname).toBe(requestedUrl(1).pathname);
+      expect(requestedUrl(0).pathname).toMatch(/\/une_rt_m\/\.\.\.PC_ACT\.\.DE$/);
+      expect(blank.structuredContent).toMatchObject({
+        appliedQuery: { filters: { geo: ['DE'], unit: ['PC_ACT'] } },
+      });
+    });
+
+    it('sends a blank-only filter as no key at all, the same request as an empty array (#61)', async () => {
+      const getDimensionOrder = vi.fn();
+      vi.mocked(getEurostatDataService).mockReturnValue({ getDimensionOrder } as never);
+      fetchMock.mockImplementation(async () => tsvReply());
+      const results = [];
+      for (const geo of [[''], ['  '], []]) {
+        results.push(
+          await runToolContract(eurostatDownloadDataset, {
+            dataset_code: 'une_rt_m',
+            filters: { geo },
+          }),
+        );
+      }
+      expect(requestedUrl(0).toString()).toBe(requestedUrl(2).toString());
+      expect(requestedUrl(1).toString()).toBe(requestedUrl(2).toString());
+      expect(requestedUrl(0).pathname).toMatch(/\/data\/une_rt_m$/);
+      expect(getDimensionOrder).not.toHaveBeenCalled();
+      for (const result of results) {
+        expect(result.isError).not.toBe(true);
+        expect(
+          (result.structuredContent as { appliedQuery: { filters: object } }).appliedQuery.filters,
+        ).toEqual({});
+      }
+    });
+
     it('maps fault 140 TIME_PERIOD_FILTER_SPEC_INVALID to invalid_period, not filter_arity', async () => {
       fetchMock.mockImplementationOnce(
         async () =>
@@ -1042,6 +1113,149 @@ describe('eurostatDownloadDataset — period inputs and SDMX faults (real bulk s
     expect(dataUrl?.pathname).toMatch(/\/earn_ses_annual\/\.\.\.\.\.\.\.DE$/);
   });
 
+  it('fails a filtered download whose structure read meets a 503 outage as a retryable upstream_fault', async () => {
+    vi.mocked(getEurostatDataService).mockReturnValue(
+      new EurostatDataService({} as never, {} as never),
+    );
+    fetchMock.mockImplementation(
+      async () => new Response('Service Unavailable', { status: 503, statusText: 'Unavailable' }),
+    );
+    vi.useFakeTimers();
+    try {
+      const pending = runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'DS-045409',
+        filters: { freq: ['A'] },
+      });
+      // Past the structure read's 1 s / 2 s / 4 s backoff, jitter included.
+      await vi.advanceTimersByTimeAsync(60_000);
+      const result = await pending;
+
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ServiceUnavailable,
+          data: { reason: 'upstream_fault', retryable: true },
+        },
+      });
+      const hint = (result.structuredContent as { error: { data: { recovery: { hint: string } } } })
+        .error.data.recovery.hint;
+      expect(hint).toContain('DS-045409');
+      expect(hint).toMatch(/retry in a few minutes/i);
+      expect(hint).not.toContain('TSV');
+      const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+      expect(text).toContain(`Recovery: ${hint}`);
+      expect(text).toContain('reason upstream_fault · retryable');
+      // The structure read retried to exhaustion; no bulk request followed it.
+      const paths = fetchMock.mock.calls.map(([input]) => new URL(String(input)).pathname);
+      expect(paths).toHaveLength(4);
+      expect(paths.every((p) => p.includes('/sdmx/2.1/datastructure/'))).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  describe('an unavailable SDMX data endpoint on an unfiltered download (#71)', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** Run the call past the 1 s / 2 s / 4 s backoff (plus jitter) without waiting it out. */
+    const callSettled = async (context?: { signal: AbortSignal }) => {
+      const pending = runToolContract(
+        eurostatDownloadDataset,
+        { dataset_code: 'nama_10_gdp' },
+        context && { context },
+      );
+      await vi.advanceTimersByTimeAsync(60_000);
+      return pending;
+    };
+    const errorOf = (result: { structuredContent?: unknown }) =>
+      (result.structuredContent as { error: { code: number; data: Record<string, unknown> } })
+        .error;
+    const textOf = (result: { content: Array<{ type: string; text?: string }> }) =>
+      result.content.map((block) => block.text ?? '').join('\n');
+
+    it.each([
+      ['a plain-text 503', 'Service Unavailable'],
+      ['an HTML 503 page', '<!DOCTYPE html><html><body><h1>503</h1></body></html>'],
+    ])(
+      'retries %s, then fails as a retryable upstream_fault on both surfaces',
+      async (_label, body) => {
+        fetchMock.mockImplementation(
+          async () => new Response(body, { status: 503, statusText: 'Unavailable' }),
+        );
+        const result = await callSettled();
+        expect(result.isError).toBe(true);
+        const error = errorOf(result);
+        expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+        expect(error.data).toMatchObject({
+          reason: 'upstream_fault',
+          retryable: true,
+          recovery: { hint: expect.stringContaining('"nama_10_gdp"') },
+        });
+        const hint = (error.data.recovery as { hint: string }).hint;
+        expect(hint).toContain('HTTP 503');
+        expect(hint).toMatch(/retry in a few minutes/i);
+        expect(hint).not.toContain('TSV');
+        expect(hint).not.toContain('dimension order');
+        const text = textOf(result);
+        expect(text).toContain(`Recovery: ${hint}`);
+        expect(text).toContain('reason upstream_fault · retryable');
+        const paths = fetchMock.mock.calls.map(([input]) => new URL(String(input)).pathname);
+        expect(paths).toHaveLength(4);
+        expect(paths.every((p) => p.includes('/sdmx/2.1/data/'))).toBe(true);
+      },
+    );
+
+    it('fails an unreachable host the same way', async () => {
+      fetchMock.mockImplementation(async () => {
+        throw new TypeError('fetch failed');
+      });
+      const result = await callSettled();
+      const error = errorOf(result);
+      expect(error.data).toMatchObject({ reason: 'upstream_fault', retryable: true });
+      expect((error.data.recovery as { hint: string }).hint).toContain('could not be reached');
+      expect(textOf(result)).toContain('reason upstream_fault · retryable');
+    });
+
+    it('downloads once the endpoint recovers inside the retry budget', async () => {
+      fetchMock
+        .mockImplementationOnce(async () => new Response('Service Unavailable', { status: 503 }))
+        .mockImplementation(async () => new Response(UNE_TSV, { status: 200 }));
+      const result = await callSettled();
+      expect(result.isError).not.toBe(true);
+      expect((result.structuredContent as { rowCount: number }).rowCount).toBeGreaterThan(0);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps the non-TSV hint, with no retryable flag, for an unmodeled fault on a 4xx', async () => {
+      fetchMock.mockImplementation(
+        async () => new Response(soapFault('999', 'SOMETHING_ELSE: unmodelled'), { status: 400 }),
+      );
+      const result = await callSettled();
+      const error = errorOf(result);
+      expect(error.data).toMatchObject({ reason: 'upstream_fault' });
+      expect(error.data.retryable).toBeUndefined();
+      expect((error.data.recovery as { hint: string }).hint).toContain(
+        'did not return a TSV table',
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves a cancelled download as a cancellation, not an outage', async () => {
+      const controller = new AbortController();
+      fetchMock.mockImplementation(async () => {
+        controller.abort();
+        return new Response('Service Unavailable', { status: 503 });
+      });
+      const error = errorOf(await callSettled({ signal: controller.signal }));
+      expect(error.code).toBe(JsonRpcErrorCode.RequestCancelled);
+      expect(error.data?.reason).not.toBe('upstream_fault');
+    });
+  });
+
   it('maps fault 140 INVALID_QUERY_NB_FILTERS to filter_arity', async () => {
     fetchMock.mockImplementationOnce(
       async () =>
@@ -1089,8 +1303,10 @@ describe('eurostatDownloadDataset — an empty download leaves every canvas unto
   let teardown: () => Promise<void>;
   let fetchMock: ReturnType<typeof vi.fn>;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     ({ canvas, teardown } = withRealCanvas());
+    // Loads the DuckDB binding once, so no single test pays for it against its timeout.
+    await canvas.acquire(undefined, createMockContext({ tenantId: 'default' }));
   });
   afterAll(async () => {
     await teardown();
@@ -1205,6 +1421,44 @@ describe('eurostatDownloadDataset — an empty download leaves every canvas unto
       error: { data: { reason: 'canvas_not_found' } },
     });
     expect(cancelled()).toBe(true);
+  });
+
+  it('carries its declared canvas_not_found recovery on both surfaces, not the canvas service hint', async () => {
+    const declared = eurostatDownloadDataset.errors?.find(
+      (e) => e.reason === 'canvas_not_found',
+    )?.recovery;
+    expect(declared).toContain('Omit canvas_id');
+    fetchMock.mockImplementationOnce(async () => new Response(UNE_TSV, { status: 200 }));
+
+    const result = await runToolContract(eurostatDownloadDataset, {
+      dataset_code: 'une_rt_m',
+      canvas_id: 'Zz9Zz9Zz9Z',
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.NotFound,
+        data: { reason: 'canvas_not_found', canvasId: 'Zz9Zz9Zz9Z', recovery: { hint: declared } },
+      },
+    });
+    const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+    expect(text).toContain(`Recovery: ${declared}`);
+    expect(text).not.toContain('stage fresh data');
+  });
+
+  it('ignores an unknown canvas_id on a deployment without a canvas', async () => {
+    setCanvas(undefined);
+    fetchMock.mockImplementationOnce(async () => new Response(UNE_TSV, { status: 200 }));
+
+    const result = await runToolContract(eurostatDownloadDataset, {
+      dataset_code: 'une_rt_m',
+      canvas_id: 'Zz9Zz9Zz9Z',
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ rowCount: 2 });
+    expect(result.structuredContent).not.toHaveProperty('canvasId');
   });
 });
 

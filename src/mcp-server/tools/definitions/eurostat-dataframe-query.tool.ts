@@ -7,7 +7,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { acquireCanvas, getCanvas } from '@/services/canvas-accessor.js';
+import { acquireCanvas, getCanvas, isCanvasFailure } from '@/services/canvas-accessor.js';
 
 export const eurostatDataframeQuery = tool('eurostat_dataframe_query', {
   title: 'Query Eurostat Dataframes',
@@ -60,7 +60,6 @@ export const eurostatDataframeQuery = tool('eurostat_dataframe_query', {
       when: 'The canvas_id is unknown or its lifetime has elapsed.',
       recovery:
         'Re-run eurostat_query_dataset or eurostat_download_dataset without canvas_id and use the canvasId it returns; eurostat_get_dimension_values stages onto that canvas but never starts one.',
-      thrownBy: 'service',
     },
     {
       reason: 'missing_table',
@@ -68,7 +67,6 @@ export const eurostatDataframeQuery = tool('eurostat_dataframe_query', {
       when: 'The SQL names a table that is not staged on this canvas, or that has expired.',
       recovery:
         'Call eurostat_dataframe_describe for the staged table names, or re-run the tool that staged them (eurostat_query_dataset, eurostat_download_dataset, or eurostat_get_dimension_values with canvas_id).',
-      thrownBy: 'service',
     },
   ],
 
@@ -78,7 +76,32 @@ export const eurostatDataframeQuery = tool('eurostat_dataframe_query', {
       throw ctx.fail('canvas_disabled');
     }
 
-    const instance = await acquireCanvas(canvas, input.canvas_id, ctx);
+    /**
+     * Both are re-thrown so the declared recovery replaces the canvas service's
+     * generic one. A canvas can also expire between the acquire and the query,
+     * so both calls go through the same mapping.
+     */
+    const asDeclared = (err: unknown): never => {
+      if (isCanvasFailure(err, 'canvas_not_found')) {
+        throw ctx.fail(
+          'canvas_not_found',
+          err.message,
+          { canvasId: input.canvas_id },
+          { cause: err },
+        );
+      }
+      if (isCanvasFailure(err, 'missing_table')) {
+        throw ctx.fail(
+          'missing_table',
+          err.message,
+          { tableName: err.data?.tableName },
+          { cause: err },
+        );
+      }
+      throw err;
+    };
+
+    const instance = await acquireCanvas(canvas, input.canvas_id, ctx).catch(asDeclared);
 
     /**
      * The SQL is not sanitized here on purpose. The canvas gate rejects
@@ -88,7 +111,7 @@ export const eurostatDataframeQuery = tool('eurostat_dataframe_query', {
      * second, weaker string filter in front of it would only shadow those
      * reasons with a vaguer message.
      */
-    const result = await instance.query(input.sql, { signal: ctx.signal });
+    const result = await instance.query(input.sql, { signal: ctx.signal }).catch(asDeclared);
 
     ctx.log.info('Canvas query complete', {
       canvasId: instance.canvasId,

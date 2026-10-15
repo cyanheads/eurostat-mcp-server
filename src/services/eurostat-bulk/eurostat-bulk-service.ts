@@ -17,7 +17,12 @@ import {
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { fetchWithTimeout } from '@cyanheads/mcp-ts-core/utils';
+import {
+  defaultIsTransient,
+  fetchWithTimeout,
+  withExtra,
+  withRetry,
+} from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import {
   CONF_STATUS_COLUMN,
@@ -30,7 +35,9 @@ import {
   OBS_VALUE_COLUMN,
   OBS_VALUE_TEXT_COLUMN,
 } from '@/services/eurostat-codelists.js';
+import { dropUnsetFilters } from '@/services/eurostat-filters.js';
 import { dataHostFor, isComextDataset } from '@/services/eurostat-hosts.js';
+import { isUpstreamOutage, upstreamOutage } from '@/services/eurostat-outage.js';
 import {
   type BulkDownload,
   type BulkRow,
@@ -141,6 +148,27 @@ export function classifyXmlBody(xml: string, datasetCode: string): never {
 }
 
 /**
+ * Classify the XML body a non-2xx answer carried, when it names a failure this server
+ * models; otherwise return, leaving the caller to rethrow the HTTP error.
+ *
+ * `fetchWithTimeout` throws for any non-2xx before the caller sees the body, so a SOAP
+ * fault is only reachable through the excerpt captured on `err.data`. Faults run well
+ * under the framework's 500-byte cap, so the excerpt carries the whole envelope. On a
+ * 5xx, a body naming nothing this server models — an HTML or XML error page — is the
+ * outage itself, so the HTTP error is kept to mark it one.
+ */
+function classifyFaultBody(err: unknown, datasetCode: string): void {
+  const body = (err as McpError).data?.body;
+  if (typeof body !== 'string' || !body.includes('<')) return;
+  try {
+    classifyXmlBody(body, datasetCode);
+  } catch (fault) {
+    const unmodeled = (fault as McpError).data?.reason === 'upstream_fault';
+    if (!(unmodeled && isUpstreamOutage(err))) throw fault;
+  }
+}
+
+/**
  * Split one wide-TSV cell into its value and flags.
  *
  * The grammar, read off live responses, is `<value>` `SPACE` `<flags>`, where
@@ -218,6 +246,7 @@ export function parseHeader(line: string): TsvHeader {
  *
  * A filter key names its dimension in any case (`GEO` places the same as `geo`),
  * as the Statistics API reads it; keys that differ only in case pool their values.
+ * A blank value is unset rather than an empty member of the `+` list.
  *
  * Returns `undefined` when no filter applies. An all-wildcard key is accepted
  * by Eurostat, but omitting the segment asks the same question without staking
@@ -227,7 +256,7 @@ export function buildKeyPath(
   dimensionOrder: string[],
   filters: Record<string, string[]>,
 ): string | undefined {
-  const applied = Object.entries(filters).filter(([, values]) => values.length > 0);
+  const applied = Object.entries(dropUnsetFilters(filters));
   if (applied.length === 0) return;
 
   const byDimension = new Map<string, string[]>();
@@ -299,10 +328,13 @@ export class EurostatBulkService {
    * Start a bulk download: issue the request, classify the response, parse the
    * header, and hand back a generator over the body.
    *
-   * The request is made once with no retry. A bulk body streams for up to
-   * `EUROSTAT_BULK_TIMEOUT_MS`, so re-running it on a transient failure costs
-   * the caller another full transfer for a request that is already the most
-   * expensive one this server makes; the failure is surfaced instead.
+   * Only the request is retried, and only on an outage: an HTTP 5xx or a host that
+   * could not be reached, both of which fail before any of the body is read, so a
+   * retry repeats a request rather than a transfer. One that outlasts the retries
+   * fails as a retryable `upstream_fault`. A timeout, a fault in the request, and a
+   * failure once the body is streaming are surfaced on the first attempt: a bulk body
+   * streams for up to `EUROSTAT_BULK_TIMEOUT_MS`, so re-running the request then
+   * would cost the caller another full transfer.
    */
   async startDownload(
     datasetCode: string,
@@ -315,6 +347,7 @@ export class EurostatBulkService {
     const { bulkTimeoutMs, bulkMaxBytes } = getServerConfig();
     const keyPath = buildKeyPath(dimensionOrder, filters);
     const url = this.buildUrl(datasetCode, keyPath, sinceP, untilP);
+    const fetchCtx = withExtra(ctx, { endpoint: 'sdmx-data', datasetCode });
 
     ctx.log.info('Starting SDMX bulk download', {
       datasetCode,
@@ -324,25 +357,41 @@ export class EurostatBulkService {
       maxBytes: bulkMaxBytes,
     });
 
-    let response: Response;
-    try {
-      response = await fetchWithTimeout(url.toString(), bulkTimeoutMs, ctx, {
+    const response = await withRetry(
+      async () => {
+        try {
+          return await fetchWithTimeout(url.toString(), bulkTimeoutMs, fetchCtx, {
+            signal: ctx.signal,
+            // 400 (bad filter value or arity), 404 (unknown dataset) and 413 (extraction too
+            // large) are modeled outcomes reclassified below into the declared error
+            // contract, not service failures.
+            expectedStatuses: [400, 404, 413],
+          });
+        } catch (err) {
+          classifyFaultBody(err, datasetCode);
+          throw err;
+        }
+      },
+      {
+        operation: 'fetchSdmxData',
+        context: fetchCtx,
+        baseDelayMs: 1000,
         signal: ctx.signal,
-        // 400 (bad filter value or arity), 404 (unknown dataset) and 413 (extraction too
-        // large) are modeled outcomes reclassified below into the declared error
-        // contract, not service failures.
-        expectedStatuses: [400, 404, 413],
-      });
-    } catch (err) {
-      // fetchWithTimeout throws for any non-2xx before the caller sees the body, so the
-      // SOAP fault is only reachable through the captured excerpt on err.data. Faults run
-      // well under the framework's 500-byte cap, so the excerpt carries the whole envelope.
-      const body = (err as McpError).data as { body?: string } | undefined;
-      if (typeof body?.body === 'string' && body.body.includes('<')) {
-        classifyXmlBody(body.body, datasetCode);
-      }
-      throw err;
-    }
+        // An outage, minus the 501 the fetch layer marks deterministic.
+        isTransient: (error) => isUpstreamOutage(error) && defaultIsTransient(error),
+      },
+    ).catch((error: unknown) => {
+      // A download the caller cancelled is the caller's outcome, whatever the last attempt saw.
+      if (ctx.signal.aborted) throw error;
+      throw (
+        upstreamOutage(
+          error,
+          "Eurostat's SDMX data endpoint",
+          `the bulk download of dataset "${datasetCode}"`,
+          { datasetCode },
+        ) ?? error
+      );
+    });
 
     if (!response.body) {
       throw serviceUnavailable(

@@ -7,7 +7,12 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { dimensionsToNarrow, narrowingAdvice } from '@/mcp-server/tools/narrowing-advice.js';
-import { acquireCanvas, getCanvas, newTableName } from '@/services/canvas-accessor.js';
+import {
+  acquireCanvas,
+  getCanvas,
+  isCanvasFailure,
+  newTableName,
+} from '@/services/canvas-accessor.js';
 import {
   getEurostatDataService,
   observationRowSchema,
@@ -18,7 +23,9 @@ import {
   OBS_CAP,
   type UnmatchedValues,
 } from '@/services/eurostat-data/types.js';
+import { dropUnsetFilters } from '@/services/eurostat-filters.js';
 import { isComextDataset } from '@/services/eurostat-hosts.js';
+import { outageAnswer } from '@/services/eurostat-outage.js';
 import { PERIOD_FORMS, resolvePeriods } from '@/services/eurostat-periods.js';
 
 /** Upper bound on the deterministic observation prefix returned inline. */
@@ -47,7 +54,7 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       .record(z.string(), z.array(z.string()))
       .default({})
       .describe(
-        'Dimension filters as a map of dimension code → array of valid values. Example: {"unit": ["CP_MEUR"], "na_item": ["B1GQ"], "geo": ["DE", "FR"]}. An empty array is treated as no filter for that dimension and is dropped from the request. Dimension codes match in any case ("GEO" is geo). Do not include "geo" here if using geo_level. A value that matches nothing contributes no rows rather than an error; the response names it in unmatchedValues, or in the no_results error when nothing matched at all. eurostat_get_dimension_values lists the valid values.',
+        'Dimension filters as a map of dimension code → array of valid values. Example: {"unit": ["CP_MEUR"], "na_item": ["B1GQ"], "geo": ["DE", "FR"]}. An empty array is treated as no filter for that dimension and is dropped from the request, and so is a blank or whitespace-only value ([""] is no filter, ["", "DE"] is ["DE"]). Dimension codes match in any case ("GEO" is geo). Keys are dimensions only: one naming a request control (lang, format, geoLevel, sinceTimePeriod, untilTimePeriod, lastTimePeriod, in any case) is rejected as invalid_dimension — use the lang, geo_level, since_period, until_period and last_n_periods inputs. Do not include "geo" here if using geo_level, nor "time"/"time_period" if using since_period, until_period or last_n_periods. A value that matches nothing contributes no rows rather than an error; the response names it in unmatchedValues, or in the no_results error when nothing matched at all. eurostat_get_dimension_values lists the valid values.',
       ),
     geo_level: z
       .enum(GEO_LEVEL_VALUES)
@@ -219,7 +226,7 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
         filters: z
           .record(z.string(), z.array(z.string()))
           .describe(
-            'Dimension filters actually sent to Eurostat. Empty arrays from the request are dropped and do not appear here.',
+            'Dimension filters actually sent to Eurostat. Blank values, and dimensions left with no value (empty arrays included), are dropped and do not appear here.',
           ),
         geoLevel: z.string().optional().describe('NUTS geo level filter applied, if any.'),
         sincePeriod: z.string().optional().describe('Start of time range applied, if any.'),
@@ -289,22 +296,29 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
     {
       reason: 'invalid_dimension',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'A dimension code in filters does not exist in this dataset (HTTP 400, Eurostat error id 150).',
-      recovery: 'Use eurostat_get_dataset_info to see valid dimension codes for this dataset.',
+      when: 'A dimension code in filters does not exist in this dataset (HTTP 400, Eurostat error id 150), or a filter key names a request control (lang, format, geoLevel, sinceTimePeriod, untilTimePeriod, lastTimePeriod, in any case) rather than a dimension — rejected before any request, naming the input that sets it.',
+      recovery:
+        'Use eurostat_get_dataset_info to see valid dimension codes for this dataset; set a control through its own input (lang, geo_level, since_period, until_period, last_n_periods), not filters.',
     },
     {
       reason: 'conflicting_params',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Mutually exclusive parameters were combined: "geo" filter + geo_level, or since_period/until_period + last_n_periods.',
+      when: 'Mutually exclusive parameters were combined: "geo" filter + geo_level, since_period/until_period + last_n_periods, or a "time"/"time_period" filter + since_period, until_period or last_n_periods. Checked before any request; Eurostat\'s own refusal of two time selections maps here too.',
       recovery:
-        'Use "geo" or geo_level (not both); use since_period/until_period or last_n_periods (not both).',
+        'Keep one of each pair: filters.geo or geo_level; since_period/until_period or last_n_periods; filters.time or a period input.',
     },
     {
       reason: 'canvas_not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'A canvas_id was supplied for staging but is unknown or its lifetime has elapsed.',
       recovery: 'Omit canvas_id so the response starts a fresh canvas and returns its canvasId.',
-      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_fault',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'The Statistics API answered HTTP 5xx or could not be reached on every attempt of the retry loop. The error is marked retryable, except for HTTP 501, which is marked not retryable.',
+      recovery:
+        "The failure is on Eurostat's side, not in the request: when the error is marked retryable, call again in a few minutes.",
     },
   ],
 
@@ -336,8 +350,13 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
         ctx,
       );
     } catch (err) {
-      const data = (err as McpError).data as (NoResultsDiagnosis & { reason?: string }) | undefined;
+      const data = (err as McpError).data as
+        | (NoResultsDiagnosis & { reason?: string; recovery?: { hint?: string } })
+        | undefined;
       const reason = data?.reason;
+      // A rule the service checked before the request names its own remedy; Eurostat's
+      // refusals carry none and take the generic one below.
+      const serviceHint = data?.recovery?.hint;
       if (data && reason === 'no_results') {
         const explained = explainNoResults(input.dataset_code, data, {
           lastN: input.last_n_periods,
@@ -362,7 +381,7 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       if (reason === 'async_response') {
         const dimensions = await dimensionsToNarrow(input.dataset_code, [], ctx);
         const filtered = [
-          ...Object.keys(input.filters).filter((key) => (input.filters[key] ?? []).length > 0),
+          ...Object.keys(dropUnsetFilters(input.filters)),
           ...(input.geo_level ? ['geo'] : []),
         ];
         throw ctx.fail('async_response', (err as Error).message, {
@@ -381,14 +400,26 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       if (reason === 'invalid_dimension') {
         throw ctx.fail('invalid_dimension', (err as Error).message, {
           recovery: {
-            hint: `Use eurostat_get_dataset_info to see valid dimension codes for "${input.dataset_code}".`,
+            hint:
+              serviceHint ??
+              `Use eurostat_get_dataset_info to see valid dimension codes for "${input.dataset_code}".`,
           },
         });
       }
       if (reason === 'conflicting_params') {
         throw ctx.fail('conflicting_params', (err as Error).message, {
           recovery: {
-            hint: 'Use filters.geo or geo_level, not both. For time, use since_period/until_period or last_n_periods, not both.',
+            hint:
+              serviceHint ??
+              'Use filters.geo or geo_level, not both. For time, use since_period/until_period or last_n_periods, not both.',
+          },
+        });
+      }
+      if (reason === 'upstream_fault' && (err as McpError).data?.retryable === true) {
+        throw ctx.fail('upstream_fault', (err as Error).message, {
+          retryable: true,
+          recovery: {
+            hint: `Eurostat's Statistics API ${outageAnswer((err as McpError).data?.status)} for "${input.dataset_code}" on every attempt — an upstream outage, not a fault in the request. Retry in a few minutes.`,
           },
         });
       }
@@ -412,7 +443,18 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
     const canvas = truncated ? getCanvas() : undefined;
     let staged: { canvasId: string; tableName: string; stagedRowCount: number } | undefined;
     if (canvas) {
-      const instance = await acquireCanvas(canvas, input.canvas_id, ctx);
+      // Re-thrown so the declared recovery replaces the canvas service's generic one.
+      const instance = await acquireCanvas(canvas, input.canvas_id, ctx).catch((err: unknown) => {
+        if (isCanvasFailure(err, 'canvas_not_found')) {
+          throw ctx.fail(
+            'canvas_not_found',
+            err.message,
+            { canvasId: input.canvas_id },
+            { cause: err },
+          );
+        }
+        throw err;
+      });
       const handle = await instance.registerTable(newTableName(), rows(), {
         schema: observationRowSchema(result.dimensionsUsed, isComextDataset(input.dataset_code)),
         signal: ctx.signal,
@@ -432,9 +474,9 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       ...(staged && { canvasId: staged.canvasId, tableName: staged.tableName }),
     });
 
-    // Sourced from the service's applied set, not raw input: a zero-length filter array is
-    // dropped from the upstream request, so echoing it back would claim a restriction that
-    // was never sent.
+    // Sourced from the service's applied set, not raw input: blank values and zero-length
+    // filter arrays are dropped from the upstream request, so echoing them back would claim
+    // a restriction that was never sent.
     ctx.enrich({
       appliedFilters: {
         filters: appliedFilters,
@@ -457,7 +499,7 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       notices.push(
         staged
           ? `preview_limit=${input.preview_limit.toLocaleString()} returns the first ${result.observations.length.toLocaleString()} of ${result.obsCount.toLocaleString()} matched rows inline; it does not reduce the match. All ${staged.stagedRowCount.toLocaleString()} matched rows are staged as table "${staged.tableName}" on canvas "${staged.canvasId}". Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query. Use ${filterOn} or a period range when the match itself should be smaller.`
-          : `preview_limit=${input.preview_limit.toLocaleString()} returns the first ${result.observations.length.toLocaleString()} of ${result.obsCount.toLocaleString()} matched rows inline; it does not reduce the match. Use ${filterOn} or a period range to reduce the match itself${truncated ? ', or call eurostat_download_dataset when the whole dataset is wanted' : ''}.`,
+          : `preview_limit=${input.preview_limit.toLocaleString()} returns the first ${result.observations.length.toLocaleString()} of ${result.obsCount.toLocaleString()} matched rows inline; it does not reduce the match. Use ${filterOn} or a period range to reduce the match itself.`,
       );
     }
     if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
@@ -475,7 +517,7 @@ export const eurostatQueryDataset = tool('eurostat_query_dataset', {
       ? ''
       : result.tableName
         ? ' — the match crossed the 5,000-row staging threshold; the whole match is staged on the canvas below'
-        : ' — the match crossed the 5,000-row staging threshold. Add dimension filters, or call eurostat_download_dataset for the whole dataset.';
+        : ' — the match crossed the 5,000-row staging threshold. Add dimension filters or a period range to reduce the match.';
     const lines: string[] = [
       `# ${result.datasetLabel} (\`${result.datasetCode}\`)`,
       `**Observations:** ${result.obsCount} (${result.missingObsCount} missing) | **Period:** ${period}`,

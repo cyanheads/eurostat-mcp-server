@@ -398,6 +398,72 @@ describe('eurostatGetDatasetInfo — the metadata path through the real data ser
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  describe('an unavailable structure endpoint', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** Run the call past the 1 s / 2 s / 4 s backoff (plus jitter) without waiting it out. */
+    const callSettled = async (dataset_code: string) => {
+      const pending = runToolContract(eurostatGetDatasetInfo, { dataset_code });
+      await vi.advanceTimersByTimeAsync(60_000);
+      return pending;
+    };
+
+    it('fails a Comext host answering 503 to everything as a retryable upstream_fault on both surfaces', async () => {
+      fetchMock = vi.fn(
+        async () => new Response('Service Unavailable', { status: 503, statusText: 'Unavailable' }),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      const result = await callSettled('DS-045409');
+      expect(result.isError).toBe(true);
+      const error = errorOf(result);
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.data).toMatchObject({
+        reason: 'upstream_fault',
+        retryable: true,
+        recovery: { hint: expect.stringContaining('DS-045409') },
+      });
+      const hint = (error.data.recovery as { hint: string }).hint;
+      expect(hint).toMatch(/retry in a few minutes/i);
+      expect(hint).toContain('HTTP 503');
+      expect(hint).not.toContain('cannot read');
+      const text = textOf(result);
+      expect(text).toContain(`Recovery: ${hint}`);
+      expect(text).toContain('reason upstream_fault · retryable');
+      // Both structure reads ran their full retry loop before the failure was classified.
+      expect(fetchMock).toHaveBeenCalledTimes(8);
+    });
+
+    it('fails an unreachable host the same way', async () => {
+      fetchMock = vi.fn(async () => {
+        throw new TypeError('fetch failed');
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const result = await callSettled('nama_10_gdp');
+      const error = errorOf(result);
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.data).toMatchObject({ reason: 'upstream_fault', retryable: true });
+      const hint = (error.data.recovery as { hint: string }).hint;
+      expect(hint).toContain('could not be reached');
+      expect(textOf(result)).toContain('reason upstream_fault · retryable');
+    });
+
+    it('keeps the unreadable-structure hint, not the outage one, for a malformed body', async () => {
+      serve({ dataflow: { body: TRUNCATED_DATAFLOW_XML } });
+      const result = await callSettled('earn_ses_annual');
+      const error = errorOf(result);
+      expect(error.data).toMatchObject({ reason: 'upstream_fault' });
+      expect((error.data.recovery as { hint: string }).hint).toContain('cannot read');
+      expect(error.data.retryable).toBeUndefined();
+    });
+  });
+
   it('declares exactly the failures its metadata path can raise', () => {
     expect(eurostatGetDatasetInfo.errors?.map(({ reason }) => reason)).toEqual([
       'not_found',

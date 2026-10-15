@@ -3,9 +3,11 @@
  * @module tests/tools/eurostat-get-dimension-values.tool.test
  */
 
+import { readFileSync } from 'node:fs';
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { decodeCursor, encodeCursor } from '@cyanheads/mcp-ts-core/utils';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eurostatGetDimensionValues } from '@/mcp-server/tools/definitions/eurostat-get-dimension-values.tool.js';
 import { setCanvas } from '@/services/canvas-accessor.js';
@@ -247,8 +249,10 @@ describe('eurostatGetDimensionValues — staging on a canvas (#50)', () => {
   let teardown: () => Promise<void>;
   const ctx = () => createMockContext({ tenantId: 'default' });
 
-  beforeAll(() => {
+  beforeAll(async () => {
     ({ canvas, teardown } = withRealCanvas());
+    // Loads the DuckDB binding once, so no single test pays for it against its timeout.
+    await canvas.acquire(undefined, ctx());
   });
   afterAll(async () => {
     await teardown();
@@ -422,7 +426,12 @@ describe('eurostatGetDimensionValues — staging on a canvas (#50)', () => {
     expect(text).toMatch(/eurostat_dataframe_describe.*eurostat_dataframe_query/s);
   });
 
-  it('fails an unknown canvas_id as canvas_not_found on both surfaces', async () => {
+  it('fails an unknown canvas_id as canvas_not_found on both surfaces, with its declared recovery', async () => {
+    const declared = eurostatGetDimensionValues.errors?.find(
+      (e) => e.reason === 'canvas_not_found',
+    )?.recovery;
+    expect(declared).toContain('omit canvas_id to list the values inline only');
+
     const result = await runToolContract(eurostatGetDimensionValues, {
       dataset_code: 'demo_r_pjangrp3',
       dimension: 'unit',
@@ -432,10 +441,30 @@ describe('eurostatGetDimensionValues — staging on a canvas (#50)', () => {
     expect(result.structuredContent).toMatchObject({
       error: {
         code: JsonRpcErrorCode.NotFound,
-        data: { reason: 'canvas_not_found', recovery: { hint: expect.any(String) } },
+        data: { reason: 'canvas_not_found', canvasId: 'Zz9Zz9Zz9Z', recovery: { hint: declared } },
       },
     });
-    expect(textOf(result)).toContain('Recovery:');
+    // The canvas service's own advice — re-run the producing tool — is not what this tool says.
+    expect(textOf(result)).toContain(`Recovery: ${declared}`);
+    expect(textOf(result)).not.toContain('stage fresh data');
+  });
+
+  it('never looks up an unknown canvas_id for a dimension that lists no values', async () => {
+    vi.mocked(getEurostatDataService).mockReturnValue({
+      getDimensionValues: vi.fn().mockResolvedValue({
+        dimensionCode: 'obs_status',
+        dimensionLabel: 'Observation status',
+        values: [],
+        totalCount: 0,
+      }),
+    } as never);
+    const result = await runToolContract(eurostatGetDimensionValues, {
+      dataset_code: 'demo_r_pjangrp3',
+      dimension: 'obs_status',
+      canvas_id: 'Zz9Zz9Zz9Z',
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ totalCount: 0, values: [] });
   });
 
   it('looks up only the canvas it was given, never starting one of its own', async () => {
@@ -658,13 +687,762 @@ describe('eurostatGetDimensionValues — failures raised by the real data servic
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it('declares exactly the failures its metadata and staging paths can raise', () => {
+  it('refuses a cursor replayed for another dataset before downloading that dataset’s structure', async () => {
+    const first = await runToolContract(eurostatGetDimensionValues, {
+      dataset_code: 'earn_ses_annual',
+      dimension: 'geo',
+      limit: 1,
+    });
+    const { nextCursor } = first.structuredContent as { nextCursor: string };
+    expect(nextCursor).toEqual(expect.any(String));
+    vi.mocked(fetch).mockClear();
+
+    const result = await runToolContract(eurostatGetDimensionValues, {
+      dataset_code: 'demo_r_pjangrp3',
+      dimension: 'geo',
+      cursor: nextCursor,
+    });
+    expect(errorOf(result)).toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      data: { reason: 'invalid_cursor' },
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  describe('an unavailable structure endpoint (#71)', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** Run the call past the 1 s / 2 s / 4 s backoff (plus jitter) without waiting it out. */
+    const callSettled = async (input: { dataset_code: string; dimension: string }) => {
+      const pending = runToolContract(eurostatGetDimensionValues, input);
+      await vi.advanceTimersByTimeAsync(60_000);
+      return pending;
+    };
+
+    it('fails a host answering 503 to everything as a retryable upstream_fault on both surfaces', async () => {
+      const fetchMock = vi.fn(
+        async () => new Response('Service Unavailable', { status: 503, statusText: 'Unavailable' }),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      const result = await callSettled({ dataset_code: 'nama_10_gdp', dimension: 'unit' });
+      expect(result.isError).toBe(true);
+      const error = errorOf(result);
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.data).toMatchObject({
+        reason: 'upstream_fault',
+        retryable: true,
+        recovery: { hint: expect.stringContaining('"unit" values of "nama_10_gdp"') },
+      });
+      const hint = (error.data.recovery as { hint: string }).hint;
+      expect(hint).toContain('HTTP 503');
+      expect(hint).toMatch(/retry in a few minutes/i);
+      expect(hint).not.toContain('cannot read');
+      const text = textOf(result);
+      expect(text).toContain(`Recovery: ${hint}`);
+      expect(text).toContain('reason upstream_fault · retryable');
+      // Both structure reads of the metadata load ran their full retry loop.
+      expect(fetchMock).toHaveBeenCalledTimes(8);
+    });
+
+    it('fails an unreachable host the same way', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => {
+          throw new TypeError('fetch failed');
+        }),
+      );
+      const result = await callSettled({ dataset_code: 'nama_10_gdp', dimension: 'geo' });
+      const error = errorOf(result);
+      expect(error.data).toMatchObject({ reason: 'upstream_fault', retryable: true });
+      expect((error.data.recovery as { hint: string }).hint).toContain('could not be reached');
+      expect(textOf(result)).toContain('reason upstream_fault · retryable');
+    });
+
+    it('keeps the unreadable-structure hint, with no retryable flag, for a malformed body', async () => {
+      serveStructure({ dataflow: '' });
+      const result = await callSettled({ dataset_code: 'earn_ses_annual', dimension: 'geo' });
+      const error = errorOf(result);
+      expect(error.data).toMatchObject({ reason: 'upstream_fault' });
+      expect((error.data.recovery as { hint: string }).hint).toContain('cannot read');
+      expect(error.data.retryable).toBeUndefined();
+      expect(textOf(result)).not.toContain('retryable');
+    });
+
+    it('leaves a cancelled call as a cancellation, not an outage', async () => {
+      const controller = new AbortController();
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => {
+          controller.abort();
+          return new Response('Service Unavailable', { status: 503 });
+        }),
+      );
+      const pending = runToolContract(
+        eurostatGetDimensionValues,
+        { dataset_code: 'nama_10_gdp', dimension: 'unit' },
+        { context: { signal: controller.signal } },
+      );
+      await vi.advanceTimersByTimeAsync(60_000);
+      const error = errorOf(await pending);
+      expect(error.code).toBe(JsonRpcErrorCode.RequestCancelled);
+      expect(error.data?.reason).not.toBe('upstream_fault');
+    });
+  });
+
+  it('declares exactly the failures its metadata, paging and staging paths can raise', () => {
     expect(eurostatGetDimensionValues.errors?.map(({ reason }) => reason)).toEqual([
       'not_found',
       'no_results',
       'conflicting_params',
+      'invalid_cursor',
       'upstream_fault',
       'canvas_not_found',
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Paging and filtering over recorded value lists (#64). The fixtures under
+// tests/fixtures/dimension-values/ are the code/label lists the data service
+// returned on 2026-10-14: avia_par_de airp_pr, demo_r_pjangrp3 geo at nuts3,
+// sbs_ovw_act nace_r2 and nama_10_gdp na_item whole, and DS-045409 product as
+// two excerpts (values 11,300-11,899 and 16,000-16,199 of 37,069), which hold
+// its longest labels, 29349990's 4,505 bytes among them.
+// ---------------------------------------------------------------------------
+
+type Value = { code: string; label: string };
+
+function recordedValues(name: string): Value[] {
+  const pairs = JSON.parse(
+    readFileSync(new URL(`../fixtures/dimension-values/${name}.json`, import.meta.url), 'utf8'),
+  ) as Array<[string, string]>;
+  return pairs.map(([code, label]) => ({ code, label }));
+}
+
+/**
+ * The data service answering with one recorded list, as getDimensionValues
+ * returns it: for geo, at the level requested, country when none was.
+ */
+function serveList(values: Value[], dimension = { code: 'unit', label: 'Unit' }) {
+  const getDimensionValues = vi.fn(
+    async (_dataset: string, _dimension: string, geoLevel?: string) => ({
+      dimensionCode: dimension.code,
+      dimensionLabel: dimension.label,
+      ...(dimension.code === 'geo' && { geoLevel: geoLevel ?? 'country' }),
+      values: [...values],
+      totalCount: values.length,
+    }),
+  );
+  vi.mocked(getEurostatDataService).mockReturnValue({ getDimensionValues } as never);
+  return getDimensionValues;
+}
+
+describe('eurostatGetDimensionValues — paging and filtering recorded lists (#64)', () => {
+  beforeEach(() => {
+    setCanvas(undefined);
+  });
+
+  it('returns a list that fits the budget whole, exactly as before', async () => {
+    const naItem = recordedValues('nama-10-gdp-na-item');
+    serveList(naItem, { code: 'na_item', label: 'National accounts indicator (ESA 2010)' });
+    const result = await runToolContract(eurostatGetDimensionValues, {
+      dataset_code: 'nama_10_gdp',
+      dimension: 'na_item',
+    });
+    expect(result.structuredContent).toEqual({
+      dimensionCode: 'na_item',
+      dimensionLabel: 'National accounts indicator (ESA 2010)',
+      values: naItem,
+      totalCount: 39,
+    });
+    const text = textOf(result);
+    expect(text).toContain('**Total values:** 39\n');
+    expect(text).toContain(`- \`${naItem[38]?.code}\` — ${naItem[38]?.label}`);
+    expect(text).not.toMatch(/nextCursor|truncated/);
+  });
+
+  const BUDGET = 64_000;
+  type Result = Awaited<ReturnType<typeof runToolContract>>;
+  type Page = {
+    matchCount?: number;
+    nextCursor?: string;
+    notice?: string;
+    totalCount: number;
+    truncated?: boolean;
+    values: Value[];
+  };
+  const body = (result: Result) => result.structuredContent as Page;
+  /** UTF-8 bytes of each surface as the caller receives it, enrichment trailer included. */
+  const surfaces = (result: Result) => ({
+    structured: Buffer.byteLength(JSON.stringify(result.structuredContent), 'utf8'),
+    text: result.content.reduce(
+      (sum, block) => sum + ('text' in block ? Buffer.byteLength(block.text, 'utf8') : 0),
+      0,
+    ),
+  });
+  const call = (input: Record<string, unknown>) =>
+    runToolContract(eurostatGetDimensionValues, {
+      dataset_code: 'avia_par_de',
+      dimension: 'airp_pr',
+      ...input,
+    } as never);
+
+  /**
+   * Every page from the first call to the last, following nextCursor and bounded so a loop
+   * cannot run away; then one call past the end, with a cursor resuming after the last value
+   * returned, which must answer an empty page that closes the list.
+   */
+  async function walk(input: Record<string, unknown>, maxPages = 40): Promise<Result[]> {
+    const { limit: _ignored, ...rest } = input;
+    const pages = [await call(input)];
+    while (body(pages.at(-1) as Result).nextCursor) {
+      if (pages.length >= maxPages) throw new Error(`more than ${maxPages} pages`);
+      pages.push(await call({ ...rest, cursor: body(pages.at(-1) as Result).nextCursor }));
+    }
+    expect(pages.length, 'the walk never left the first page').toBeGreaterThan(1);
+
+    const issued = decodeCursor(
+      body(pages.at(-2) as Result).nextCursor as string,
+      createMockContext(),
+    );
+    const lastCode = body(pages.at(-1) as Result).values.at(-1)?.code;
+    const past = await call({ ...rest, cursor: encodeCursor({ ...issued, after: lastCode }) });
+    const { dataset_code = 'avia_par_de', dimension = 'airp_pr' } = rest as {
+      dataset_code?: string;
+      dimension?: string;
+    };
+    expect(past.isError).not.toBe(true);
+    expect(body(past).values).toEqual([]);
+    expect(body(past)).not.toHaveProperty('nextCursor');
+    expect(body(past)).not.toHaveProperty('truncated');
+    expect(body(past).notice).toBe(
+      `No "${dimension}" values of "${dataset_code}" follow the code this cursor resumes after: the list ends there.`,
+    );
+    return pages;
+  }
+
+  /** Every page is a success within the budget, cut pages say so, and the last page closes the walk. */
+  function expectWellFormedWalk(pages: Result[]) {
+    for (const [i, page] of pages.entries()) {
+      expect(page.isError).not.toBe(true);
+      const size = surfaces(page);
+      expect(size.structured).toBeLessThanOrEqual(BUDGET);
+      expect(size.text).toBeLessThanOrEqual(BUDGET);
+      const last = i === pages.length - 1;
+      expect(body(page).truncated).toBe(last ? undefined : true);
+      if (!last) {
+        expect(body(page).values.length).toBeGreaterThan(0);
+        expect(textOf(page)).toContain(`**nextCursor:** ${body(page).nextCursor}`);
+      }
+    }
+  }
+
+  const airports = recordedValues('avia-par-de-airp-pr');
+  const airportDimension = { code: 'airp_pr', label: 'Airport pairs' };
+  const frankfurt = airports.filter(({ label }) => /frankfurt/i.test(label));
+
+  it('walks all 2,352 avia_par_de airport pairs through nextCursor, each once, in Eurostat order', async () => {
+    serveList(airports, airportDimension);
+    const pages = await walk({});
+    expectWellFormedWalk(pages);
+    expect(pages.length).toBeGreaterThan(1);
+    expect(pages.flatMap((page) => body(page).values)).toEqual(airports);
+    expect(body(pages[0] as Result)).toMatchObject({ totalCount: 2_352, truncated: true });
+    expect(body(pages[0] as Result).notice).toContain(
+      'the 64,000-byte response budget ended this page',
+    );
+    // structuredContent is the larger surface, so it is the one the cut lands near.
+    expect(surfaces(pages[0] as Result).structured).toBeGreaterThan(BUDGET - 200);
+    expect(textOf(pages.at(-1) as Result)).not.toMatch(/nextCursor|truncated/);
+    // The trailer the handler measures is exactly the one the framework appends.
+    const { nextCursor, notice } = body(pages[0] as Result);
+    expect((pages[0] as Result).content.at(-1)).toEqual({
+      type: 'text',
+      text: `\n\n**truncated:** true\n**nextCursor:** ${nextCursor}\n> ${notice}`,
+    });
+  });
+
+  it('holds every DS-045409 product page within the budget, 29349990 and its 4,505-byte label included', async () => {
+    const products = recordedValues('ds-045409-product-excerpt');
+    serveList(products, { code: 'product', label: 'Product (CN8)' });
+    const pages = await walk({ dataset_code: 'DS-045409', dimension: 'product' });
+    expectWellFormedWalk(pages);
+    expect(pages.flatMap((page) => body(page).values)).toEqual(products);
+
+    const holding = pages.find((page) =>
+      body(page).values.some(({ code }) => code === '29349990'),
+    ) as Result;
+    const long = products.find(({ code }) => code === '29349990') as Value;
+    expect(Buffer.byteLength(long.label, 'utf8')).toBe(4_505);
+    // A per-value estimate from the list's average would put far fewer bytes on this page.
+    const average =
+      products.reduce((sum, value) => sum + Buffer.byteLength(JSON.stringify(value), 'utf8'), 0) /
+      products.length;
+    expect(Buffer.byteLength(JSON.stringify(long), 'utf8')).toBeGreaterThan(15 * average);
+    expect(surfaces(holding).structured).toBeLessThanOrEqual(BUDGET);
+    expect(surfaces(holding).text).toBeLessThanOrEqual(BUDGET);
+    // Pages are cut by bytes, not by a count: the long-label pages hold fewer values.
+    const lengths = pages.slice(0, -1).map((page) => body(page).values.length);
+    expect(Math.min(...lengths)).toBeLessThan(Math.max(...lengths));
+  });
+
+  it.each(['frankfurt palma', 'palma frankfurt'])(
+    'finds the Frankfurt–Palma pairs with filter "%s", in any word order',
+    async (filter) => {
+      serveList(airports, airportDimension);
+      const result = await call({ filter });
+      expect(body(result)).toEqual({
+        dimensionCode: 'airp_pr',
+        dimensionLabel: 'Airport pairs',
+        values: [
+          { code: 'DE_EDDF_ES_LECP', label: 'FRANKFURT/MAIN airport - PALMA TACC airport' },
+          { code: 'DE_EDDF_ES_LEPA', label: 'FRANKFURT/MAIN airport - PALMA DE MALLORCA airport' },
+          { code: 'DE_EDFH_ES_LEPA', label: 'FRANKFURT-HAHN airport - PALMA DE MALLORCA airport' },
+        ],
+        totalCount: 2_352,
+        matchCount: 3,
+      });
+      const text = textOf(result);
+      expect(text).toContain('**Total values:** 2352\n**Matching filter:** 3\n');
+      expect(text).toContain(
+        '- `DE_EDFH_ES_LEPA` — FRANKFURT-HAHN airport - PALMA DE MALLORCA airport',
+      );
+    },
+  );
+
+  it('matches the code and label joined by a space, never a word spanning the two', async () => {
+    serveList(airports, airportDimension);
+    expect(body(await call({ filter: 'de_eddf' })).matchCount).toBe(316);
+    expect(body(await call({ filter: 'LEPAFRANKFURT' })).matchCount).toBe(0);
+    expect(
+      body(await call({ filter: 'frankfurt/main lepa' })).values.map(({ code }) => code),
+    ).toEqual(['DE_EDDF_ES_LEPA']);
+  });
+
+  it('pages a filtered list at limit: 20 of 428 FRANKFURT matches, then the rest through nextCursor', async () => {
+    serveList(airports, airportDimension);
+    const first = await call({ filter: 'FRANKFURT', limit: 20 });
+    expect(body(first).values).toEqual(frankfurt.slice(0, 20));
+    expect(body(first)).toMatchObject({ matchCount: 428, totalCount: 2_352, truncated: true });
+    expect(body(first).nextCursor).toEqual(expect.any(String));
+    expect(body(first).notice).toContain(
+      'Values 1–20 of 428 values matching filter "FRANKFURT", in Eurostat\'s order; limit 20 ended this page.',
+    );
+    expect(textOf(first)).toContain('**Matching filter:** 428 — 20 listed below');
+    expect(textOf(first)).toContain(`> ${body(first).notice}`);
+
+    const pages = await walk({ filter: 'FRANKFURT', limit: 20 });
+    expectWellFormedWalk(pages);
+    expect(pages.map((page) => body(page).values.length)).toEqual([...Array(21).fill(20), 8]);
+    expect(pages.flatMap((page) => body(page).values)).toEqual(frankfurt);
+  });
+
+  it('ends an exactly full final page without a further cursor', async () => {
+    serveList(airports, airportDimension);
+    const pages = await walk({ filter: 'frankfurt', limit: 107 });
+    expect(pages.map((page) => body(page).values.length)).toEqual([107, 107, 107, 107]);
+    expectWellFormedWalk(pages);
+    expect(body(pages[3] as Result)).not.toHaveProperty('nextCursor');
+    expect(body(pages[3] as Result)).not.toHaveProperty('notice');
+  });
+
+  it('carries the first call’s limit in the cursor, ignoring a different limit sent beside it', async () => {
+    serveList(airports, airportDimension);
+    const first = await call({ filter: 'frankfurt', limit: 20 });
+    const second = await call({
+      filter: 'frankfurt',
+      limit: 5,
+      cursor: body(first).nextCursor,
+    });
+    expect(body(second).values).toEqual(frankfurt.slice(20, 40));
+
+    const unlimited = await call({});
+    const next = await call({ limit: 3, cursor: body(unlimited).nextCursor });
+    expect(body(next).values.length).toBeGreaterThan(3);
+    expect(body(next).notice).toContain('response budget ended this page');
+  });
+
+  it('folds accents and case: "zurich" finds CH040 Zürich among the NUTS-3 regions', async () => {
+    serveList(recordedValues('demo-r-pjangrp3-geo-nuts3'), {
+      code: 'geo',
+      label: 'Geopolitical entity (reporting)',
+    });
+    const result = await call({
+      dataset_code: 'demo_r_pjangrp3',
+      dimension: 'geo',
+      geo_level: 'nuts3',
+      filter: 'zurich',
+    });
+    expect(body(result)).toMatchObject({
+      geoLevel: 'nuts3',
+      values: [{ code: 'CH040', label: 'Zürich' }],
+      totalCount: 1_621,
+      matchCount: 1,
+    });
+    expect(
+      body(
+        await call({
+          dataset_code: 'demo_r_pjangrp3',
+          dimension: 'geo',
+          geo_level: 'nuts3',
+          filter: 'KOLN',
+        }),
+      ).values,
+    ).toEqual([{ code: 'DEA23', label: 'Köln, Kreisfreie Stadt' }]);
+  });
+
+  it('answers a filter that matches nothing with an empty page, matchCount 0, and a notice echoing it', async () => {
+    serveList(airports, airportDimension);
+    const result = await call({ filter: '  münchen   lepa ' });
+    expect(result.isError).not.toBe(true);
+    expect(body(result)).toMatchObject({ values: [], totalCount: 2_352, matchCount: 0 });
+    expect(body(result)).not.toHaveProperty('truncated');
+    expect(body(result)).not.toHaveProperty('nextCursor');
+    expect(body(result).notice).toContain('matched filter "münchen lepa"');
+    expect(textOf(result)).toContain('**Matching filter:** 0');
+    expect(textOf(result)).toContain(`> ${body(result).notice}`);
+  });
+
+  it('words the empty-filter notice without a canvas exactly as before (characterization)', async () => {
+    serveList(airports, airportDimension);
+    expect(body(await call({ filter: 'münchen lepa' })).notice).toBe(
+      'No "airp_pr" value of "avia_par_de" matched filter "münchen lepa": every word must appear in a value\'s code or label, in any order, ignoring case and accents. Drop or shorten a word, or call without filter to page through all 2,352.',
+    );
+  });
+
+  it('pages on with canvas_id beside cursor where there is no canvas, ignoring canvas_id as documented', async () => {
+    serveList(airports, airportDimension);
+    const first = await call({ limit: 5 });
+    const result = await call({ canvas_id: 'Zz9Zz9Zz9Z', cursor: body(first).nextCursor });
+    expect(result.isError).not.toBe(true);
+    expect(body(result).values).toEqual(airports.slice(5, 10));
+    expect(body(result)).toMatchObject({ totalCount: 2_352, truncated: true });
+    expect(result.structuredContent).not.toHaveProperty('canvasId');
+    expect(result.structuredContent).not.toHaveProperty('tableName');
+    expect(textOf(result)).not.toMatch(/staged|canvas_id/i);
+  });
+
+  it.each([
+    ['empty', ''],
+    ['whitespace-only', ' \t '],
+  ])('treats a filter that is %s as omitted', async (_label, filter) => {
+    serveList(airports, airportDimension);
+    const plain = await call({});
+    const blank = await call({ filter });
+    expect(blank.structuredContent).toEqual(plain.structuredContent);
+    expect(body(blank)).not.toHaveProperty('matchCount');
+  });
+
+  it.each([
+    [
+      'demo_r_pjangrp3 NUTS-3 geo (1,621 values)',
+      'demo-r-pjangrp3-geo-nuts3',
+      { dataset_code: 'demo_r_pjangrp3', dimension: 'geo', geo_level: 'nuts3' },
+      1_621,
+    ],
+    [
+      'sbs_ovw_act nace_r2 (920 values)',
+      'sbs-ovw-act-nace-r2',
+      { dataset_code: 'sbs_ovw_act', dimension: 'nace_r2' },
+      920,
+    ],
+  ])(
+    'pages %s, a list that used to come back whole over the budget',
+    async (_label, fixture, input, total) => {
+      const values = recordedValues(fixture);
+      serveList(values, { code: input.dimension, label: input.dimension });
+      const pages = await walk(input);
+      expectWellFormedWalk(pages);
+      expect(pages.length).toBe(2);
+      expect(pages.flatMap((page) => body(page).values)).toEqual(values);
+      const first = body(pages[0] as Result);
+      expect(first.totalCount).toBe(total);
+      expect(first.notice).toContain('Pass nextCursor as cursor for the next page');
+      expect(first.notice).toContain('pass filter (words of the code or label)');
+      // Without a canvas on this deployment, canvas_id is not offered as a route.
+      expect(first.notice).not.toContain('canvas_id');
+    },
+  );
+
+  it('starts a page past a single value that alone outgrows the budget, holding at least that one', async () => {
+    const values = [
+      { code: 'A', label: 'x'.repeat(70_000) },
+      { code: 'B', label: 'Bee' },
+      { code: 'C', label: 'Cee' },
+    ];
+    serveList(values);
+    const first = await call({ dataset_code: 'demo', dimension: 'unit' });
+    expect(body(first).values).toEqual([values[0]]);
+    expect(body(first).truncated).toBe(true);
+    const second = await call({
+      dataset_code: 'demo',
+      dimension: 'unit',
+      cursor: body(first).nextCursor,
+    });
+    expect(body(second).values).toEqual(values.slice(1));
+    expect(body(second)).not.toHaveProperty('nextCursor');
+  });
+
+  it('keeps a list exactly at the budget whole and pages it one byte past', async () => {
+    const values = Array.from({ length: 1_000 }, (_, i) => ({
+      code: `V${String(i).padStart(4, '0')}`,
+      label: `Value ${i}`,
+    }));
+    serveList(values);
+    const probe = surfaces(await call({ dataset_code: 'demo', dimension: 'unit' }));
+    expect(probe.structured).toBeLessThan(BUDGET);
+    const pad = (bytes: number) => {
+      const padded = values.map((v) => ({ ...v }));
+      (padded[999] as Value).label += 'p'.repeat(bytes);
+      serveList(padded);
+      return padded;
+    };
+
+    const exact = pad(BUDGET - probe.structured);
+    const whole = await call({ dataset_code: 'demo', dimension: 'unit' });
+    expect(surfaces(whole).structured).toBe(BUDGET);
+    expect(body(whole).values).toEqual(exact);
+    expect(body(whole)).not.toHaveProperty('truncated');
+
+    pad(BUDGET - probe.structured + 1);
+    const cut = await call({ dataset_code: 'demo', dimension: 'unit' });
+    expect(body(cut).truncated).toBe(true);
+    expect(body(cut).values.length).toBeLessThan(1_000);
+    expect(surfaces(cut).structured).toBeLessThanOrEqual(BUDGET);
+  });
+
+  describe('a cursor that does not belong to the call', () => {
+    const invalid = (result: Result) => {
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.InvalidParams,
+          data: {
+            reason: 'invalid_cursor',
+            recovery: { hint: expect.stringContaining('without cursor') },
+          },
+        },
+      });
+      expect(textOf(result)).toContain('reason invalid_cursor');
+    };
+
+    it.each([
+      ['not base64 JSON', 'not-a-cursor'],
+      ['JSON without the paging fields', Buffer.from('{"after":"X"}').toString('base64url')],
+    ])('refuses a malformed cursor (%s)', async (_label, cursor) => {
+      serveList(airports, airportDimension);
+      invalid(await call({ cursor }));
+    });
+
+    it.each([
+      ['dataset_code', { dataset_code: 'avia_par_uk' }],
+      ['dimension', { dimension: 'airp_pr_x' }],
+      ['filter', { filter: 'frankfurt main' }],
+    ])('refuses a cursor replayed with a different %s', async (_label, change) => {
+      serveList(airports, airportDimension);
+      const first = await call({ filter: 'frankfurt', limit: 5 });
+      expect(body(first).nextCursor).toEqual(expect.any(String));
+      // The same cursor with nothing changed still works.
+      expect(
+        (await call({ filter: 'frankfurt', cursor: body(first).nextCursor })).isError,
+      ).not.toBe(true);
+      invalid(await call({ filter: 'frankfurt', ...change, cursor: body(first).nextCursor }));
+    });
+
+    it.each([
+      ['malformed', { cursor: 'not-a-cursor' }],
+      ['replayed with a different dataset_code', { dataset_code: 'avia_par_uk' }],
+      ['replayed with a different dimension', { dimension: 'airp_pr_x' }],
+      ['replayed with a different filter', { filter: 'frankfurt main' }],
+    ])('refuses a cursor %s without loading the dimension list', async (_label, change) => {
+      const getDimensionValues = serveList(airports, airportDimension);
+      const first = await call({ filter: 'frankfurt', limit: 5 });
+      getDimensionValues.mockClear();
+      invalid(await call({ filter: 'frankfurt', cursor: body(first).nextCursor, ...change }));
+      expect(getDimensionValues).not.toHaveBeenCalled();
+    });
+
+    it('binds a geo cursor to the level the list resolves, so omitted and "country" are one level', async () => {
+      const regions = recordedValues('demo-r-pjangrp3-geo-nuts3');
+      serveList(regions, { code: 'geo', label: 'Geo' });
+      const geo = { dataset_code: 'demo_r_pjangrp3', dimension: 'geo' };
+      const levels = [{}, { geo_level: 'country' }];
+      for (const issuedAt of levels) {
+        const { nextCursor } = body(await call({ ...geo, ...issuedAt, limit: 5 }));
+        for (const replayedAt of levels) {
+          const next = await call({ ...geo, ...replayedAt, cursor: nextCursor });
+          expect(next.isError).not.toBe(true);
+          expect(body(next).values).toEqual(regions.slice(5, 10));
+        }
+        invalid(await call({ ...geo, geo_level: 'nuts3', cursor: nextCursor }));
+      }
+    });
+
+    it.each([
+      ['another level', { geo_level: 'nuts2' }],
+      ['the omitted default, country', {}],
+    ])('refuses a geo cursor replayed at %s', async (_label, change) => {
+      serveList(recordedValues('demo-r-pjangrp3-geo-nuts3'), { code: 'geo', label: 'Geo' });
+      const geo = { dataset_code: 'demo_r_pjangrp3', dimension: 'geo' };
+      const first = await call({ ...geo, geo_level: 'nuts3', limit: 5 });
+      expect(
+        (await call({ ...geo, geo_level: 'nuts3', cursor: body(first).nextCursor })).isError,
+      ).not.toBe(true);
+      invalid(await call({ ...geo, ...change, cursor: body(first).nextCursor }));
+    });
+
+    it('accepts the dataset code in another case, as the data service does', async () => {
+      serveList(airports, airportDimension);
+      const first = await call({ limit: 5 });
+      const next = await call({ dataset_code: 'AVIA_PAR_DE', cursor: body(first).nextCursor });
+      expect(body(next).values).toEqual(airports.slice(5, 10));
+    });
+
+    it('refuses a cursor whose last code the list no longer holds', async () => {
+      serveList(airports, airportDimension);
+      const first = await call({ limit: 5 });
+      serveList(
+        airports.filter(({ code }) => code !== airports[4]?.code),
+        airportDimension,
+      );
+      const result = await call({ cursor: body(first).nextCursor });
+      invalid(result);
+      expect(textOf(result)).toContain(`resumes after "${airports[4]?.code}"`);
+    });
+
+    it('resumes after the cursor’s code wherever the list now puts it', async () => {
+      serveList(airports, airportDimension);
+      const first = await call({ limit: 5 });
+      serveList([{ code: 'AA_NEW', label: 'Added' }, ...airports], airportDimension);
+      const next = await call({ cursor: body(first).nextCursor });
+      expect(body(next).values).toEqual(airports.slice(5, 10));
+    });
+
+    it('answers an empty page when nothing follows the cursor’s code any more', async () => {
+      serveList(airports, airportDimension);
+      const first = await call({ limit: 5 });
+      serveList(airports.slice(0, 5), airportDimension);
+      const result = await call({ cursor: body(first).nextCursor });
+      expect(result.isError).not.toBe(true);
+      expect(body(result).values).toEqual([]);
+      expect(body(result)).not.toHaveProperty('nextCursor');
+      expect(body(result).notice).toContain('the list ends there');
+    });
+  });
+});
+
+describe('eurostatGetDimensionValues — paging beside a canvas (#64)', () => {
+  let canvas: DataCanvas;
+  let teardown: () => Promise<void>;
+  beforeAll(() => {
+    ({ canvas, teardown } = withRealCanvas());
+  });
+  afterAll(async () => {
+    await teardown();
+  });
+  beforeEach(() => {
+    setCanvas(canvas);
+    serveList(recordedValues('avia-par-de-airp-pr'), { code: 'airp_pr', label: 'Airport pairs' });
+  });
+  afterEach(() => {
+    setCanvas(undefined);
+    vi.restoreAllMocks();
+  });
+
+  const call = (input: Record<string, unknown>) =>
+    runToolContract(eurostatGetDimensionValues, {
+      dataset_code: 'avia_par_de',
+      dimension: 'airp_pr',
+      ...input,
+    } as never);
+
+  it('names nextCursor, filter and canvas_id as the routes past a cut page', async () => {
+    const notice = (await call({})).structuredContent as { notice: string };
+    expect(notice.notice).toContain('Pass nextCursor as cursor');
+    expect(notice.notice).toContain('pass filter');
+    expect(notice.notice).toContain('pass canvas_id');
+  });
+
+  it('stages every value whatever filter and limit narrow the page to', async () => {
+    const instance = await canvas.acquire(undefined, createMockContext({ tenantId: 'default' }));
+    const result = await call({ canvas_id: instance.canvasId, filter: 'frankfurt', limit: 20 });
+    const body = result.structuredContent as {
+      matchCount: number;
+      notice: string;
+      stagedRowCount: number;
+      tableName: string;
+      totalCount: number;
+      values: unknown[];
+    };
+    expect(body.values).toHaveLength(20);
+    expect(body).toMatchObject({ matchCount: 428, totalCount: 2_352, stagedRowCount: 2_352 });
+    const counted = await instance.query(`SELECT count(*) AS n FROM ${body.tableName}`);
+    expect(counted.rows).toEqual([{ n: '2352' }]);
+    expect(body.notice).toContain(`staged as table "${body.tableName}"`);
+  });
+
+  it('refuses canvas_id beside cursor as conflicting_params, staging nothing', async () => {
+    const first = (await call({ limit: 5 })).structuredContent as { nextCursor: string };
+    const acquire = vi.spyOn(canvas, 'acquire');
+    const result = await call({ canvas_id: 'Zz9Zz9Zz9Z', cursor: first.nextCursor });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ValidationError,
+        data: {
+          reason: 'conflicting_params',
+          recovery: { hint: expect.stringContaining('Drop canvas_id') },
+        },
+      },
+    });
+    expect(textOf(result)).toContain('reason conflicting_params');
+    expect(acquire).not.toHaveBeenCalled();
+    // The first call may not have staged anything, so the hint claims no table exists.
+    expect(
+      (result.structuredContent as { error: { data: { recovery: { hint: string } } } }).error.data
+        .recovery.hint,
+    ).toBe(
+      'Drop canvas_id to keep paging with cursor; a first call that carried canvas_id has already staged every value. To stage the list now, call again with canvas_id and without cursor.',
+    );
+  });
+
+  it('words the empty-filter notice as before when canvas_id was not passed (characterization)', async () => {
+    const notice = (
+      (await call({ filter: 'münchen lepa' })).structuredContent as { notice: string }
+    ).notice;
+    expect(notice).toBe(
+      'No "airp_pr" value of "avia_par_de" matched filter "münchen lepa": every word must appear in a value\'s code or label, in any order, ignoring case and accents. Drop or shorten a word, or call without filter to page through all 2,352.',
+    );
+  });
+
+  it('points a filter that matched nothing at the table it staged, on both surfaces', async () => {
+    const instance = await canvas.acquire(undefined, createMockContext({ tenantId: 'default' }));
+    const result = await call({ canvas_id: instance.canvasId, filter: 'münchen lepa' });
+    const body = result.structuredContent as {
+      matchCount: number;
+      notice: string;
+      stagedRowCount: number;
+      tableName: string;
+      values: unknown[];
+    };
+    expect(body).toMatchObject({ values: [], matchCount: 0, stagedRowCount: 2_352 });
+    expect(body.notice).toBe(
+      `No "airp_pr" value of "avia_par_de" matched filter "münchen lepa": every word must appear in a value's code or label, in any order, ignoring case and accents. Drop or shorten a word, or search all 2,352 values, staged as table "${body.tableName}" on canvas "${instance.canvasId}", with eurostat_dataframe_query (e.g. SELECT code, label FROM ${body.tableName} WHERE label ILIKE '%term%').`,
+    );
+    expect(textOf(result)).toContain(`> ${body.notice}`);
+    // The SQL the notice offers runs against the staged table as written.
+    const offered = await instance.query(
+      `SELECT code, label FROM ${body.tableName} WHERE label ILIKE '%palma de mallorca%'`,
+    );
+    expect(offered.rows).toContainEqual({
+      code: 'DE_EDDF_ES_LEPA',
+      label: 'FRANKFURT/MAIN airport - PALMA DE MALLORCA airport',
+    });
   });
 });

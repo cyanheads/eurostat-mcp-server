@@ -8,13 +8,20 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { dimensionsToNarrow, narrowingAdvice } from '@/mcp-server/tools/narrowing-advice.js';
-import { acquireCanvas, getCanvas, newTableName } from '@/services/canvas-accessor.js';
+import {
+  acquireCanvas,
+  getCanvas,
+  isCanvasFailure,
+  newTableName,
+} from '@/services/canvas-accessor.js';
 import {
   bulkRowSchema,
   getEurostatBulkService,
 } from '@/services/eurostat-bulk/eurostat-bulk-service.js';
 import type { BulkRow } from '@/services/eurostat-bulk/types.js';
 import { getEurostatDataService } from '@/services/eurostat-data/eurostat-data-service.js';
+import { dropUnsetFilters } from '@/services/eurostat-filters.js';
+import { outageAnswer } from '@/services/eurostat-outage.js';
 import { PERIOD_FORMS, resolvePeriods } from '@/services/eurostat-periods.js';
 
 /** Upper bound on rows echoed inline, whatever preview_limit asks for. */
@@ -59,7 +66,7 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
       .record(z.string(), z.array(z.string()))
       .default({})
       .describe(
-        'Dimension filters as a map of dimension code → array of accepted values, applied by Eurostat before the body is sent. Example: {"unit": ["CP_MEUR"], "na_item": ["B1G"], "geo": ["DE", "FR"]}. Omit a dimension or pass an empty array to accept every value for it. Dimension codes match in any case ("GEO" is geo). Do not put "time" here — use since_period/until_period. Naming a dimension the dataset does not have is rejected with the dataset\'s dimension list rather than silently ignored.',
+        'Dimension filters as a map of dimension code → array of accepted values, applied by Eurostat before the body is sent. Example: {"unit": ["CP_MEUR"], "na_item": ["B1G"], "geo": ["DE", "FR"]}. Omit a dimension or pass an empty array to accept every value for it; a blank or whitespace-only value is likewise unset and dropped ([""] accepts every value, ["", "DE"] is ["DE"]). Dimension codes match in any case ("GEO" is geo). Do not put "time" here — use since_period/until_period. Naming a dimension the dataset does not have is rejected with the dataset\'s dimension list rather than silently ignored.',
       ),
     since_period: z
       .string()
@@ -170,7 +177,9 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
       .object({
         filters: z
           .record(z.string(), z.array(z.string()))
-          .describe('Dimension filters sent to Eurostat. Empty arrays are dropped.'),
+          .describe(
+            'Dimension filters sent to Eurostat. Blank values and dimensions left with no value are dropped.',
+          ),
         sincePeriod: z.string().optional().describe('startPeriod applied, if any.'),
         untilPeriod: z.string().optional().describe('endPeriod applied, if any.'),
         url: z.string().describe('The SDMX request URL, so the download can be reproduced.'),
@@ -262,7 +271,7 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
     {
       reason: 'upstream_fault',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The SDMX endpoint returned a fault this server does not model, or a body that is not a TSV table.',
+      when: 'The SDMX data endpoint returned a fault this server does not model, or a body that is not a TSV table; or the data endpoint — or, for a filtered download, the structure endpoint — answered HTTP 5xx or could not be reached on every retry, which the error marks retryable.',
       recovery: 'Retry in a few minutes, or narrow the request with dimension filters.',
       thrownBy: 'service',
     },
@@ -271,7 +280,6 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
       code: JsonRpcErrorCode.NotFound,
       when: 'A canvas_id was supplied for staging but is unknown or its lifetime has elapsed.',
       recovery: 'Omit canvas_id so the download starts a fresh canvas and returns its canvasId.',
-      thrownBy: 'service',
     },
   ],
 
@@ -287,9 +295,7 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
       throw ctx.fail('invalid_period', periods.message);
     }
     const { since_period: sinceP, until_period: untilP } = periods;
-    const filters = Object.fromEntries(
-      Object.entries(input.filters).filter(([, values]) => values.length > 0),
-    );
+    const filters = dropUnsetFilters(input.filters);
 
     /**
      * The positional key needs every dimension in order, not just the filtered
@@ -303,7 +309,7 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
      * `ctx.fail` is typed against this tool's reason union, so the mapping stays
      * here rather than inside a helper that would have to take a bare string.
      */
-    const asContract = async <T>(run: () => Promise<T>): Promise<T> => {
+    const asContract = async <T>(endpoint: OutageEndpoint, run: () => Promise<T>): Promise<T> => {
       try {
         return await run();
       } catch (err) {
@@ -312,20 +318,24 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
             (err as McpError).data?.reason === 'extraction_too_big'
               ? await dimensionsToNarrow(input.dataset_code, dimensionOrder, ctx)
               : undefined,
+          endpoint,
           filtered: Object.keys(filters),
         });
         if (!mapped) throw err;
-        throw ctx.fail(mapped.reason, mapped.message, { recovery: { hint: mapped.hint } });
+        throw ctx.fail(mapped.reason, mapped.message, {
+          ...(mapped.retryable && { retryable: true }),
+          recovery: { hint: mapped.hint },
+        });
       }
     };
 
     if (Object.keys(filters).length > 0) {
-      dimensionOrder = await asContract(() =>
+      dimensionOrder = await asContract('structure', () =>
         getEurostatDataService().getDimensionOrder(input.dataset_code, ctx),
       );
     }
 
-    const download = await asContract(() =>
+    const download = await asContract('data', () =>
       bulk.startDownload(input.dataset_code, dimensionOrder, filters, sinceP, untilP, ctx),
     );
 
@@ -369,7 +379,18 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
 
       const canvas = getCanvas();
       if (canvas) {
-        const instance = await acquireCanvas(canvas, input.canvas_id, ctx);
+        // Re-thrown so the declared recovery replaces the canvas service's generic one.
+        const instance = await acquireCanvas(canvas, input.canvas_id, ctx).catch((err: unknown) => {
+          if (isCanvasFailure(err, 'canvas_not_found')) {
+            throw ctx.fail(
+              'canvas_not_found',
+              err.message,
+              { canvasId: input.canvas_id },
+              { cause: err },
+            );
+          }
+          throw err;
+        });
         const handle = await instance.registerTable(newTableName(), prepend(first.value, rows), {
           schema: bulkRowSchema(download.header.dimensions, download.valueText),
           signal: ctx.signal,
@@ -504,6 +525,9 @@ export const eurostatDownloadDataset = tool('eurostat_download_dataset', {
   },
 });
 
+/** The two SDMX endpoints a download reads: the structure for a filter key, then the data. */
+type OutageEndpoint = 'data' | 'structure';
+
 /** Contract reasons the bulk service's classified failures map onto. */
 type MappedReason =
   | 'async_queued'
@@ -525,14 +549,16 @@ type MappedReason =
  *
  * `request.dimensions` is the dataset's dimension list, when known, and
  * `request.filtered` the dimensions the request already filtered — together they let
- * a too-large refusal name the dimensions still open to filter.
+ * a too-large refusal name the dimensions still open to filter. `request.endpoint` is
+ * the endpoint the failed read went to, which an outage hint names.
  */
 function mapBulkFailure(
   err: unknown,
   datasetCode: string,
-  request: { dimensions: string[] | undefined; filtered: string[] },
-): { hint: string; message: string; reason: MappedReason } | undefined {
-  const reason = (err as McpError).data?.reason;
+  request: { dimensions: string[] | undefined; endpoint: OutageEndpoint; filtered: string[] },
+): { hint: string; message: string; reason: MappedReason; retryable?: true } | undefined {
+  const data = (err as McpError).data;
+  const reason = data?.reason;
   const message = (err as Error).message;
   switch (reason) {
     case 'extraction_too_big':
@@ -572,6 +598,19 @@ function mapBulkFailure(
         hint: `Eurostat queued this extraction rather than serving it. Add dimension filters or a since_period/until_period range to make the request cheap enough for "${datasetCode}" to stream inline.`,
       };
     case 'upstream_fault':
+      // The services mark an endpoint that was down, not one that answered badly.
+      if (data?.retryable === true) {
+        const answer = outageAnswer(data.status);
+        return {
+          reason,
+          message,
+          retryable: true,
+          hint:
+            request.endpoint === 'structure'
+              ? `Eurostat's SDMX structure endpoint ${answer} for "${datasetCode}" on every attempt, so the dimension order a filtered download needs could not be read — an upstream outage, not a fault in the request. Retry in a few minutes.`
+              : `Eurostat's SDMX data endpoint ${answer} for "${datasetCode}" on every attempt — an upstream outage, not a fault in the request. Retry in a few minutes.`,
+        };
+      }
       return {
         reason,
         message,

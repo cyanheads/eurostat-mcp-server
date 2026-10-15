@@ -6,6 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getEurostatCatalogueService } from '@/services/eurostat-catalogue/eurostat-catalogue-service.js';
+import { outageAnswer } from '@/services/eurostat-outage.js';
 
 export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
   title: 'Browse Eurostat Theme Hierarchy',
@@ -88,15 +89,33 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
   enrichment: {
     itemCount: z.number().describe('Number of items returned in this level.'),
     themeCode: z.string().optional().describe('Folder code that was browsed, or omitted for root.'),
+    comextListMissing: z
+      .boolean()
+      .optional()
+      .describe(
+        'True on a browse of ext_go or icts when the Comext dataflow list could not be loaded, so the DS-* collection folder filed there is not listed. Omitted otherwise.',
+      ),
+    catalogueLoadedAt: z
+      .string()
+      .optional()
+      .describe(
+        'When the catalogue that answered was loaded (ISO 8601). Present only when a refresh failed and that older copy is still in service; omitted otherwise.',
+      ),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Names each part of the catalogue this listing is missing — the Comext collections, or updates since a refresh failed — and what to do about it. Omitted when the whole catalogue answered.',
+      ),
   },
 
   errors: [
     {
       reason: 'not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The provided theme_code does not exist in the TOC.',
+      when: 'The provided theme_code does not exist in the TOC — or is a Comext folder (ext_go_detail, prom, comext) or DS-* code while the Comext dataflow list cannot be loaded.',
       recovery:
-        'Call eurostat_browse_themes without theme_code to see valid root themes, then navigate from there.',
+        'Call eurostat_browse_themes without theme_code to see valid root themes, then navigate from there. A Comext folder missing because its list could not be loaded returns once the merge is retried, about once a minute; eurostat_get_dataset_info reads a DS-* code directly.',
     },
     {
       reason: 'not_a_folder',
@@ -104,6 +123,13 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
       when: 'The provided theme_code identifies a dataset or table entry instead of a folder.',
       recovery:
         'Pass the code to eurostat_get_dataset_info to inspect it, then eurostat_query_dataset to retrieve data.',
+    },
+    {
+      reason: 'upstream_fault',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: "The server had no catalogue loaded yet, and Eurostat's table of contents answered HTTP 5xx or could not be reached on every retry, which the error marks retryable. Once a catalogue is loaded, a failed refresh serves that copy instead.",
+      recovery:
+        "Retry in a few minutes: the catalogue load failed on Eurostat's side and runs again on the next call.",
     },
   ],
 
@@ -116,10 +142,20 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
     } catch (err) {
       const data = (err as McpError).data;
       if (data?.reason === 'not_found') {
+        const stale = data.catalogueLoadedAt
+          ? `The catalogue could not be refreshed, so this lookup ran against the copy loaded at ${data.catalogueLoadedAt}; folders Eurostat added since then are not in it.`
+          : undefined;
+        const hint = data.comextListMissing
+          ? [
+              `The Comext dataflow list merge is retried about once a minute: browse "${themeCode}" again after that. eurostat_get_dataset_info reads a DS-* code directly.`,
+              stale,
+            ]
+          : [
+              stale,
+              'Call eurostat_browse_themes without theme_code to see valid root themes, then navigate from there.',
+            ];
         throw ctx.fail('not_found', (err as Error).message, {
-          recovery: {
-            hint: 'Call eurostat_browse_themes without theme_code to see valid root themes, then navigate from there.',
-          },
+          recovery: { hint: hint.filter(Boolean).join(' ') },
         });
       }
       if (data?.reason === 'not_a_folder') {
@@ -131,17 +167,44 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
           },
         });
       }
+      if (data?.reason === 'upstream_fault' && data.retryable === true) {
+        throw ctx.fail('upstream_fault', (err as Error).message, {
+          retryable: true,
+          recovery: {
+            hint: `Eurostat's table of contents ${outageAnswer(data.status)} on every attempt, so there is no catalogue to browse yet — an upstream outage, not a fault in the request. The load runs again on the next call, so retry in a few minutes.`,
+          },
+        });
+      }
       throw err;
     }
-    ctx.log.info('Theme browse complete', { themeCode, itemCount: browsed.items.length });
-    ctx.enrich({ itemCount: browsed.items.length, ...(themeCode && { themeCode }) });
+    const { comextListMissing, catalogueLoadedAt, ...listing } = browsed;
+    ctx.log.info('Theme browse complete', { themeCode, itemCount: listing.items.length });
+    ctx.enrich({
+      itemCount: listing.items.length,
+      ...(themeCode && { themeCode }),
+      ...(comextListMissing && { comextListMissing }),
+      ...(catalogueLoadedAt && { catalogueLoadedAt }),
+    });
+    // `notice` is last-wins, so every sentence is collected here and written once.
+    const notices: string[] = [];
+    if (comextListMissing) {
+      notices.push(
+        'The Comext dataflow list could not be loaded, so the DS-* collections filed in this folder are not listed; the merge is retried about once a minute. eurostat_get_dataset_info reads a DS-* code directly.',
+      );
+    }
+    if (catalogueLoadedAt) {
+      notices.push(
+        `The catalogue could not be refreshed, so this listing comes from the copy loaded at ${catalogueLoadedAt}; folders and datasets Eurostat added or changed since then are not reflected.`,
+      );
+    }
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
     const nextStep =
-      browsed.items.length === 0
+      listing.items.length === 0
         ? undefined
-        : browsed.items.some((i) => i.type !== 'folder')
+        : listing.items.some((i) => i.type !== 'folder')
           ? `Pass a dataset/table code to eurostat_get_dataset_info to inspect dimensions. Pass a folder code back to theme_code to drill deeper.`
           : `Pass a folder code back to theme_code to drill into sub-themes.`;
-    return { ...browsed, ...(nextStep && { nextStep }) };
+    return { ...listing, ...(nextStep && { nextStep }) };
   },
 
   format: (result) => {

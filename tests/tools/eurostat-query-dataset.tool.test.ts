@@ -3,7 +3,9 @@
  * @module tests/tools/eurostat-query-dataset.tool.test
  */
 
-import { readFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { z } from '@cyanheads/mcp-ts-core';
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
@@ -523,8 +525,10 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
       ctx(),
     );
 
-  beforeAll(() => {
+  beforeAll(async () => {
     ({ canvas, teardown } = withRealCanvas());
+    // Loads the DuckDB binding once, so no single test pays for it against its timeout.
+    await canvas.acquire(undefined, ctx());
   });
   afterAll(async () => {
     await teardown();
@@ -751,6 +755,93 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
         data: { reason: 'canvas_not_found' },
       });
     });
+
+    it('carries its declared canvas_not_found recovery on both surfaces, not the canvas service hint', async () => {
+      fetchMock.mockImplementation(async () => okResponse(pastCap()));
+      const declared = eurostatQueryDataset.errors?.find(
+        (e) => e.reason === 'canvas_not_found',
+      )?.recovery;
+      expect(declared).toContain('Omit canvas_id');
+
+      const result = await runToolContract(
+        eurostatQueryDataset,
+        { dataset_code: 'nama_10_gdp', canvas_id: 'zzzzzzzzzz' },
+        { context: { tenantId: 'default' } },
+      );
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.NotFound,
+          data: {
+            reason: 'canvas_not_found',
+            canvasId: 'zzzzzzzzzz',
+            recovery: { hint: declared },
+          },
+        },
+      });
+      const text = contentText(result);
+      expect(text).toContain(`Recovery: ${declared}`);
+      expect(text).not.toContain('stage fresh data');
+    });
+
+    it('never looks up a supplied canvas_id when the match stays at or below the threshold', async () => {
+      fetchMock.mockImplementation(async () => okResponse(atCap()));
+      const result = await run({ canvas_id: 'zzzzzzzzzz' });
+      expect(result.obsCount).toBe(5000);
+      expect(result.truncated).toBe(false);
+      expect(result.canvasId).toBeUndefined();
+    });
+
+    it('keeps the staged notice and banner word for word', async () => {
+      fetchMock.mockImplementation(async () => okResponse(pastCap()));
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'nama_10_gdp',
+        preview_limit: 3,
+      });
+      const { canvasId, tableName, notice } = result.structuredContent as {
+        canvasId: string;
+        notice: string;
+        tableName: string;
+      };
+      expect(tableName).toMatch(/^df_[0-9a-f]{8}$/);
+      expect(notice).toBe(
+        `preview_limit=3 returns the first 3 of 5,001 matched rows inline; it does not reduce the match. All 5,001 matched rows are staged as table "${tableName}" on canvas "${canvasId}". Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query. Use dimension filters (geo) or a period range when the match itself should be smaller.`,
+      );
+      const text = contentText(result);
+      expect(text).toContain(
+        '**Truncated:** true — the match crossed the 5,000-row staging threshold; the whole match is staged on the canvas below\n',
+      );
+      expect(text).toContain(`> ${notice}`);
+    });
+
+    // Root bypasses the permission bit, and Windows ignores it, so neither can reproduce it.
+    it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+      'passes a scratch-directory failure through as canvas_unavailable, untouched',
+      async () => {
+        fetchMock.mockImplementation(async () => okResponse(pastCap()));
+        const readOnly = mkdtempSync(join(tmpdir(), 'eurostat-canvas-readonly-'));
+        chmodSync(readOnly, 0o500);
+        const broken = withRealCanvas({ tempRootPath: join(readOnly, 'scratch') });
+        try {
+          const result = await runToolContract(eurostatQueryDataset, {
+            dataset_code: 'nama_10_gdp',
+          });
+          expect(result.isError).toBe(true);
+          expect(result.structuredContent).toMatchObject({
+            error: {
+              code: JsonRpcErrorCode.ConfigurationError,
+              data: { reason: 'canvas_unavailable', errno: 'EACCES' },
+            },
+          });
+          expect(contentText(result)).toContain('CANVAS_PROVIDER_TYPE=none');
+        } finally {
+          await broken.teardown();
+          setCanvas(canvas);
+          chmodSync(readOnly, 0o700);
+          rmSync(readOnly, { recursive: true, force: true });
+        }
+      },
+    );
   });
 
   describe('without a canvas', () => {
@@ -781,9 +872,12 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
       );
       const notice = getEnrichment(c).notice ?? '';
       expect(notice).toContain('dimension filters');
+      expect(notice).toContain('period range');
       // Naming a tool this deployment does not list would send the agent nowhere.
       expect(notice).not.toContain('eurostat_dataframe_describe');
       expect(notice).not.toContain('eurostat_dataframe_query');
+      // Without a canvas a download keeps only its preview, so it is no route to the rest.
+      expect(notice).not.toContain('eurostat_download_dataset');
     });
 
     it('does not advertise dataframe tools in either response surface', async () => {
@@ -801,6 +895,14 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
       expect(structuredText).not.toContain('eurostat_dataframe_query');
       expect(contentText).not.toContain('eurostat_dataframe_describe');
       expect(contentText).not.toContain('eurostat_dataframe_query');
+      // …nor a download, which keeps only its preview here: narrowing is the one route offered.
+      expect(structuredText).not.toContain('eurostat_download_dataset');
+      expect(contentText).not.toContain('eurostat_download_dataset');
+      expect(result.structuredContent).toMatchObject({
+        truncated: true,
+        notice: expect.stringContaining('dimension filters (geo) or a period range'),
+      });
+      expect(contentText).toMatch(/\*\*Truncated:\*\* true — .*Add dimension filters/);
     });
 
     it('ignores a canvas_id it cannot honour instead of failing the query', async () => {
@@ -832,8 +934,10 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
       // Narrowing the query is the only route to the rest here, and the banner must say so
       // rather than point at a canvas this deployment does not have.
       expect(text).toContain('Add dimension filters');
+      expect(text).toContain('period range');
       expect(text).not.toContain('**Staged:**');
       expect(text).not.toContain('canvas');
+      expect(text).not.toContain('eurostat_download_dataset');
     });
   });
 
@@ -1601,5 +1705,411 @@ describe('eurostatQueryDataset — period inputs and filter matching (real servi
         eurostatQueryDataset.output.parse({ ...mockQueryResult, truncated: false }),
       ).not.toHaveProperty('unmatchedValues');
     });
+  });
+
+  describe('blank filter values (#61)', () => {
+    it('sends ["", "DE", "XX"] as ["DE", "XX"] and echoes and diagnoses only those', async () => {
+      fetchMock.mockImplementationOnce(async () =>
+        jsonReply(envelope('une-rt-m-geo-de-xx-since-2024-01')),
+      );
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'une_rt_m',
+        filters: { ...DE_UNEMPLOYMENT, geo: ['', 'DE', '  ', 'XX'] },
+        since_period: '2024-01',
+      });
+      expect(result.isError).not.toBe(true);
+      expect(requestedUrl().searchParams.getAll('geo')).toEqual(['DE', 'XX']);
+      expect(result.structuredContent).toMatchObject({
+        unmatchedValues: { geo: ['XX'] },
+        appliedFilters: { filters: { geo: ['DE', 'XX'] } },
+      });
+      const text = contentText(result as never);
+      expect(text).toContain('geo=[DE, XX]');
+      expect(text).not.toMatch(/geo=\[, /);
+    });
+
+    for (const dim of ['geo', 'unit', 'age']) {
+      it(`leaves ${dim} unrestricted when its array holds only blanks`, async () => {
+        fetchMock.mockImplementationOnce(async () =>
+          jsonReply(envelope('une-rt-m-geo-de-xx-since-2024-01')),
+        );
+        const result = await runToolContract(eurostatQueryDataset, {
+          dataset_code: 'une_rt_m',
+          filters: { ...DE_UNEMPLOYMENT, [dim]: ['', ' '] },
+          last_n_periods: 1,
+        });
+        expect(requestedUrl().searchParams.has(dim)).toBe(false);
+        expect(result.isError).not.toBe(true);
+        const applied = (result.structuredContent as { appliedFilters: { filters: object } })
+          .appliedFilters.filters;
+        expect(applied).not.toHaveProperty(dim);
+        expect(contentText(result as never)).not.toContain(`${dim}=[`);
+      });
+    }
+
+    it('raises no conflicting_params for a blank-only geo beside geo_level', async () => {
+      fetchMock.mockImplementationOnce(async () =>
+        jsonReply(envelope('une-rt-m-geo-de-xx-since-2024-01')),
+      );
+      const { geo: _geo, ...rest } = DE_UNEMPLOYMENT;
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'une_rt_m',
+        filters: { ...rest, geo: [''] },
+        geo_level: 'country',
+        last_n_periods: 1,
+      });
+      expect(result.isError).not.toBe(true);
+      expect(requestedUrl().searchParams.get('geoLevel')).toBe('country');
+      expect(requestedUrl().searchParams.has('geo')).toBe(false);
+      expect(result.structuredContent).toMatchObject({ appliedFilters: { geoLevel: 'country' } });
+    });
+  });
+
+  describe('control-named filter keys (#62)', () => {
+    for (const [key, input, extra] of [
+      ['lang', 'lang', { lang: 'EN' }],
+      ['LASTTIMEPERIOD', 'last_n_periods', { last_n_periods: 1 }],
+      ['sinceTimePeriod', 'since_period', {}],
+      ['GEOLEVEL', 'geo_level', { geo_level: 'country' }],
+    ] as const) {
+      it(`fails filters.${key} as invalid_dimension naming ${input} on both surfaces, before any request`, async () => {
+        const { geo: _geo, ...rest } = DE_UNEMPLOYMENT;
+        const result = await runToolContract(eurostatQueryDataset, {
+          dataset_code: 'une_rt_m',
+          filters: { ...rest, [key]: ['3'] },
+          ...extra,
+        });
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          error: {
+            code: JsonRpcErrorCode.ValidationError,
+            data: {
+              reason: 'invalid_dimension',
+              // Whole hint: for `lang` the quoted key alone already contains the input name.
+              recovery: { hint: `Remove "${key}" from filters and set ${input} instead.` },
+            },
+          },
+        });
+        expect(contentText(result as never)).toContain(
+          `Recovery: Remove "${key}" from filters and set ${input} instead.`,
+        );
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+    }
+
+    it('names every control key, and the input that sets each, in one rejection', async () => {
+      const { geo: _geo, ...rest } = DE_UNEMPLOYMENT;
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'une_rt_m',
+        filters: { ...rest, lang: ['FR'], LASTTIMEPERIOD: ['3'] },
+      });
+      const error = (
+        result.structuredContent as {
+          error: {
+            code: number;
+            message: string;
+            data: { reason: string; recovery: { hint: string } };
+          };
+        }
+      ).error;
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data.reason).toBe('invalid_dimension');
+      expect(error.message).toBe(
+        'Filter keys "lang", "LASTTIMEPERIOD" name a Statistics API control, not a dimension of "une_rt_m".',
+      );
+      expect(error.data.recovery.hint).toBe(
+        'Remove "lang", "LASTTIMEPERIOD" from filters and set lang for "lang", last_n_periods for "LASTTIMEPERIOD" instead.',
+      );
+      expect(contentText(result as never)).toContain(`Recovery: ${error.data.recovery.hint}`);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('still sends filters.TIME and filters.time_period as time-dimension filters', async () => {
+      for (const key of ['TIME', 'time_period']) {
+        fetchMock.mockImplementationOnce(async () =>
+          jsonReply(envelope('une-rt-m-geo-de-xx-since-2024-01')),
+        );
+        const result = await runToolContract(eurostatQueryDataset, {
+          dataset_code: 'une_rt_m',
+          filters: { ...DE_UNEMPLOYMENT, [key]: ['2024-01'] },
+        });
+        expect(result.isError).not.toBe(true);
+      }
+      const sent = fetchMock.mock.calls.map(([u]) => new URL(String(u)).searchParams);
+      expect(sent[0]?.getAll('TIME')).toEqual(['2024-01']);
+      expect(sent[1]?.getAll('time_period')).toEqual(['2024-01']);
+    });
+
+    it('keeps the dataset-info hint for an unknown dimension Eurostat rejects', async () => {
+      fetchMock.mockImplementationOnce(async () =>
+        jsonReply(
+          {
+            error: [
+              {
+                status: 400,
+                id: 150,
+                label: 'INVALID_QUERY_DIMENSION: Dimension "PRECISION" is not defined',
+              },
+            ],
+          },
+          400,
+        ),
+      );
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'une_rt_m',
+        filters: { ...DE_UNEMPLOYMENT, precision: ['1'] },
+      });
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          data: {
+            reason: 'invalid_dimension',
+            recovery: { hint: expect.stringContaining('eurostat_get_dataset_info') },
+          },
+        },
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('a time filter beside a period input (#70)', () => {
+    it('fails the reported call as conflicting_params naming filters.time and last_n_periods', async () => {
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'nama_10_gdp',
+        filters: { unit: ['CP_MEUR'], na_item: ['B1GQ'], geo: ['DE'], time: ['2020'] },
+        last_n_periods: 1,
+      });
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          data: { reason: 'conflicting_params' },
+        },
+      });
+      const hint = (result.structuredContent as { error: { data: { recovery: { hint: string } } } })
+        .error.data.recovery.hint;
+      expect(hint).toContain('filters.time');
+      expect(hint).toContain('last_n_periods');
+      expect(hint).not.toContain('geo_level');
+      expect(hint).not.toContain('YYYY');
+      expect(contentText(result as never)).toContain(hint);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    for (const [key, extra, input] of [
+      ['TIME', { since_period: '2020' }, 'since_period'],
+      ['time_period', { until_period: '2022' }, 'until_period'],
+    ] as const) {
+      it(`fails filters.${key} with ${input} the same way`, async () => {
+        const result = await runToolContract(eurostatQueryDataset, {
+          dataset_code: 'nama_10_gdp',
+          filters: { geo: ['DE'], [key]: ['2020'] },
+          ...extra,
+        });
+        expect(result.structuredContent).toMatchObject({
+          error: {
+            data: {
+              reason: 'conflicting_params',
+              recovery: { hint: expect.stringContaining(`filters.${key}`) },
+            },
+          },
+        });
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+    }
+
+    it("reports Eurostat's own time-selection conflict as conflicting_params, not invalid_period", async () => {
+      fetchMock.mockImplementationOnce(async () =>
+        jsonReply(
+          {
+            error: [
+              {
+                status: 400,
+                id: 400,
+                label:
+                  "'TIME' parameter, 'TIME_PERIOD' parameter, 'lastTimePeriod' parameter and 'sinceTimePeriod' parameter cannot be set at the same time. Please choose one or the other.",
+              },
+            ],
+          },
+          400,
+        ),
+      );
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'nama_10_gdp',
+        filters: { geo: ['DE'], time: ['2020'], time_period: ['2021'] },
+      });
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'conflicting_params' } },
+      });
+      const hint = (result.structuredContent as { error: { data: { recovery: { hint: string } } } })
+        .error.data.recovery.hint;
+      expect(hint).toMatch(/one time selection/);
+      expect(hint).not.toContain('YYYY');
+      expect(hint).not.toContain('geo_level');
+      // The label already ends in a period; the message adds no second one.
+      const message = (result.structuredContent as { error: { message: string } }).error.message;
+      expect(message).toContain('Please choose one or the other.');
+      expect(message).not.toContain('..');
+      expect(contentText(result as never)).not.toContain('other..');
+    });
+
+    it("gives Eurostat's geo/geoLevel refusal the generic conflicting_params hint, not the time one", async () => {
+      fetchMock.mockImplementationOnce(async () =>
+        jsonReply(
+          {
+            error: [
+              {
+                status: 400,
+                id: 400,
+                label:
+                  "'geo' parameter and 'geoLevel' parameter cannot be set at the same time. Please choose one or the other.",
+              },
+            ],
+          },
+          400,
+        ),
+      );
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'nama_10_gdp',
+        filters: { unit: ['CP_MEUR'] },
+      });
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.ValidationError, data: { reason: 'conflicting_params' } },
+      });
+      const hint = (result.structuredContent as { error: { data: { recovery: { hint: string } } } })
+        .error.data.recovery.hint;
+      expect(hint).toContain('filters.geo or geo_level');
+      expect(hint).not.toMatch(/one time selection/);
+      expect(contentText(result as never)).toContain(`Recovery: ${hint}`);
+    });
+  });
+});
+
+describe('eurostatQueryDataset — too-large refusal hint with blank filter values (#61)', () => {
+  it('counts a dimension whose values are all blank as unfiltered', async () => {
+    vi.mocked(getEurostatDataService).mockReturnValue({
+      queryDataset: vi
+        .fn()
+        .mockRejectedValue(
+          Object.assign(new Error('async response'), { data: { reason: 'async_response' } }),
+        ),
+      getDimensionOrder: vi.fn().mockResolvedValue(['freq', 'unit', 'na_item', 'geo']),
+    } as never);
+    const result = await runToolContract(eurostatQueryDataset, {
+      dataset_code: 'nama_10_gdp',
+      filters: { unit: ['CP_MEUR'], geo: ['', '  '] },
+    });
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: {
+          reason: 'async_response',
+          recovery: { hint: expect.stringContaining('Filter on freq, na_item, geo —') },
+        },
+      },
+    });
+  });
+});
+
+describe('eurostatQueryDataset — an unavailable Statistics API (#71)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(getEurostatDataService).mockReturnValue(
+      new EurostatDataService({} as never, {} as never),
+    );
+    setCanvas(undefined);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  const errorOf = (result: { structuredContent?: unknown }) =>
+    (result.structuredContent as { error: { code: number; data: Record<string, unknown> } }).error;
+
+  /** Run the call past the 1 s / 2 s / 4 s backoff (plus jitter) without waiting it out. */
+  const callSettled = async () => {
+    const pending = runToolContract(eurostatQueryDataset, {
+      dataset_code: 'nama_10_gdp',
+      filters: { geo: ['DE'] },
+      last_n_periods: 1,
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    return pending;
+  };
+
+  it('fails a Statistics API answering 503 on every attempt as a retryable upstream_fault on both surfaces', async () => {
+    fetchMock.mockImplementation(
+      async () => new Response('Service Unavailable', { status: 503, statusText: 'Unavailable' }),
+    );
+    const result = await callSettled();
+    expect(result.isError).toBe(true);
+    const error = errorOf(result);
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.data).toMatchObject({
+      reason: 'upstream_fault',
+      retryable: true,
+      recovery: { hint: expect.stringContaining('"nama_10_gdp"') },
+    });
+    const hint = (error.data.recovery as { hint: string }).hint;
+    expect(hint).toContain('HTTP 503');
+    expect(hint).toMatch(/retry in a few minutes/i);
+    const text = contentText(result as never);
+    expect(text).toContain(`Recovery: ${hint}`);
+    expect(text).toContain('reason upstream_fault · retryable');
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it('fails an unreachable host the same way', async () => {
+    fetchMock.mockImplementation(async () => {
+      throw new TypeError('fetch failed');
+    });
+    const result = await callSettled();
+    const error = errorOf(result);
+    expect(error.data).toMatchObject({ reason: 'upstream_fault', retryable: true });
+    expect((error.data.recovery as { hint: string }).hint).toContain('could not be reached');
+    expect(contentText(result as never)).toContain('reason upstream_fault · retryable');
+  });
+
+  it('reports a 501 as an upstream_fault that is not retryable', async () => {
+    fetchMock.mockImplementation(
+      async () => new Response('Not Implemented', { status: 501, statusText: 'Not Implemented' }),
+    );
+    const result = await callSettled();
+    const error = errorOf(result);
+    expect(error.data).toMatchObject({ reason: 'upstream_fault', retryable: false });
+    expect(contentText(result as never)).toContain('reason upstream_fault · not retryable');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves a cancelled call as a cancellation, not an outage', async () => {
+    const controller = new AbortController();
+    fetchMock.mockImplementation(async () => {
+      controller.abort();
+      return new Response('Service Unavailable', { status: 503 });
+    });
+    /**
+     * The handler, not runToolContract: the contract runner reports anything thrown after
+     * the abort as RequestCancelled, so only the handler's own throw shows whether the
+     * cancellation was kept or turned into an outage.
+     */
+    const outcome = Promise.resolve(
+      eurostatQueryDataset.handler(
+        eurostatQueryDataset.input.parse({
+          dataset_code: 'nama_10_gdp',
+          filters: { geo: ['DE'] },
+          last_n_periods: 1,
+        }),
+        createMockContext({ signal: controller.signal, errors: eurostatQueryDataset.errors }),
+      ),
+    ).then(
+      () => undefined,
+      (error: unknown) => error as { data?: { reason?: string; status?: number } },
+    );
+    await vi.advanceTimersByTimeAsync(60_000);
+    const error = await outcome;
+    expect(error?.data).toMatchObject({ status: 503 });
+    expect(error?.data?.reason).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

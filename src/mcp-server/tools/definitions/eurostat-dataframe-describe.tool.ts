@@ -6,7 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { acquireCanvas, getCanvas } from '@/services/canvas-accessor.js';
+import { acquireCanvas, getCanvas, isCanvasFailure } from '@/services/canvas-accessor.js';
 
 export const eurostatDataframeDescribe = tool('eurostat_dataframe_describe', {
   title: 'Describe Eurostat Dataframes',
@@ -80,7 +80,6 @@ export const eurostatDataframeDescribe = tool('eurostat_dataframe_describe', {
       when: 'The canvas_id is unknown or its lifetime has elapsed.',
       recovery:
         'Re-run eurostat_query_dataset or eurostat_download_dataset without canvas_id and use the canvasId it returns; eurostat_get_dimension_values stages onto that canvas but never starts one.',
-      thrownBy: 'service',
     },
   ],
 
@@ -90,8 +89,25 @@ export const eurostatDataframeDescribe = tool('eurostat_dataframe_describe', {
       throw ctx.fail('canvas_disabled');
     }
 
-    const instance = await acquireCanvas(canvas, input.canvas_id, ctx);
-    const tables = await instance.describe();
+    /**
+     * Re-thrown so the declared recovery replaces the canvas service's generic one. A
+     * canvas can also expire between the acquire and the describe, so both calls go
+     * through the same mapping.
+     */
+    const asDeclared = (err: unknown): never => {
+      if (isCanvasFailure(err, 'canvas_not_found')) {
+        throw ctx.fail(
+          'canvas_not_found',
+          err.message,
+          { canvasId: input.canvas_id },
+          { cause: err },
+        );
+      }
+      throw err;
+    };
+
+    const instance = await acquireCanvas(canvas, input.canvas_id, ctx).catch(asDeclared);
+    const tables = await instance.describe().catch(asDeclared);
 
     ctx.log.info('Described canvas', { canvasId: instance.canvasId, tableCount: tables.length });
 

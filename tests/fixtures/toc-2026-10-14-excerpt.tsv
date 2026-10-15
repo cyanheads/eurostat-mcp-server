@@ -1,0 +1,148 @@
+"title"	"code"	"type"	"last update of data"	"last table structure change"	"data start"	"data end"	"values"
+"Database by themes"	"data"	"folder"	" "	" "	" "	" "	
+"    General and regional statistics"	"general"	"folder"	" "	" "	" "	" "	
+"        European and national indicators for short-term analysis"	"euroind"	"folder"	" "	" "	" "	" "	
+"            Industry, trade and services"	"ei_is"	"folder"	" "	" "	" "	" "	
+"                Industry - monthly data - index (2015 = 100) (NACE Rev. 2)"	"ei_isin_m"	"table"	"14.10.2026"	"10.10.2026"	"1980-01"	"2026-09"	2873791
+"                Turnover in services - quarterly data - growth rates (NACE Rev.2)"	"ei_isse_q"	"table"	"14.10.2026"	"30.09.2026"	"1994-Q1"	"2026-Q2"	28593
+"            Labour market"	"ei_lm"	"folder"	" "	" "	" "	" "	
+"                Unemployment rate (%) - monthly data"	"ei_lmhr_m"	"table"	"08.10.2026"	"08.10.2026"	"1983-01"	"2026-09"	258511
+"            National accounts"	"ei_qna"	"folder"	" "	" "	" "	" "	
+"                Gross domestic product (GDP) and main components (output, expenditure and income) - annual data"	"nama_10_gdp"	"dataset"	"14.10.2026"	"08.09.2026"	"1975"	"2025"	1082919
+"        Regional statistics by NUTS classification"	"reg"	"folder"	" "	" "	" "	" "	
+"            Regional science and technology statistics"	"reg_sct"	"folder"	" "	" "	" "	" "	
+"                R&D expenditure and personnel"	"reg_rd"	"folder"	" "	" "	" "	" "	
+"                    R&D personnel and researchers by sector of performance, sex and NUTS 2 region"	"rd_p_persreg"	"dataset"	"29.09.2026"	"29.09.2026"	"1980"	"2024"	662390
+"                Employment in high technology sectors"	"reg_htec"	"folder"	" "	" "	" "	" "	
+"                    Employed persons in technology and knowledge-intensive sectors by NACE Rev. 1.1 activity and NUTS 2 region (1999-2008)"	"htec_emp_reg"	"dataset"	"09.01.2026"	"09.01.2026"	"1999"	"2008"	600292
+"            Regional labour market statistics"	"reg_lmk"	"folder"	" "	" "	" "	" "	
+"                Employment"	"lfst_r_lfemp"	"folder"	" "	" "	" "	" "	
+"                    Employment rates by NUTS 2 region"	"lfst_r_lfe2emprt"	"dataset"	"10.09.2026"	"17.04.2026"	"1999"	"2025"	427359
+"                        Employment rate (persons aged 15-64) by NUTS 2 region"	"tgs00007"	"table"	"10.09.2026"	"17.04.2026"	"2014"	"2025"	11118
+"        Regional statistics by typology"	"reg_typ"	"folder"	" "	" "	" "	" "	
+"            Metropolitan regions"	"met"	"folder"	" "	" "	" "	" "	
+"                Labour market statistics by metropolitan region"	"met_lmk"	"folder"	" "	" "	" "	" "	
+"                    Unemployment rates by sex, age and metropolitan region"	"met_lfu3rt"	"dataset"	"27.06.2024"	"27.06.2024"	"1999"	"2023"	69868
+"            Other typologies"	"urt"	"folder"	" "	" "	" "	" "	
+"                Labour market statistics by other typologies"	"urt_lmk"	"folder"	" "	" "	" "	" "	
+"                    Unemployment rates by sex, age and other typologies"	"urt_lfu3rt"	"dataset"	"26.06.2026"	"26.06.2026"	"1999"	"2025"	71061
+"        Non EU countries"	"noneu"	"folder"	" "	" "	" "	" "	
+"            Southern European Neighbourhood Policy countries (ENP-South)"	"enps"	"folder"	" "	" "	" "	" "	
+"                Population and social conditions"	"enps_pop"	"folder"	" "	" "	" "	" "	
+"                    Labour market"	"enps_labour"	"folder"	" "	" "	" "	" "	
+"                        Unemployment"	"enps_lfsa_unemp"	"folder"	" "	" "	" "	" "	
+"                            Unemployment rates by sex and age - ENP-South countries"	"enps_lfsa_urgan"	"dataset"	"05.03.2026"	"05.03.2026"	"2005"	"2024"	1036
+"            Eastern European Neighbourhood Policy countries (ENP-East)"	"enpe"	"folder"	" "	" "	" "	" "	
+"                Population and social conditions"	"enpe_pop"	"folder"	" "	" "	" "	" "	
+"                    Labour market"	"enpe_labour"	"folder"	" "	" "	" "	" "	
+"                        Unemployment"	"enpe_lfsa_unemp"	"folder"	" "	" "	" "	" "	
+"                            Unemployment rates by sex and age - ENP-East countries"	"enpe_lfsa_urgan"	"dataset"	"03.02.2026"	"03.02.2026"	"2005"	"2024"	933
+"    Economy and finance"	"economy"	"folder"	" "	" "	" "	" "	
+"        National accounts (ESA 2010)"	"na10"	"folder"	" "	" "	" "	" "	
+"            Annual national accounts"	"nama10"	"folder"	" "	" "	" "	" "	
+"                GDP and components"	"nama_10_ma"	"folder"	" "	" "	" "	" "	
+"                    Gross domestic product (GDP) and main components (output, expenditure and income) - annual data"	"nama_10_gdp"	"dataset"	"14.10.2026"	"08.09.2026"	"1975"	"2025"	1082919
+"    Population and social conditions"	"popul"	"folder"	" "	" "	" "	" "	
+"        Migration"	"migr"	"folder"	" "	" "	" "	" "	
+"            Managed migration"	"migr_man"	"folder"	" "	" "	" "	" "	
+"                Residence permits"	"migr_res"	"folder"	" "	" "	" "	" "	
+"                    Residence permits by reason, length of validity and citizenship"	"migr_resval"	"folder"	" "	" "	" "	" "	
+"                        Long-term residents among all non-EU citizens holding residence permits by citizenship on 31 December - %"	"migr_resshare"	"dataset"	"28.09.2026"	"10.04.2026"	"2008"	"2025"	218965
+"        Education and training"	"educ"	"folder"	" "	" "	" "	" "	
+"            Education and training outcomes"	"educ_outc"	"folder"	" "	" "	" "	" "	
+"                Educational attainment level"	"edat"	"folder"	" "	" "	" "	" "	
+"                    Educational attainment and labour force participation"	"edat2"	"folder"	" "	" "	" "	" "	
+"                        Unemployment rates by educational attainment level"	"lfsa_urgaed"	"dataset"	"10.09.2026"	"10.09.2026"	"1983"	"2025"	354376
+"                            Unemployment rates (persons aged 25-64) by educational attainment level"	"tps00066"	"table"	"10.09.2026"	"10.09.2026"	"2014"	"2025"	1312
+"        Labour market"	"labour"	"folder"	" "	" "	" "	" "	
+"            Employment and unemployment (Labour force survey)"	"employ"	"folder"	" "	" "	" "	" "	
+"                LFS main indicators"	"lfsi"	"folder"	" "	" "	" "	" "	
+"                    Employment and labour force - LFS adjusted series"	"lfsi_emp"	"folder"	" "	" "	" "	" "	
+"                        Employment and labour force - LFS adjusted series - historical data"	"lfsi_emp_h"	"folder"	" "	" "	" "	" "	
+"                            Employment and labour force by sex and age - annual data (1992–2020)"	"lfsi_emp_a_h"	"dataset"	"11.06.2026"	"08.01.2026"	"1992"	"2020"	58188
+"                        Employment and labour force by sex and age - annual data"	"lfsi_emp_a"	"dataset"	"10.09.2026"	"12.03.2026"	"2003"	"2025"	45624
+"                    Unemployment - LFS adjusted series"	"une"	"folder"	" "	" "	" "	" "	
+"                        Unemployment - LFS adjusted series - historical data"	"une_h"	"folder"	" "	" "	" "	" "	
+"                            Unemployment by sex and age - annual data (1992–2020)"	"une_rt_a_h"	"dataset"	"20.07.2026"	"08.01.2026"	"1992"	"2020"	51489
+"                            Labour market slack by sex and age - annual data (1992–2020)"	"lfsi_sla_a_h"	"dataset"	"20.07.2026"	"04.08.2026"	"1992"	"2020"	110856
+"                        Unemployment by sex and age - annual data"	"une_rt_a"	"dataset"	"10.09.2026"	"12.03.2026"	"2003"	"2025"	39708
+"                        Labour market slack by sex and age - annual data"	"lfsi_sla_a"	"dataset"	"10.09.2026"	"12.03.2026"	"2003"	"2025"	76260
+"                Labour force survey (LFS) series - detailed annual data"	"lfsa"	"folder"	" "	" "	" "	" "	
+"                    Employment"	"lfsa_emp"	"folder"	" "	" "	" "	" "	
+"                        ---"	"lfsa_emp_"	"folder"	" "	" "	" "	" "	
+"                            Employment rates by citizenship"	"lfsa_ergan"	"dataset"	"10.09.2026"	"17.04.2026"	"1995"	"2025"	525939
+"                                Employment rate of non-EU nationals (age group 20-64)"	"tesem090"	"table"	"10.09.2026"	"17.04.2026"	"2005"	"2025"	682
+"                            Employment rates by educational attainment level"	"lfsa_ergaed"	"dataset"	"10.09.2026"	"10.09.2026"	"1983"	"2025"	473416
+"                                Employment rate of low skilled persons (age group 20-64)"	"tesem080"	"table"	"10.09.2026"	"10.09.2026"	"2005"	"2025"	758
+"                    Unemployment"	"lfsa_unemp"	"folder"	" "	" "	" "	" "	
+"                        Unemployment rates by educational attainment level"	"lfsa_urgaed"	"dataset"	"10.09.2026"	"10.09.2026"	"1983"	"2025"	354376
+"                            Unemployment rates (persons aged 25-64) by educational attainment level"	"tps00066"	"table"	"10.09.2026"	"10.09.2026"	"2014"	"2025"	1312
+"                Labour force survey (LFS) series - specific topics"	"lfst"	"folder"	" "	" "	" "	" "	
+"                    Labour force survey (LFS) series - regional data"	"lfst_r"	"folder"	" "	" "	" "	" "	
+"                        Employment"	"lfst_r_lfemp"	"folder"	" "	" "	" "	" "	
+"                            Employment rates by NUTS 2 region"	"lfst_r_lfe2emprt"	"dataset"	"10.09.2026"	"17.04.2026"	"1999"	"2025"	427359
+"                                Employment rate (persons aged 15-64) by NUTS 2 region"	"tgs00007"	"table"	"10.09.2026"	"17.04.2026"	"2014"	"2025"	11118
+"                Labour force survey (LFS) - ad-hoc modules"	"lfso"	"folder"	" "	" "	" "	" "	
+"                    Labour fource survey (LFS) - ad-hoc modules, historical data"	"lfso_his"	"folder"	" "	" "	" "	" "	
+"                        Work organisation and working time arrangements (2004)"	"lfso_04"	"folder"	" "	" "	" "	" "	
+"                            Number of employees having annualised working hours by sex, age, occupation and economic activity"	"lfso_04anwkisna"	"dataset"	"10.03.2014"	"21.12.2023"	"2004"	"2004"	26843
+"        Culture"	"cult"	"folder"	" "	" "	" "	" "	
+"            Enterprises in cultural sectors"	"cult_ent"	"folder"	" "	" "	" "	" "	
+"                Enterprise statistics by size class and NACE Rev. 2 activity (from 2021 onwards)"	"sbs_sc_ovw"	"dataset"	"30.09.2026"	"30.09.2026"	"2021"	"2024"	4373287
+"    Industry, trade and services"	"icts"	"folder"	" "	" "	" "	" "	
+"        Business structure and dynamics"	"bsd"	"folder"	" "	" "	" "	" "	
+"            Structural business statistics"	"sbs"	"folder"	" "	" "	" "	" "	
+"                Enterprise statistics on the whole business population"	"sbs_ovw"	"folder"	" "	" "	" "	" "	
+"                    Enterprise statistics by size class and NACE Rev. 2 activity (from 2021 onwards)"	"sbs_sc_ovw"	"dataset"	"30.09.2026"	"30.09.2026"	"2021"	"2024"	4373287
+"                    Enterprises by extended size classes (including Small Mid Caps) and NACE Rev. 2 activity"	"sbs_ovw_smc"	"dataset"	"30.09.2026"	"30.09.2026"	"2023"	"2024"	22335
+"        Globalisation in business statistics"	"gbs"	"folder"	" "	" "	" "	" "	
+"            Multinational enterprise groups in EuroGroups Register (EGR) - experimental statistics"	"egr"	"folder"	" "	" "	" "	" "	
+"                Multinational enterprise groups in EU-EFTA countries by controlling country, size class and NACE Rev. 2 activity - experimental statistics"	"egr_mne_n2sc"	"dataset"	"20.04.2026"	"20.04.2026"	"2018"	"2024"	2248
+"                Multinational enterprise groups employment by controlling country group size class, NACE Rev. 2 activity and country of work - experimental statistics"	"egr_mne_empw"	"dataset"	"20.04.2026"	"20.04.2026"	"2018"	"2024"	3458
+"        Tourism"	"tour"	"folder"	" "	" "	" "	" "	
+"            Tourism industries - annual data"	"tour_inda"	"folder"	" "	" "	" "	" "	
+"                Annual enterprise data for selected tourism industries (source: Structural business statistics)"	"tour_sbs"	"folder"	" "	" "	" "	" "	
+"                    Enterprise statistics by size class and NACE Rev. 2 activity (from 2021 onwards)"	"sbs_sc_ovw"	"dataset"	"30.09.2026"	"30.09.2026"	"2021"	"2024"	4373287
+"    Science, technology, digital society"	"science"	"folder"	" "	" "	" "	" "	
+"        Science and technology"	"scitech"	"folder"	" "	" "	" "	" "	
+"            Research and development (R&D)"	"rd"	"folder"	" "	" "	" "	" "	
+"                R&D personnel at national and regional level"	"rd_p"	"folder"	" "	" "	" "	" "	
+"                    R&D personnel and researchers by sector of performance, sex and NUTS 2 region"	"rd_p_persreg"	"dataset"	"29.09.2026"	"29.09.2026"	"1980"	"2024"	662390
+"            High-tech industry and knowledge-intensive services"	"htec"	"folder"	" "	" "	" "	" "	
+"                Employment in high-tech industry and knowledge-intensive services (HTEC)"	"htec_emp"	"folder"	" "	" "	" "	" "	
+"                    Employment in HTEC sectors - regional data"	"htec_emp_r"	"folder"	" "	" "	" "	" "	
+"                        Employed persons in technology and knowledge-intensive sectors by NACE Rev. 1.1 activity and NUTS 2 region (1999-2008)"	"htec_emp_reg"	"dataset"	"09.01.2026"	"09.01.2026"	"1999"	"2008"	600292
+"        Digital economy and society"	"isoc"	"folder"	" "	" "	" "	" "	
+"            ICT sector"	"isoc_se"	"folder"	" "	" "	" "	" "	
+"                Enterprise statistics by size class and NACE Rev. 2 activity (from 2021 onwards)"	"sbs_sc_ovw"	"dataset"	"30.09.2026"	"30.09.2026"	"2021"	"2024"	4373287
+"Cross cutting topics"	"data"	"folder"	" "	" "	" "	" "	
+"    EU policies"	"tb_eu"	"folder"	" "	" "	" "	" "	
+"        Sustainable development indicators"	"sdg"	"folder"	" "	" "	" "	" "	
+"            Sustainable development indicators by region"	"sdg_reg"	"folder"	" "	" "	" "	" "	
+"                R&D personnel and researchers by sector of performance, sex and NUTS 2 region"	"rd_p_persreg"	"dataset"	"29.09.2026"	"29.09.2026"	"1980"	"2024"	662390
+"        Employment and social policy indicators"	"es"	"folder"	" "	" "	" "	" "	
+"            Employment performance monitor - indicators"	"tesem"	"folder"	" "	" "	" "	" "	
+"                Employment rate of low skilled persons (age group 20-64)"	"tesem080"	"table"	"10.09.2026"	"10.09.2026"	"2005"	"2025"	758
+"                Employment rate of non-EU nationals (age group 20-64)"	"tesem090"	"table"	"10.09.2026"	"17.04.2026"	"2005"	"2025"	682
+"    Cross cutting topics"	"cc"	"folder"	" "	" "	" "	" "	
+"        Migrant integration and children in migration"	"mi"	"folder"	" "	" "	" "	" "	
+"            Migrant integration"	"mii"	"folder"	" "	" "	" "	" "	
+"                Active citizenship"	"mii_actctz"	"folder"	" "	" "	" "	" "	
+"                    Long-term residents among all non-EU citizens holding residence permits by citizenship on 31 December - %"	"migr_resshare"	"dataset"	"28.09.2026"	"10.04.2026"	"2008"	"2025"	218965
+"        Equality and non-discrimination"	"eq"	"folder"	" "	" "	" "	" "	
+"            Labour market and earnings"	"eq_labour_earn"	"folder"	" "	" "	" "	" "	
+"                Employment"	"eq_emp"	"folder"	" "	" "	" "	" "	
+"                    Employment and labour force by sex and age - annual data"	"lfsi_emp_a"	"dataset"	"10.09.2026"	"12.03.2026"	"2003"	"2025"	45624
+"                Unemployment"	"eq_une"	"folder"	" "	" "	" "	" "	
+"                    Unemployment by sex and age - annual data"	"une_rt_a"	"dataset"	"10.09.2026"	"12.03.2026"	"2003"	"2025"	39708
+"        Skills-related statistics"	"sks"	"folder"	" "	" "	" "	" "	
+"            Skills demand - indirect measures"	"sks_dim"	"folder"	" "	" "	" "	" "	
+"                Employment - research and development"	"sks_dimrd"	"folder"	" "	" "	" "	" "	
+"                    R&D personnel and researchers by sector of performance, sex and NUTS 2 region"	"rd_p_persreg"	"dataset"	"29.09.2026"	"29.09.2026"	"1980"	"2024"	662390
+"        Housing"	"hous"	"folder"	" "	" "	" "	" "	
+"            Industry, trade and services"	"hous_its"	"folder"	" "	" "	" "	" "	
+"                Short-term business statistics"	"hous_sts"	"folder"	" "	" "	" "	" "	
+"                    Production in construction - monthly data"	"sts_copr_m"	"dataset"	"14.10.2026"	"29.09.2026"	"1980-01"	"2026-08"	338268
+"                        Industry - monthly data - index (2015 = 100) (NACE Rev. 2)"	"ei_isin_m"	"table"	"14.10.2026"	"10.10.2026"	"1980-01"	"2026-09"	2873791
+"                Business structure and dynamics"	"hous_bsd"	"folder"	" "	" "	" "	" "	
+"                    Enterprise statistics by size class and NACE Rev. 2 activity (from 2021 onwards)"	"sbs_sc_ovw"	"dataset"	"30.09.2026"	"30.09.2026"	"2021"	"2024"	4373287

@@ -18,6 +18,7 @@ import {
   encodeCursor,
   fetchWithTimeout,
   type PaginationState,
+  withExtra,
   withRetry,
 } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
@@ -25,6 +26,7 @@ import {
   parseSdmxDataflowList,
   type SdmxDataflowSummary,
 } from '@/services/eurostat-data/sdmx-metadata.js';
+import { upstreamOutage } from '@/services/eurostat-outage.js';
 import { awaitShared } from '@/services/shared-load.js';
 import type { BrowseItem, DatasetResult, TocEntry } from './types.js';
 
@@ -63,8 +65,19 @@ const COMEXT_OTHER_FOLDER = {
   label: 'Comext dissemination database - other collections',
 };
 
+/** The TOC folders the Comext collection folders are filed under. */
+const COMEXT_PARENT_FOLDERS = new Set(Object.values(COMEXT_FOLDERS).map((f) => f.parent));
+
 /** A dataset code on the Comext host's scheme, as a lowercased search token. */
 const DS_CODE_TOKEN = /^ds-\d+$/;
+
+/**
+ * Whitespace beside punctuation other than `_`, removed from search text so `Rev.2` finds
+ * `Rev. 2` and `2015=100` finds `2015 = 100`. A run is taken whole after a punctuation mark,
+ * or from its first blank when one follows it — never retried from inside a run, which keeps
+ * a long run of blanks linear.
+ */
+const SPACE_BESIDE_PUNCTUATION = /(?<=[^\p{L}\p{N}_\s])\s+|(?<!\s)\s+(?=[^\p{L}\p{N}_\s])/gu;
 
 /** Parsed TOC held in memory until its TTL expires and the next call refreshes it. */
 interface TocCache {
@@ -79,6 +92,8 @@ interface TocCache {
   /** The TOC plus the merged Comext dataflows. */
   entries: TocEntry[];
   loadedAt: Date;
+  /** Search text per entry, indexed like `entries` — built by the snapshot's first search. */
+  searchText?: (string | undefined)[];
 }
 
 export class EurostatCatalogueService {
@@ -87,7 +102,11 @@ export class EurostatCatalogueService {
   private refresh: Promise<TocCache> | undefined;
   /** Shared in-flight retry of a failed Comext merge. */
   private remerge: Promise<TocCache> | undefined;
-  /** Epoch ms before which a stale cache is served without re-attempting a failed refresh. */
+  /**
+   * Epoch ms before which a stale cache is served without re-attempting a failed refresh.
+   * Non-zero exactly while the last refresh attempt failed, so the cache in service is one
+   * past its TTL that the refresh could not replace.
+   */
   private refreshRetryAt = 0;
 
   // config and storage accepted to match the standard service init pattern;
@@ -228,14 +247,16 @@ export class EurostatCatalogueService {
   /** The Comext host's dataflow list — the `DS-*` collections the TOC does not carry. */
   private async fetchComextFlows(ctx: Context): Promise<SdmxDataflowSummary[]> {
     const { comextBaseUrl, requestTimeoutMs } = getServerConfig();
-    const url = `${comextBaseUrl}/sdmx/2.1/dataflow/ESTAT`;
-    const response = await fetchWithTimeout(url, requestTimeoutMs, ctx);
+    const response = await fetchWithTimeout(
+      `${comextBaseUrl}/sdmx/2.1/dataflow/ESTAT`,
+      requestTimeoutMs,
+      withExtra(ctx, { endpoint: 'comext-dataflows' }),
+    );
     const flows = parseSdmxDataflowList(await response.text());
     // An empty list is a broken answer, not an empty host: merging it would report every
     // DS-* code as undisseminated, so it is retried like any other failure.
-    if (flows.length === 0)
-      throw new Error(`The Comext dataflow list at ${url} listed no dataflows`);
-    ctx.log.info('Comext dataflow list loaded', { url, dataflowCount: flows.length });
+    if (flows.length === 0) throw new Error('The Comext dataflow list listed no dataflows');
+    ctx.log.info('Comext dataflow list loaded', { dataflowCount: flows.length });
     return flows;
   }
 
@@ -291,12 +312,16 @@ export class EurostatCatalogueService {
 
   private async fetchTocEntries(ctx: Context): Promise<TocEntry[]> {
     const { baseUrl, requestTimeoutMs } = getServerConfig();
-    const url = `${baseUrl}/catalogue/toc/txt?lang=en`;
-    ctx.log.info('Fetching Eurostat TOC', { url });
+    const fetchCtx = withExtra(ctx, { endpoint: 'toc' });
+    ctx.log.info('Fetching Eurostat TOC');
 
     const text = await withRetry(
       async () => {
-        const response = await fetchWithTimeout(url, requestTimeoutMs, ctx);
+        const response = await fetchWithTimeout(
+          `${baseUrl}/catalogue/toc/txt?lang=en`,
+          requestTimeoutMs,
+          fetchCtx,
+        );
         const body = await response.text();
         if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(body)) {
           throw serviceUnavailable(
@@ -305,8 +330,14 @@ export class EurostatCatalogueService {
         }
         return body;
       },
-      { operation: 'fetchToc', context: ctx, baseDelayMs: 1000 },
-    );
+      { operation: 'fetchToc', context: fetchCtx, baseDelayMs: 1000 },
+    ).catch((error: unknown) => {
+      // The load is shared and runs without a caller's signal, so nothing here is a cancellation.
+      throw (
+        upstreamOutage(error, "Eurostat's catalogue endpoint", 'the table-of-contents read', {}) ??
+        error
+      );
+    });
 
     const entries = this.parseToc(text);
     ctx.log.info('TOC loaded', { entryCount: entries.length });
@@ -476,18 +507,39 @@ export class EurostatCatalogueService {
   }
 
   /**
+   * `catalogueLoadedAt` while a failed refresh keeps an expired catalogue in service — on the
+   * call whose refresh failed and through the cooldown after it.
+   */
+  private staleness(toc: TocCache): { catalogueLoadedAt?: string } {
+    return this.refreshRetryAt === 0 ? {} : { catalogueLoadedAt: toc.loadedAt.toISOString() };
+  }
+
+  /**
    * Get immediate children of a folder code, or root theme folders if code is undefined.
    *
    * A code filed under more than one branch resolves to its first placement (see
    * `buildCodeIndex`); the breadcrumbs of the branches not taken are returned as
    * `otherPlacements` so the caller can see that the code was ambiguous and which
    * alternatives exist.
+   *
+   * While the Comext list is not merged, a browse of a folder its collections file under
+   * reports `comextListMissing`, and a Comext folder or `DS-*` code fails `not_found` with
+   * `comextListMissing` in its data rather than as an unknown code. `catalogueLoadedAt`
+   * marks a catalogue a failed refresh could not replace, on the listing and in the data
+   * of a `not_found`.
    */
   async browse(
     themeCode: string | undefined,
     ctx: Context,
-  ): Promise<{ items: BrowseItem[]; parentPath: string[]; otherPlacements?: string[][] }> {
+  ): Promise<{
+    catalogueLoadedAt?: string;
+    comextListMissing?: boolean;
+    items: BrowseItem[];
+    otherPlacements?: string[][];
+    parentPath: string[];
+  }> {
     const toc = await this.ensureLoaded(ctx);
+    const comextListMissing = toc.comextRetryAt !== undefined;
 
     if (!themeCode) {
       const childIndexes = this.findRootChildren(toc.entries);
@@ -495,15 +547,26 @@ export class EurostatCatalogueService {
         const item = this.toBrowseItem(toc.entries, i);
         return item ? [item] : [];
       });
-      return { items, parentPath: [] };
+      return { items, parentPath: [], ...this.staleness(toc) };
     }
 
     const folderIdxMaybe = toc.codeIndex.get(themeCode);
     const folderEntry = folderIdxMaybe !== undefined ? toc.entries[folderIdxMaybe] : undefined;
     if (folderIdxMaybe === undefined || folderEntry === undefined) {
+      if (
+        comextListMissing &&
+        (Object.hasOwn(COMEXT_FOLDERS, themeCode) ||
+          themeCode === COMEXT_OTHER_FOLDER.code ||
+          DS_CODE_TOKEN.test(themeCode.toLowerCase()))
+      ) {
+        throw notFound(
+          `Theme "${themeCode}" comes from the Comext dataflow list, which could not be loaded, so it is not in the catalogue right now.`,
+          { reason: 'not_found', themeCode, comextListMissing: true, ...this.staleness(toc) },
+        );
+      }
       throw notFound(
         `Theme "${themeCode}" not found in the Eurostat TOC. Use eurostat_browse_themes without theme_code to see top-level themes, then navigate from there.`,
-        { reason: 'not_found', themeCode },
+        { reason: 'not_found', themeCode, ...this.staleness(toc) },
       );
     }
     if (folderEntry.type !== 'folder') {
@@ -532,7 +595,13 @@ export class EurostatCatalogueService {
         return path;
       });
 
-    return { items, parentPath, ...(otherPlacements.length > 0 && { otherPlacements }) };
+    return {
+      items,
+      parentPath,
+      ...(otherPlacements.length > 0 && { otherPlacements }),
+      ...(comextListMissing && COMEXT_PARENT_FOLDERS.has(themeCode) && { comextListMissing }),
+      ...this.staleness(toc),
+    };
   }
 
   private toBrowseItem(entries: TocEntry[], index: number): BrowseItem | undefined {
@@ -575,10 +644,60 @@ export class EurostatCatalogueService {
   }
 
   /**
+   * Each dataset's search text — label, breadcrumb, and code, lowercased, with whitespace
+   * beside punctuation removed — indexed like `entries`. Folders, which search never
+   * returns, are undefined.
+   */
+  private buildSearchText(entries: TocEntry[]): (string | undefined)[] {
+    return entries.map((e, i) =>
+      e.type === 'folder'
+        ? undefined
+        : `${e.label} ${this.buildPath(entries, i).join(' ')} ${e.code}`
+            .toLowerCase()
+            .replace(SPACE_BESIDE_PUNCTUATION, ''),
+    );
+  }
+
+  /**
+   * For a query that matched nothing, the words whose removal alone finds matches, with
+   * that count, in query order. `words` maps each distinct token to the word as typed.
+   * One pass: a placement missing exactly one word rescues its code for that word, and a
+   * code counts once per word whichever placement rescued it — so each count equals the
+   * `totalMatches` of the same search without that word.
+   */
+  private countWithoutEachWord(
+    toc: TocCache,
+    texts: (string | undefined)[],
+    words: Map<string, string>,
+  ): Array<{ totalMatches: number; word: string }> {
+    const rescued = new Map<string, Set<string>>();
+    toc.entries.forEach((e, i) => {
+      const text = texts[i];
+      if (text === undefined) return;
+      let missing: string | undefined;
+      for (const token of words.keys()) {
+        if (text.includes(token)) continue;
+        if (missing !== undefined) return;
+        missing = token;
+      }
+      if (missing === undefined) return;
+      const codes = rescued.get(missing) ?? new Set<string>();
+      rescued.set(missing, codes.add(e.code));
+    });
+    return [...words].flatMap(([token, word]) => {
+      const codes = rescued.get(token);
+      return codes ? [{ word, totalMatches: codes.size }] : [];
+    });
+  }
+
+  /**
    * Search datasets by keyword. The query is tokenized on whitespace and every
    * token must match (AND), case-insensitively, somewhere in a combined
    * `label + themePath + code` haystack — so concept-order and theme-named
    * queries resolve even when no single label contains the phrase verbatim.
+   * Whitespace beside punctuation is removed from the haystack, never from a token,
+   * so `Rev.2` finds `Rev. 2` while `R&D` and `DS-045409` keep their punctuation;
+   * no query matches less than it would against the unfolded text.
    * A query with no non-whitespace token matches nothing rather than everything.
    *
    * Returns datasets only (not folders), one row per code: a dataset filed under
@@ -593,8 +712,11 @@ export class EurostatCatalogueService {
    *
    * An empty match reports the `DS-*` codes the query names that neither source lists
    * (`undisseminatedCodes`), so the caller can be told the collection is not
-   * disseminated rather than to broaden the search. `comextListMissing` flags that the
-   * Comext list is not merged right now, when absence from it proves nothing.
+   * disseminated rather than to broaden the search, and — for two or more distinct
+   * words — each word whose removal alone finds matches (`wordRemovalCounts`).
+   * `comextListMissing` flags that the Comext list is not merged right now, so the
+   * `DS-*` collections were not searched and absence from that list proves nothing;
+   * `catalogueLoadedAt` marks a catalogue a failed refresh could not replace.
    */
   async search(
     query: string,
@@ -602,24 +724,28 @@ export class EurostatCatalogueService {
     cursor: string | undefined,
     ctx: Context,
   ): Promise<{
+    catalogueLoadedAt?: string;
     comextListMissing?: boolean;
     datasets: DatasetResult[];
     nextCursor?: string;
     totalMatches: number;
     undisseminatedCodes?: string[];
+    wordRemovalCounts?: Array<{ totalMatches: number; word: string }>;
   }> {
     const toc = await this.ensureLoaded(ctx);
     const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
     if (tokens.length === 0) return { datasets: [], totalMatches: 0 };
 
+    toc.searchText ??= this.buildSearchText(toc.entries);
+    const texts = toc.searchText;
     const seen = new Set<string>();
     const matched = toc.entries.flatMap((e, i) => {
-      if (e.type === 'folder' || seen.has(e.code)) return [];
-      const themePath = this.buildPath(toc.entries, i);
-      const haystack = `${e.label} ${themePath.join(' ')} ${e.code}`.toLowerCase();
-      if (!tokens.every((t) => haystack.includes(t))) return [];
+      const text = texts[i];
+      if (text === undefined || seen.has(e.code) || !tokens.every((t) => text.includes(t))) {
+        return [];
+      }
       seen.add(e.code);
-      return [{ e, themePath }];
+      return [{ e, i }];
     });
 
     /** Cursor identity: the normalized query plus the catalogue snapshot it was paged over. */
@@ -634,33 +760,39 @@ export class EurostatCatalogueService {
       pageSize = Math.min(state.limit, MAX_PAGE_SIZE);
     }
 
-    const datasets: DatasetResult[] = matched
-      .slice(offset, offset + pageSize)
-      .map(({ e, themePath }) => ({
-        code: e.code,
-        label: e.label,
-        type: e.type as 'dataset' | 'table',
-        ...(e.dataStart && { dataStart: e.dataStart }),
-        ...(e.dataEnd && { dataEnd: e.dataEnd }),
-        ...(e.lastUpdated && { lastUpdated: e.lastUpdated }),
-        ...(e.obsCount !== undefined && { obsCount: e.obsCount }),
-        themePath,
-      }));
+    const datasets: DatasetResult[] = matched.slice(offset, offset + pageSize).map(({ e, i }) => ({
+      code: e.code,
+      label: e.label,
+      type: e.type as 'dataset' | 'table',
+      ...(e.dataStart && { dataStart: e.dataStart }),
+      ...(e.dataEnd && { dataEnd: e.dataEnd }),
+      ...(e.lastUpdated && { lastUpdated: e.lastUpdated }),
+      ...(e.obsCount !== undefined && { obsCount: e.obsCount }),
+      themePath: this.buildPath(toc.entries, i),
+    }));
 
-    const undisseminatedCodes =
-      matched.length === 0
-        ? tokens
-            .filter((t) => DS_CODE_TOKEN.test(t) && !toc.codeIndex.has(t.toUpperCase()))
-            .map((t) => t.toUpperCase())
-        : [];
+    let undisseminatedCodes: string[] = [];
+    let wordRemovalCounts: Array<{ totalMatches: number; word: string }> = [];
+    if (matched.length === 0) {
+      undisseminatedCodes = tokens
+        .filter((t) => DS_CODE_TOKEN.test(t) && !toc.codeIndex.has(t.toUpperCase()))
+        .map((t) => t.toUpperCase());
+      // The typed words line up with the tokens: lowercasing neither adds nor removes whitespace.
+      const typed = query.split(/\s+/).filter(Boolean);
+      const words = new Map<string, string>();
+      tokens.forEach((token, n) => {
+        if (!words.has(token)) words.set(token, typed[n] ?? token);
+      });
+      if (words.size > 1) wordRemovalCounts = this.countWithoutEachWord(toc, texts, words);
+    }
     const nextOffset = offset + pageSize;
     return {
       datasets,
       totalMatches: matched.length,
-      ...(undisseminatedCodes.length > 0 && {
-        undisseminatedCodes,
-        ...(toc.comextRetryAt !== undefined && { comextListMissing: true }),
-      }),
+      ...(undisseminatedCodes.length > 0 && { undisseminatedCodes }),
+      ...(wordRemovalCounts.length > 0 && { wordRemovalCounts }),
+      ...(toc.comextRetryAt !== undefined && { comextListMissing: true }),
+      ...this.staleness(toc),
       ...(nextOffset < matched.length && {
         nextCursor: encodeCursor({
           offset: nextOffset,

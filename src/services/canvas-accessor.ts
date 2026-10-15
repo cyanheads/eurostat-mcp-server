@@ -1,12 +1,12 @@
 /**
  * @fileoverview Module-level accessor for the framework's optional DataCanvas
- * service, plus the acquire helper every canvas-touching handler goes through.
+ * service, plus the acquire and failure helpers canvas-touching handlers go through.
  * @module services/canvas-accessor
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { CanvasInstance, DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
-import { configurationError } from '@cyanheads/mcp-ts-core/errors';
+import { configurationError, McpError } from '@cyanheads/mcp-ts-core/errors';
 
 let _canvas: DataCanvas | undefined;
 
@@ -79,4 +79,19 @@ export async function acquireCanvas(
       { cause: err instanceof Error ? err : undefined },
     );
   }
+}
+
+/**
+ * True when `err` is a canvas failure carrying `reason`.
+ *
+ * The canvas attaches its own generic recovery hint to both reasons, and a hint
+ * set where an error is thrown outranks the one a tool declares. A handler that
+ * re-throws the failure through `ctx.fail` puts its declared recovery on the
+ * wire instead.
+ */
+export function isCanvasFailure(
+  err: unknown,
+  reason: 'canvas_not_found' | 'missing_table',
+): err is McpError {
+  return err instanceof McpError && err.data?.reason === reason;
 }
