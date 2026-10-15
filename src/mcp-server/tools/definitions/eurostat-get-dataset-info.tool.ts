@@ -6,6 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getEurostatDataService } from '@/services/eurostat-data/eurostat-data-service.js';
+import { outageAnswer } from '@/services/eurostat-outage.js';
 
 export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
   title: 'Get Eurostat Dataset Info',
@@ -125,11 +126,10 @@ export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
         });
       }
       if (reason === 'upstream_fault' && (err as McpError).data?.retryable === true) {
-        const status = (err as McpError).data?.status;
         throw ctx.fail('upstream_fault', (err as Error).message, {
           retryable: true,
           recovery: {
-            hint: `Eurostat's SDMX structure endpoint ${typeof status === 'number' ? `answered HTTP ${status}` : 'could not be reached'} for "${input.dataset_code}" on every attempt — an upstream outage, not a fault in the request. A failed read is not cached, so retry in a few minutes.`,
+            hint: `Eurostat's SDMX structure endpoint ${outageAnswer((err as McpError).data?.status)} for "${input.dataset_code}" on every attempt — an upstream outage, not a fault in the request. A failed read is not cached, so retry in a few minutes.`,
           },
         });
       }
