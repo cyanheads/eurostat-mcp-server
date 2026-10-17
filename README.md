@@ -29,9 +29,7 @@
 
 ## Overview
 
-EU statistics from the Eurostat catalogue: economy, demography, trade, health, and NUTS regional data. Search and browse the catalogue by keyword or theme, inspect dataset dimensions, then query a slice or bulk-download a whole dataset. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
-
-The catalogue spans two Eurostat hosts. Most datasets come from the dissemination API; the `DS-*` collections — detailed trade by CN8, HS, SITC, BEC and CPA (Comext), and PRODCOM industrial production — come from the Comext dissemination host. Every tool routes a `DS-*` code there by its prefix, in any case, so the same calls work on both.
+EU statistics from Eurostat: economy, demography, trade, health, and NUTS regional data, including detailed Comext trade and PRODCOM industrial production. Search or browse the catalogue, inspect a dataset's dimensions, then query a slice or bulk-download the whole thing.
 
 ### Tools
 
@@ -61,34 +59,32 @@ The same metadata is available through `eurostat_get_dataset_info` for tool-only
 
 ### `eurostat_search_datasets` <sub>tool</sub>
 
-- `query` tokens are ANDed case-insensitively across each dataset's label, theme breadcrumb, and code, ignoring spacing beside punctuation in the catalogue (`Rev.2` finds `Rev. 2`); `limit` 1–100 (default 20), paged by passing `nextCursor` back as `cursor`
-- Results carry `code`, `label`, `type` (`dataset` / `table`), period coverage, `obsCount`, `lastUpdated`, and `themePath`, with `totalMatches` across every page; fails as `no_match` (naming each word whose removal alone finds matches, with the count), `invalid_cursor`, or a retryable `upstream_fault` when the server has no catalogue loaded yet and Eurostat's table of contents answers HTTP 5xx or cannot be reached on every retry
-- While the Comext dataflow list cannot be loaded, results come from the dissemination catalogue alone and carry `comextListMissing` and a `notice`; a catalogue a failed refresh could not replace carries `catalogueLoadedAt`, and a `no_match` hint names both
+- `query` words are ANDed case-insensitively across each dataset's label, theme breadcrumb, and code, ignoring spacing beside punctuation (`Rev.2` finds `Rev. 2`); `limit` 1–100 (default 20), paged by passing `nextCursor` back as `cursor`
+- Results carry `code`, `label`, `type` (`dataset` / `table`), period coverage, `obsCount`, `lastUpdated`, and `themePath`, with `totalMatches` across every page; fails as `no_match` (naming the words whose removal finds matches), `invalid_cursor`, or a retryable `upstream_fault` when no catalogue is loaded and Eurostat's table of contents is unreachable
+- If the Comext dataflow list cannot be loaded, results carry `comextListMissing` and a `notice`; a catalogue that could not be refreshed carries `catalogueLoadedAt`
 
 ---
 
 ### `eurostat_browse_themes` <sub>tool</sub>
 
 - Omit `theme_code` for the top-level theme folders; pass a folder code for its immediate children. The Comext collections sit under `ext_go_detail` (detailed trade, in `ext_go`) and `prom` (PRODCOM, in `icts`)
-- Items carry `code`, `label`, `type` (`folder` / `dataset` / `table`), and `hasChildren`, with a `parentPath` breadcrumb and `otherPlacements` for a folder code filed in several branches; fails as `not_found` for an unknown code, `not_a_folder` for a dataset or table code, or a retryable `upstream_fault` when the server has no catalogue loaded yet and Eurostat's table of contents answers HTTP 5xx or cannot be reached on every retry
-- While the Comext dataflow list cannot be loaded, `ext_go` and `icts` carry `comextListMissing` and a `notice`, and `not_found` on a Comext folder or `DS-*` code says the list could not be loaded; a catalogue a failed refresh could not replace carries `catalogueLoadedAt`, and a `not_found` hint gives its load time
+- Items carry `code`, `label`, `type` (`folder` / `dataset` / `table`), and `hasChildren`, with a `parentPath` breadcrumb and `otherPlacements` for a folder filed in several branches; fails as `not_found` for an unknown code, `not_a_folder` for a dataset or table code, or a retryable `upstream_fault` when no catalogue is loaded and Eurostat's table of contents is unreachable
+- If the Comext dataflow list cannot be loaded, `ext_go` and `icts` carry `comextListMissing` and a `notice`; a catalogue that could not be refreshed carries `catalogueLoadedAt`
 
 ---
 
 ### `eurostat_get_dataset_info` <sub>tool</sub>
 
 - One `dataset_code`; returns every dimension with `valuesCount` and up to 10 `sampleValues`, plus `timeRange`, `obsCount`, `lastUpdated`, and the ESMS `metadataUrl`
-- Fails as `not_found` for an unknown dataset, or `upstream_fault` when Eurostat returns a structure or content constraint the server cannot read, or when the structure endpoint answers HTTP 5xx or cannot be reached on every retry (marked retryable)
+- Fails as `not_found` for an unknown dataset, or `upstream_fault` when Eurostat returns a structure the server cannot read (retryable when the endpoint is down)
 
 ---
 
 ### `eurostat_get_dimension_values` <sub>tool</sub>
 
-- `dataset_code` plus `dimension`; for `geo`, `geo_level` picks a NUTS level (`aggregate`, `country` by default, `nuts1`, `nuts2`, `nuts3`). Values come back in Eurostat's order
-- `filter` keeps the values whose code and label contain every word given, ignoring case and accents (`palma frankfurt` finds `DE_EDDF_ES_LEPA`), with `matchCount` counting the matches
-- A long list comes back a page at a time: each response holds whole values within 64,000 bytes, up to an optional `limit`, and a page with more after it carries `truncated`, `nextCursor` (pass it back as `cursor`), and a `notice`. `totalCount` counts every value
-- Fails as `not_found`, `no_results`, `conflicting_params`, `invalid_cursor`, `upstream_fault` (a structure or content constraint the server cannot read, or, marked retryable, a structure endpoint that answers HTTP 5xx or cannot be reached on every retry), or `canvas_not_found`
-- `canvas_id` stages every value, whatever `filter` and `limit` are, on that canvas as a `code` / `label` table (`canvasId` / `tableName` / `stagedRowCount`) that labels a download's code columns through a join; this tool never starts a canvas of its own
+- `dataset_code` plus `dimension`; for `geo`, `geo_level` picks a NUTS level (`aggregate`, `country` by default, `nuts1`, `nuts2`, `nuts3`). `filter` keeps values whose code and label contain every word given, ignoring case and accents (`palma frankfurt` finds `DE_EDDF_ES_LEPA`), counted in `matchCount`
+- Long lists come back in pages of up to 64,000 bytes (or an optional `limit`), with `totalCount` for every value; a page with more after it carries `truncated`, `nextCursor` (pass back as `cursor`), and a `notice`. Fails as `not_found`, `no_results`, `conflicting_params`, `invalid_cursor`, `upstream_fault` (retryable when the endpoint is down), or `canvas_not_found`
+- `canvas_id` stages every value on that canvas as a `code` / `label` table (`canvasId` / `tableName` / `stagedRowCount`) that labels a download's code columns through a join; it never starts a canvas of its own
 
 ---
 
@@ -96,14 +92,14 @@ The same metadata is available through `eurostat_get_dataset_info` for tool-only
 
 - `dataset_code` plus `filters` (`{dimension_code: [values]}`), `geo_level`, and either `since_period` / `until_period` (`2020`, `2020-Q1`, `2020-01`, down to `YYYY-Wnn` and `YYYY-Dnnn`) or `last_n_periods`; `preview_limit` 1–500 (default 50) sets the inline rows; `lang` is `EN`, `FR`, or `DE`
 - Each observation carries code/label pairs per dimension, a nullable `value`, `status` (OBS_FLAG), and `confStatus` (CONF_STATUS); `obsCount`, `missingObsCount`, and `timeRange` cover the whole match, `truncated` is true above 5,000 observations, and `unmatchedValues` names filter values that matched nothing
-- Fails as `not_found`, `no_results` (naming the unmatched values and the periods that carry no value), `invalid_dimension`, `invalid_period`, `conflicting_params`, a non-retryable `async_response` for a query too large to serve inline, `canvas_not_found`, or a retryable `upstream_fault` when the Statistics API answers HTTP 5xx or cannot be reached on every retry
+- Fails as `not_found`, `no_results` (naming the unmatched values and the periods with no value), `invalid_dimension`, `invalid_period`, `conflicting_params`, a non-retryable `async_response` for a query too large to serve, `canvas_not_found`, or a retryable `upstream_fault` when the Statistics API is down
 
 ---
 
 ### `eurostat_download_dataset` <sub>tool</sub>
 
 - `dataset_code` plus the same `filters` map and `since_period` / `until_period` (no `last_n_periods`: the TSV keeps a column per period unless a range drops it); `preview_limit` 1–500 (default 50)
-- Returns `rowCount` (echoed as `totalCount`), `missingCount`, `periodRange`, and `bytesRead` for the whole download; fails as `not_found`, `invalid_dimension`, `invalid_period`, `filter_arity`, a non-retryable `async_queued` or `extraction_too_big`, `no_results`, `upstream_fault` (an unmodelled fault or a body that is not a TSV table, or, marked retryable, an SDMX endpoint that answers HTTP 5xx or cannot be reached on every retry), or `canvas_not_found`
+- Returns `rowCount` (echoed as `totalCount`), `missingCount`, `periodRange`, and `bytesRead` for the whole download; fails as `not_found`, `invalid_dimension`, `invalid_period`, `filter_arity`, a non-retryable `async_queued` or `extraction_too_big`, `no_results`, `upstream_fault` (retryable when the SDMX endpoint is down), or `canvas_not_found`
 - The `EUROSTAT_BULK_MAX_BYTES` budget (default 50 MiB) stops a transfer mid-stream and returns what arrived with `budgetExceeded: true`
 
 ---
@@ -111,7 +107,7 @@ The same metadata is available through `eurostat_get_dataset_info` for tool-only
 ### `eurostat_dataframe_describe` <sub>tool</sub>
 
 - `canvas_id` from a staging response; lists each table's `name`, `rowCount`, typed columns, and `expiresAt` (sliding `CANVAS_TTL_MS`, default 24h); fails as `canvas_not_found` or `canvas_disabled`
-- Columns differ by the tool that staged them: `eurostat_query_dataset` writes a code and a `_label` column per dimension, `eurostat_download_dataset` codes only plus `time` — both with the same `obs_*` and `conf_status*` measures, so they join on dimension codes and `time` — and `eurostat_get_dimension_values` writes `code` and `label`
+- Columns depend on the staging tool: `eurostat_query_dataset` writes a code and a `_label` column per dimension, `eurostat_download_dataset` codes only plus `time` (both share the `obs_*` and `conf_status*` measures), and `eurostat_get_dimension_values` writes `code` and `label`
 
 ---
 
@@ -141,18 +137,18 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 Eurostat-specific:
 
 - The Statistics API (JSON-stat 2.0) for slices, the SDMX 2.1 TSV bulk endpoint for whole datasets at roughly half the bytes, and the catalogue TOC cached in memory for 12 hours
-- The Comext host's `DS-*` collections through the same tools: detailed trade by CN8, HS, SITC, BEC and CPA, and PRODCOM. They report no period coverage or `obsCount`, and the trade flows mix annual and monthly series in one dataset, so filter `freq`; `product`, `reporter` and `partner` carry aggregates (`TOTAL`, `EU27_2020`, `EXT_EU27_2020`) that double-count when summed with their members. The Comext host serves no large collection unfiltered. PRODCOM values published as text arrive in `valueText` / `obs_value_text` (the unit `KG`), and its `:C` as confidentiality status `C`. A collection on neither host, such as the legacy `DS-056120`, is not disseminated
-- NUTS geo-level filtering (`aggregate` / `country` / `nuts1` / `nuts2` / `nuts3`) on `eurostat_query_dataset` and `eurostat_get_dimension_values`, and OBS_FLAG (provisional, estimated, and so on) and CONF_STATUS (confidentiality) decoded into separate fields, with the same codes from JSON-stat and the bulk TSV
-- Eurostat's too-large-to-serve responses (HTTP-200 async warnings, HTTP 413, SOAP fault 413, SOAP queue tickets) come back as non-retryable `async_response`, `extraction_too_big`, or `async_queued` errors that name the dataset's own dimensions left to filter, not timeouts
-- A Eurostat outage — HTTP 5xx or an unreachable host on all four attempts, about seven seconds of backoff in all — comes back as `upstream_fault` marked `retryable`, with a hint naming the endpoint and saying to retry in a few minutes. HTTP 501 fails on its first attempt, marked not retryable
-- Inline rows are capped by `preview_limit` (at most 500). With `CANVAS_PROVIDER_TYPE=duckdb`, a query match above 5,000 observations, or any bulk download, is staged whole as a SQL table (`canvasId` / `tableName` / `stagedRowCount`) for the dataframe tools, and `canvas_id` stages the next result beside earlier ones for joins — including a dimension's code/label list from `eurostat_get_dimension_values`, which labels a bulk table's codes. An empty download fails as `no_results` without creating or touching a canvas. The `.mcpb` bundle strips the native DuckDB binding, so SQL analytics need the npm, Docker, or from-source install
+- The Statistics API (JSON-stat 2.0) for slices, the SDMX 2.1 TSV bulk endpoint for whole datasets at roughly half the bytes, and the catalogue TOC cached in memory for 12 hours
+- The Comext host's `DS-*` collections (detailed trade by CN8, HS, SITC, BEC and CPA, and PRODCOM) through the same tools. Filter every request, `freq` included, since trade flows mix annual and monthly series; aggregates such as `TOTAL`, `EU27_2020`, and `EXT_EU27_2020` double-count when summed with their members. PRODCOM text values arrive in `valueText` / `obs_value_text`
+- NUTS geo-level filtering (`aggregate` / `country` / `nuts1` / `nuts2` / `nuts3`), and OBS_FLAG and CONF_STATUS decoded into separate fields
+- Too-large-to-serve responses come back as non-retryable `async_response`, `extraction_too_big`, or `async_queued` errors that name the dimensions left to filter
+- With `CANVAS_PROVIDER_TYPE=duckdb`, a query match above 5,000 observations, or any bulk download, is staged whole as a SQL table (`canvasId` / `tableName` / `stagedRowCount`) for the dataframe tools. The `.mcpb` bundle strips the native DuckDB binding, so SQL analytics need the npm, Docker, or from-source install
 
 Agent-friendly output:
 
 - Typed error contracts: every declared failure carries a `reason` and a `recovery.hint` naming the next tool to call
 - Next-step hints: `eurostat_search_datasets` and `eurostat_browse_themes` return a `nextStep` pointing at the follow-up call
 - Unknown stays unknown: counts and period bounds Eurostat doesn't report (`obsCount`, `timeRange.start` / `end`, `lastUpdated`) are omitted rather than zeroed
-- Effective-query echo: `appliedFilters` on `eurostat_query_dataset` and `appliedQuery` (with the SDMX `url`) on `eurostat_download_dataset`, plus a `notice` when the inline preview omits rows, naming the staged table when there is one; `eurostat_query_dataset`'s `notice` also names any filter value that matched nothing
+- Effective-query echo: `appliedFilters` on `eurostat_query_dataset` and `appliedQuery` (with the SDMX `url`) on `eurostat_download_dataset`, plus a `notice` when the preview omits rows
 
 ## Getting started
 
@@ -268,14 +264,14 @@ cp .env.example .env
 | `EUROSTAT_BASE_URL` | Eurostat API base URL. | `https://ec.europa.eu/eurostat/api/dissemination` |
 | `EUROSTAT_COMEXT_BASE_URL` | Comext dissemination host, which serves every `DS-*` dataset code (detailed trade and PRODCOM). | `https://ec.europa.eu/eurostat/api/comext/dissemination` |
 | `EUROSTAT_REQUEST_TIMEOUT_MS` | HTTP request timeout, in ms. | `30000` |
-| `EUROSTAT_METADATA_TIMEOUT_MS` | Timeout for one dataset's SDMX dataflow structure, in ms — 23 MB, uncompressed, for `DS-045409`. | `120000` (2 min) |
-| `EUROSTAT_TOC_CACHE_TTL_MS` | Catalogue TOC cache lifetime, in ms; the first search or browse call past it refreshes the TOC. | `43200000` (12 h) |
+| `EUROSTAT_METADATA_TIMEOUT_MS` | Timeout for one dataset's SDMX structure, in ms. | `120000` (2 min) |
+| `EUROSTAT_TOC_CACHE_TTL_MS` | Catalogue TOC cache lifetime, in ms. | `43200000` (12 h) |
 | `EUROSTAT_BULK_TIMEOUT_MS` | Timeout for one `eurostat_download_dataset` transfer, in ms. | `120000` (2 min) |
-| `EUROSTAT_BULK_MAX_BYTES` | Byte budget for one bulk download, counted on the decoded TSV and enforced while streaming. | `52428800` (50 MiB) |
-| `CANVAS_PROVIDER_TYPE` | `duckdb` enables the dataframe canvas: lists `eurostat_dataframe_describe` and `eurostat_dataframe_query` and turns on staging. | `none` |
+| `EUROSTAT_BULK_MAX_BYTES` | Byte budget for one bulk download. | `52428800` (50 MiB) |
+| `CANVAS_PROVIDER_TYPE` | `duckdb` enables the dataframe canvas and its tools. | `none` |
 | `CANVAS_TTL_MS` | Sliding lifetime of a staged canvas, in ms. | `86400000` (24 h) |
 | `CANVAS_DEFAULT_ROW_LIMIT` | Max rows one `eurostat_dataframe_query` returns before reporting `truncated`. | `10000` |
-| `EUROSTAT_DATAFRAME_DROP_ENABLED` | `true` lists `eurostat_dataframe_drop`, which removes one staged table; needs `CANVAS_PROVIDER_TYPE=duckdb`. Off by default because a drop cannot be undone. | `false` |
+| `EUROSTAT_DATAFRAME_DROP_ENABLED` | `true` lists `eurostat_dataframe_drop`; needs `CANVAS_PROVIDER_TYPE=duckdb`. | `false` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
 | `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. The server declares `stateless`; a set value overrides it. | `stateless` |
