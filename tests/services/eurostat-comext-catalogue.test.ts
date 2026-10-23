@@ -352,6 +352,53 @@ describe('EurostatCatalogueService — the merge retry across concurrent callers
 });
 
 describe('EurostatCatalogueService — caller cancellation around the shared loads', () => {
+  it.each(['toc', 'dataflow-list'] as const)(
+    'bounds the detached %s body after a waiter cancels',
+    async (route) => {
+      vi.useFakeTimers();
+      const requests: Request[] = [];
+      fetchMock.mockImplementation(async (input: string | URL | Request, init?: RequestInit) => {
+        const request = new Request(input, init);
+        requests.push(request);
+        if (routeOf(input).route !== route)
+          return new Response(route === 'toc' ? COMEXT_LIST : TOC);
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              request.signal.addEventListener(
+                'abort',
+                () => controller.error(request.signal.reason),
+                { once: true },
+              );
+            },
+          }),
+        );
+      });
+      const svc = service();
+      const controller = new AbortController();
+      const first = svc
+        .search('trade', 100, undefined, createMockContext({ signal: controller.signal }))
+        .catch((error: unknown) => error);
+      const second = svc.search('trade', 100, undefined, ctx()).catch((error: unknown) => error);
+      controller.abort();
+      expect(await first).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+      await vi.advanceTimersByTimeAsync(30_001);
+      if (route === 'toc') {
+        expect(await second).toMatchObject({
+          code: JsonRpcErrorCode.Timeout,
+          data: { reason: 'retry_deadline_exceeded', deadlineMs: 30_000 },
+        });
+      } else {
+        expect(await second).toMatchObject({ comextListMissing: true, totalMatches: 2 });
+      }
+      expect(requests).toHaveLength(2);
+      expect(requests.find((request) => routeOf(request.url).route === route)?.signal.aborted).toBe(
+        true,
+      );
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
   /** Hold requests on `route` until released, rejecting early when their own signal aborts. */
   function gateRoute(route: 'dataflow-list' | 'toc'): {
     release: () => void;

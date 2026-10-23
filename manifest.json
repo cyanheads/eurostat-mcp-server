@@ -23,7 +23,9 @@
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
-        "NODE_ENV": "production"
+        "NODE_ENV": "production",
+        "CANVAS_PROVIDER_TYPE": "none",
+        "EUROSTAT_CLAMP_LIMITS": "${user_config.clamp_limits}"
       }
     }
   },
@@ -34,5 +36,13 @@
   },
   "tools_generated": true,
   "prompts_generated": true,
-  "user_config": {}
+  "user_config": {
+    "clamp_limits": {
+      "type": "boolean",
+      "title": "Clamp read limits",
+      "description": "Clamp positive integer preview/search limits to 500/100 with a notice. Disable to reject over-cap inputs.",
+      "default": true,
+      "required": false
+    }
+  }
 }

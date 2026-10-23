@@ -14,7 +14,7 @@
 # output. A stage that compiles a native addon needs the target-arch toolchain
 # and cannot cross-compile this way — drop the flag there.
 # ==============================================================================
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.3 AS build
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.4 AS build
 
 WORKDIR /usr/src/app
 
@@ -46,7 +46,7 @@ RUN bun run build
 # A clean image rather than `FROM build`: the build stage's node_modules holds
 # devDependencies.
 # ==============================================================================
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.3 AS deps
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.4 AS deps
 
 WORKDIR /usr/src/app
 
@@ -80,8 +80,8 @@ RUN case "$TARGETARCH" in \
 # The @duckdb/node-api binding that backs DataCanvas is one of this server's own
 # dependencies, so it survives the flag, and `--cpu` picks the target's binding:
 # the canvas is gated at runtime by CANVAS_PROVIDER_TYPE, not at build time, so
-# the image always carries the binding and a deployment turns the feature on with
-# an env var.
+# the image always carries the binding. The canvas is on by default; a deployment
+# turns it off with CANVAS_PROVIDER_TYPE=none.
 RUN --mount=type=cache,target=/root/.bun/install/cache \
     bun install --production --omit=peer --frozen-lockfile --ignore-scripts \
       --os="$TARGETOS" --cpu="$(cat .bun-cpu)"
@@ -118,7 +118,7 @@ RUN rm -rf node_modules/@socketsecurity/bun-security-scanner
 # dependencies and build artifacts. Its only Bun invocations are HEALTHCHECK
 # and CMD, which run on the real target at container start.
 # ==============================================================================
-FROM oven/bun:1.4.3-slim AS production
+FROM oven/bun:1.4.4-slim AS production
 
 WORKDIR /usr/src/app
 

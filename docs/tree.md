@@ -1,6 +1,6 @@
 # eurostat-mcp-server - Directory Structure
 
-Generated on: 2026-10-15 02:59:43
+Generated on: 2026-10-23 04:59:56
 
 ```text
 eurostat-mcp-server/
@@ -163,6 +163,7 @@ eurostat-mcp-server/
 │   │       │   ├── eurostat-get-dimension-values.tool.ts
 │   │       │   ├── eurostat-query-dataset.tool.ts
 │   │       │   └── eurostat-search-datasets.tool.ts
+│   │       ├── clamp-read-limit.ts
 │   │       ├── narrowing-advice.ts
 │   │       └── value-list-paging.ts
 │   ├── services/
@@ -254,6 +255,7 @@ eurostat-mcp-server/
 │       ├── eurostat-query-dataset.tool.test.ts
 │       ├── eurostat-search-datasets.tool.test.ts
 │       ├── narrowing-advice.test.ts
+│       ├── read-limit-policy.test.ts
 │       └── security-and-edge-cases.test.ts
 ├── .dockerignore
 ├── .env.example

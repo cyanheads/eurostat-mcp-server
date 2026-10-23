@@ -58,6 +58,160 @@ afterAll(async () => {
 });
 
 describe('eurostatDataframeQuery', () => {
+  it('preserves scalar values, bigint strings and empty results before response shaping', async () => {
+    const result = await runToolContract(
+      eurostatDataframeQuery,
+      {
+        canvas_id: canvasId,
+        sql: 'SELECT 42 AS n, 9223372036854775807::BIGINT AS big, NULL AS nil',
+      },
+      { context: { tenantId: 'default' } },
+    );
+    expect(result.structuredContent).toMatchObject({
+      rows: [{ n: 42, big: '9223372036854775807', nil: null }],
+      rowCount: 1,
+      truncated: false,
+    });
+    const empty = await runToolContract(
+      eurostatDataframeQuery,
+      { canvas_id: canvasId, sql: 'SELECT geo FROM df_test0001 WHERE false' },
+      { context: { tenantId: 'default' } },
+    );
+    expect(empty.structuredContent).toMatchObject({ rows: [], rowCount: 0, truncated: false });
+    expect(empty.structuredContent).not.toHaveProperty('notice');
+    expect(result.content.map((block) => ('text' in block ? block.text : '')).join('\n')).toContain(
+      'big="9223372036854775807"',
+    );
+  });
+
+  it('renders nested cells as lossless JSON through the production formatter', async () => {
+    const result = await runToolContract(
+      eurostatDataframeQuery,
+      {
+        canvas_id: canvasId,
+        sql: `SELECT [{'period':'2024','value':42}, {'period':'2023','value':NULL}] AS series, 'NULL' AS literal, NULL AS nil, true AS yes, '雪\n" | =' AS text`,
+      },
+      { context: { tenantId: 'default' } },
+    );
+    expect(result.isError).not.toBe(true);
+    const text = result.content.map((b) => ('text' in b ? b.text : '')).join('\n');
+    expect(text).toContain('series=[{"period":"2024","value":42},{"period":"2023","value":null}]');
+    expect(text).toContain('literal="NULL" | nil=null | yes=true | text="雪\\n\\" | ="');
+  });
+
+  it('bounds full production envelopes and pages by the returned rowCount', async () => {
+    const sql =
+      "SELECT i, repeat('雪\\\"', 5000) AS wide FROM (VALUES (0), (1), (2)) AS r(i) ORDER BY i LIMIT 3";
+    const first = await runToolContract(
+      eurostatDataframeQuery,
+      { canvas_id: canvasId, sql },
+      { context: { tenantId: 'default' } },
+    );
+    expect(first.isError).not.toBe(true);
+    expect(first.structuredContent).toMatchObject({
+      rowCount: 1,
+      truncated: true,
+      notice: expect.stringContaining('64,000'),
+    });
+    expect(Buffer.byteLength(JSON.stringify(first.structuredContent))).toBeLessThanOrEqual(64000);
+    expect(Buffer.byteLength(JSON.stringify(first.content))).toBeLessThanOrEqual(64000);
+    const next = await runToolContract(
+      eurostatDataframeQuery,
+      { canvas_id: canvasId, sql: `${sql} OFFSET 1` },
+      { context: { tenantId: 'default' } },
+    );
+    expect(next.structuredContent).toMatchObject({
+      rows: [{ i: 1 }],
+      rowCount: 1,
+      truncated: true,
+    });
+    const last = await runToolContract(
+      eurostatDataframeQuery,
+      { canvas_id: canvasId, sql: `${sql} OFFSET 2` },
+      { context: { tenantId: 'default' } },
+    );
+    expect(last.structuredContent).toMatchObject({
+      rows: [{ i: 2 }],
+      rowCount: 1,
+      truncated: false,
+    });
+    expect(last.structuredContent).not.toHaveProperty('notice');
+    const ids = [first, next, last].flatMap((page) =>
+      (page.structuredContent as { rows: { i: number }[] }).rows.map((row) => row.i),
+    );
+    expect(ids).toEqual([0, 1, 2]);
+    expect(first.content.map((b) => ('text' in b ? b.text : '')).join('\n')).toContain(
+      (first.structuredContent as { notice: string }).notice,
+    );
+    const end = await runToolContract(
+      eurostatDataframeQuery,
+      { canvas_id: canvasId, sql: `${sql} OFFSET 3` },
+      { context: { tenantId: 'default' } },
+    );
+    expect(end.structuredContent).toMatchObject({ rows: [], rowCount: 0, truncated: false });
+  });
+
+  it('bounds nested-row costs and keeps empty containers and scalar JSON on both surfaces', async () => {
+    const result = await runToolContract(
+      eurostatDataframeQuery,
+      {
+        canvas_id: canvasId,
+        sql: "SELECT i, {'deep': [{'value': repeat('x', 40000)}]} AS nested, []::INTEGER[] AS empty, false AS flag, 1.25::DOUBLE AS scalar FROM (VALUES (0), (1)) r(i) ORDER BY i",
+      },
+      { context: { tenantId: 'default' } },
+    );
+    expect(result.structuredContent).toMatchObject({
+      rowCount: 1,
+      truncated: true,
+      rows: [
+        {
+          i: 0,
+          nested: { deep: [{ value: 'x'.repeat(40000) }] },
+          empty: [],
+          flag: false,
+          scalar: 1.25,
+        },
+      ],
+    });
+    expect(Buffer.byteLength(JSON.stringify(result.structuredContent))).toBeLessThanOrEqual(64000);
+    expect(Buffer.byteLength(JSON.stringify(result.content))).toBeLessThanOrEqual(64000);
+    const text = result.content.map((b) => ('text' in b ? b.text : '')).join('\n');
+    expect(text).toContain(`nested=${JSON.stringify({ deep: [{ value: 'x'.repeat(40000) }] })}`);
+    expect(text).toContain('empty=[] | flag=false | scalar=1.25');
+  });
+
+  it('keeps a full result that fits even when a partial result plus notice would not', async () => {
+    const result = await runToolContract(
+      eurostatDataframeQuery,
+      {
+        canvas_id: canvasId,
+        sql: "SELECT i, CASE WHEN i=0 THEN repeat('x', 63500) ELSE '' END AS value FROM (VALUES (0), (1), (2)) r(i) ORDER BY i",
+      },
+      { context: { tenantId: 'default' } },
+    );
+    expect(result.structuredContent).toMatchObject({ rowCount: 3, truncated: false });
+    expect(result.structuredContent).not.toHaveProperty('notice');
+    expect(Buffer.byteLength(JSON.stringify(result.content))).toBeLessThanOrEqual(64000);
+    expect(Buffer.byteLength(JSON.stringify(result.structuredContent))).toBeLessThanOrEqual(64000);
+  });
+
+  it('retains one oversized complete nested row without claiming data was omitted', async () => {
+    const result = await runToolContract(
+      eurostatDataframeQuery,
+      { canvas_id: canvasId, sql: "SELECT {'nested': [{'text': repeat('雪', 30000)}]} AS huge" },
+      { context: { tenantId: 'default' } },
+    );
+    expect(result.structuredContent).toMatchObject({
+      rowCount: 1,
+      truncated: false,
+      rows: [{ huge: { nested: [{ text: '雪'.repeat(30000) }] } }],
+    });
+    expect(result.structuredContent).not.toHaveProperty('notice');
+    expect(Buffer.byteLength(JSON.stringify(result.content))).toBeGreaterThan(64000);
+    expect(result.content.map((b) => ('text' in b ? b.text : '')).join('')).toContain(
+      JSON.stringify({ nested: [{ text: '雪'.repeat(30000) }] }),
+    );
+  });
   it('runs a SELECT and returns rows keyed by column name', async () => {
     const input = eurostatDataframeQuery.input.parse({
       canvas_id: canvasId,
@@ -251,8 +405,7 @@ describe('eurostatDataframeQuery', () => {
 
   it('discloses a result cut short by the canvas row limit', async () => {
     // A separate canvas with a row limit of 2, so the cap is reachable without staging
-    // 10,000 rows. `truncated` is the only signal that rows are missing — a result that
-    // silently drops them reads as a complete answer.
+    // 10,000 rows. Both the truncation flag and the paging notice disclose omitted rows.
     const capped = withRealCanvas({ defaultRowLimit: 2 });
     try {
       const instance = await capped.canvas.acquire(undefined, ctx());
@@ -276,12 +429,28 @@ describe('eurostatDataframeQuery', () => {
       expect(result.rows).toHaveLength(2);
       expect(result.rowCount).toBe(2);
 
-      // …and the caller is told how to get the rest, in content[] as well as the field.
+      const production = await runToolContract(
+        eurostatDataframeQuery,
+        { canvas_id: instance.canvasId, sql: 'SELECT geo FROM df_capped01 ORDER BY geo' },
+        { context: { tenantId: 'default' } },
+      );
+      expect(production.structuredContent).toMatchObject({
+        rowCount: 2,
+        truncated: true,
+        notice: expect.stringContaining('Returned 2 complete rows'),
+      });
+      const productionText = production.content.map((b) => ('text' in b ? b.text : '')).join('\n');
+      expect(productionText).toContain('advancing OFFSET by the actual returned rowCount');
+      expect(productionText).toContain('restart sorted at OFFSET 0');
+      expect(productionText).toContain('tie-breakers');
+      expect(productionText).toContain('Volatile expressions and changing or expired tables');
+
+      // The domain formatter also preserves the returned count and truncation flag.
       const text = eurostatDataframeQuery.format!(result)
         .map((b) => (b.type === 'text' ? b.text : ''))
         .join('');
       expect(text).toContain('**Truncated:** true');
-      expect(text).toContain('add a LIMIT, an aggregate, or a narrower WHERE clause');
+      expect(text).toContain('**Rows:** 2');
     } finally {
       await capped.teardown();
       setCanvas(canvas);
@@ -301,10 +470,10 @@ describe('eurostatDataframeQuery', () => {
     });
     const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
     expect(text).toContain('cnv0000001');
-    expect(text).toContain('geo=DE');
+    expect(text).toContain('geo="DE"');
     expect(text).toContain('obs_value=1');
-    // A null cell renders as NULL rather than as an empty string a reader would misread.
-    expect(text).toContain('obs_value=NULL');
+    // JSON null remains distinct from a quoted string or an empty cell.
+    expect(text).toContain('obs_value=null');
     const renderedRows = text.split('\n').filter((l) => l.startsWith('geo=')).length;
     expect(renderedRows).toBe(2);
   });

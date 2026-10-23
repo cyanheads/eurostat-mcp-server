@@ -11,9 +11,11 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import type { ColumnSchema } from '@cyanheads/mcp-ts-core/canvas';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import {
-  type McpError,
+  JsonRpcErrorCode,
+  McpError,
   notFound,
   serviceUnavailable,
+  timeout,
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
@@ -357,16 +359,41 @@ export class EurostatBulkService {
       maxBytes: bulkMaxBytes,
     });
 
+    const startedAt = Date.now();
+    const normalizeDeadline = (error: unknown): unknown => {
+      if (
+        !ctx.signal.aborted &&
+        Date.now() - startedAt >= bulkTimeoutMs &&
+        error instanceof McpError &&
+        error.code === JsonRpcErrorCode.Timeout
+      ) {
+        return timeout(
+          `The bulk download exceeded its ${bulkTimeoutMs}ms operation deadline.`,
+          {
+            reason: 'retry_deadline_exceeded',
+            deadlineMs: bulkTimeoutMs,
+            elapsedMs: Date.now() - startedAt,
+          },
+          { cause: error },
+        );
+      }
+      return error;
+    };
     const response = await withRetry(
-      async () => {
+      async ({ signal, remainingMs }) => {
         try {
-          return await fetchWithTimeout(url.toString(), bulkTimeoutMs, fetchCtx, {
-            signal: ctx.signal,
-            // 400 (bad filter value or arity), 404 (unknown dataset) and 413 (extraction too
-            // large) are modeled outcomes reclassified below into the declared error
-            // contract, not service failures.
-            expectedStatuses: [400, 404, 413],
-          });
+          return await fetchWithTimeout(
+            url.toString(),
+            Math.min(bulkTimeoutMs, remainingMs),
+            fetchCtx,
+            {
+              signal,
+              // 400 (bad filter value or arity), 404 (unknown dataset) and 413 (extraction too
+              // large) are modeled outcomes reclassified below into the declared error
+              // contract, not service failures.
+              expectedStatuses: [400, 404, 413],
+            },
+          );
         } catch (err) {
           classifyFaultBody(err, datasetCode);
           throw err;
@@ -377,6 +404,7 @@ export class EurostatBulkService {
         context: fetchCtx,
         baseDelayMs: 1000,
         signal: ctx.signal,
+        deadlineMs: bulkTimeoutMs,
         // An outage, minus the 501 the fetch layer marks deterministic.
         isTransient: (error) => isUpstreamOutage(error) && defaultIsTransient(error),
       },
@@ -409,17 +437,32 @@ export class EurostatBulkService {
       periodsSeen: [],
     };
 
-    const decoded = await decodeBody(response.body, stats, bulkMaxBytes);
-    const { header, remainder, iterator } = await readHeader(decoded, datasetCode);
-    const valueText = isComextDataset(datasetCode);
-
-    return {
-      header,
-      stats,
-      url: url.toString(),
-      valueText,
-      rows: () => expandRows(iterator, remainder, header, stats, valueText),
-    };
+    let decoded: AsyncGenerator<string> | undefined;
+    try {
+      decoded = await decodeBody(response.body, stats, bulkMaxBytes);
+      const { header, remainder, iterator } = await readHeader(
+        decoded,
+        datasetCode,
+        stats,
+        bulkMaxBytes,
+      );
+      const valueText = isComextDataset(datasetCode);
+      return {
+        header,
+        stats,
+        url: url.toString(),
+        valueText,
+        rows: () =>
+          expandRows(iterator, remainder, header, stats, valueText, {
+            datasetCode,
+            maxBytes: bulkMaxBytes,
+            normalizeDeadline,
+          }),
+      };
+    } catch (error) {
+      await decoded?.return(undefined);
+      throw normalizeDeadline(error);
+    }
   }
 }
 
@@ -434,8 +477,7 @@ export class EurostatBulkService {
  * be predicted from the request either.
  *
  * The budget counts bytes *after* decompression. That is the uniform measure
- * across both encodings, and since a gzip body is never larger than what it
- * expands to, bounding the decoded size bounds the transfer as well. Hitting it
+ * across both encodings, independent of the wire size. Hitting it
  * cancels the underlying reader rather than draining the rest — the body is
  * chunked with no `Content-Length`, so a budget checked after the fact would
  * have already paid for the whole transfer.
@@ -532,13 +574,15 @@ async function* budgetedText(
       const { done, value } = await reader.read();
       if (done) break;
       if (!value || value.length === 0) continue;
-      stats.bytesRead += value.length;
-      if (stats.bytesRead > maxBytes) {
-        stats.budgetExceeded = true;
-        return;
-      }
-      const text = decoder.decode(value, { stream: true });
+      const accepted = Math.min(value.length, maxBytes - stats.bytesRead);
+      stats.bytesRead += accepted;
+      stats.budgetExceeded = accepted < value.length;
+      const text = decoder.decode(accepted === value.length ? value : value.subarray(0, accepted), {
+        stream: true,
+      });
       if (text) yield text;
+      // A budget-cut UTF-8 sequence is an incomplete suffix, never a replacement character.
+      if (stats.budgetExceeded) return;
     }
     const tail = decoder.decode();
     if (tail) yield tail;
@@ -570,6 +614,8 @@ async function* budgetedText(
 async function readHeader(
   chunks: AsyncGenerator<string>,
   datasetCode: string,
+  stats: BulkStats,
+  maxBytes: number,
 ): Promise<{ header: TsvHeader; iterator: AsyncGenerator<string>; remainder: string }> {
   let buf = '';
   let exhausted = false;
@@ -590,6 +636,7 @@ async function readHeader(
 
   const newline = buf.indexOf('\n');
   if (newline === -1) {
+    if (stats.budgetExceeded) throw byteBudgetFailure(datasetCode, stats, maxBytes);
     if (buf.trim() === '') {
       throw serviceUnavailable(
         `Eurostat SDMX endpoint returned an empty body for "${datasetCode}".`,
@@ -605,6 +652,23 @@ async function readHeader(
     iterator: chunks,
     remainder: buf.slice(newline + 1),
   };
+}
+
+/** A local transfer limit prevented the download from yielding a usable observation. */
+function byteBudgetFailure(datasetCode: string, stats: BulkStats, maxBytes: number): McpError {
+  return validationError(
+    `The ${maxBytes}-byte decoded TSV budget was exhausted before a complete observation could be read for "${datasetCode}".`,
+    {
+      reason: 'byte_budget_exceeded',
+      datasetCode,
+      maxBytes,
+      bytesRead: stats.bytesRead,
+      rowCount: stats.rowCount,
+      recovery: {
+        hint: 'Add dimension filters or narrow since_period/until_period to reduce the transfer, or raise EUROSTAT_BULK_MAX_BYTES.',
+      },
+    },
+  );
 }
 
 function stripCr(line: string): string {
@@ -632,6 +696,11 @@ async function* expandRows(
   header: TsvHeader,
   stats: BulkStats,
   valueText: boolean,
+  failure: {
+    datasetCode: string;
+    maxBytes: number;
+    normalizeDeadline: (error: unknown) => unknown;
+  },
 ): AsyncGenerator<BulkRow> {
   const seen = new Set<string>();
   let buf = remainder;
@@ -694,6 +763,10 @@ async function* expandRows(
     if (!stats.budgetExceeded) yield* emit(buf);
 
     stats.periodsSeen = [...seen].sort();
+    if (stats.budgetExceeded && stats.rowCount === 0)
+      throw byteBudgetFailure(failure.datasetCode, stats, failure.maxBytes);
+  } catch (error) {
+    throw failure.normalizeDeadline(error);
   } finally {
     /**
      * Close the text stream on every exit. A consumer that stops early — a canvas

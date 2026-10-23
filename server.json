@@ -22,6 +22,13 @@
       "version": "0.10.0",
       "environmentVariables": [
         {
+          "name": "EUROSTAT_CLAMP_LIMITS",
+          "description": "Clamp positive integer preview/search limits to 500/100 with a notice. False restores schemas rejecting over-cap inputs.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "true"
+        },
+        {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
           "format": "string",
@@ -44,14 +51,14 @@
         },
         {
           "name": "EUROSTAT_REQUEST_TIMEOUT_MS",
-          "description": "HTTP request timeout in milliseconds for Eurostat API calls.",
+          "description": "Total allowance for one Eurostat request across retries, backoff and body consumption, in milliseconds.",
           "format": "string",
           "isRequired": false,
           "default": "30000"
         },
         {
           "name": "EUROSTAT_METADATA_TIMEOUT_MS",
-          "description": "HTTP timeout for one dataset's SDMX dataflow structure, in milliseconds. Held separate from EUROSTAT_REQUEST_TIMEOUT_MS because the structure carries a label for every code the dataset uses: 23 MB, uncompressed, for DS-045409. Defaults to 2 minutes.",
+          "description": "Total allowance for one dataset's SDMX dataflow structure across retries, backoff and body consumption, in milliseconds. Defaults to 120000; separate from EUROSTAT_REQUEST_TIMEOUT_MS for large structures.",
           "format": "string",
           "isRequired": false,
           "default": "120000"
@@ -65,7 +72,7 @@
         },
         {
           "name": "EUROSTAT_BULK_TIMEOUT_MS",
-          "description": "HTTP timeout for one eurostat_download_dataset transfer, in milliseconds. Held separate from EUROSTAT_REQUEST_TIMEOUT_MS because a bulk body streams for minutes where a metadata call answers in seconds. Defaults to 2 minutes.",
+          "description": "Total allowance for one eurostat_download_dataset transfer across request retries, backoff and streaming body consumption, in milliseconds. Defaults to 120000.",
           "format": "string",
           "isRequired": false,
           "default": "120000"
@@ -79,10 +86,10 @@
         },
         {
           "name": "CANVAS_PROVIDER_TYPE",
-          "description": "Set to 'duckdb' to enable the dataframe canvas, which lists the eurostat_dataframe_describe and eurostat_dataframe_query tools, lets eurostat_query_dataset stage a match larger than its 5,000-row inline cap as a SQL table, and lets eurostat_download_dataset retain a whole bulk download instead of only its inline preview. The DuckDB binding ships with the server, so this variable is the only switch.",
+          "description": "Dataframe canvas backend. The default, 'duckdb', lists the eurostat_dataframe_describe and eurostat_dataframe_query tools, lets eurostat_query_dataset stage a match larger than its 5,000-row inline cap as a SQL table, and lets eurostat_download_dataset retain a whole bulk download instead of only its inline preview. Set to 'none' to disable the canvas and those tools. The DuckDB binding ships with the server, so this variable is the only switch.",
           "format": "string",
           "isRequired": false,
-          "default": "none"
+          "default": "duckdb"
         },
         {
           "name": "CANVAS_TEMP_PATH",
@@ -99,14 +106,14 @@
         },
         {
           "name": "CANVAS_DEFAULT_ROW_LIMIT",
-          "description": "Maximum rows a single eurostat_dataframe_query returns before the result is reported as truncated.",
+          "description": "Maximum rows a single eurostat_dataframe_query returns before reporting truncated. A separate 64,000-byte budget applies to each serialized response surface, retaining at least one complete row even if oversized.",
           "format": "string",
           "isRequired": false,
           "default": "10000"
         },
         {
           "name": "EUROSTAT_DATAFRAME_DROP_ENABLED",
-          "description": "Set to 'true' to list eurostat_dataframe_drop, which removes one staged table from a dataframe canvas and leaves its other tables in place. Off by default because a drop cannot be undone; staged tables expire with their canvas either way. Takes effect only with CANVAS_PROVIDER_TYPE=duckdb.",
+          "description": "Set to 'true' to list eurostat_dataframe_drop, which removes one staged table from a dataframe canvas and leaves its other tables in place. Off by default because a drop cannot be undone; staged tables expire with their canvas either way. Has no effect with CANVAS_PROVIDER_TYPE=none.",
           "format": "boolean",
           "isRequired": false,
           "default": "false"
@@ -128,6 +135,13 @@
           "description": "Selects the HTTP transport.",
           "format": "string",
           "value": "http"
+        },
+        {
+          "name": "EUROSTAT_CLAMP_LIMITS",
+          "description": "Clamp positive integer preview/search limits to 500/100 with a notice. False restores schemas rejecting over-cap inputs.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "true"
         },
         {
           "name": "MCP_HTTP_HOST",
@@ -186,14 +200,14 @@
         },
         {
           "name": "EUROSTAT_REQUEST_TIMEOUT_MS",
-          "description": "HTTP request timeout in milliseconds for Eurostat API calls.",
+          "description": "Total allowance for one Eurostat request across retries, backoff and body consumption, in milliseconds.",
           "format": "string",
           "isRequired": false,
           "default": "30000"
         },
         {
           "name": "EUROSTAT_METADATA_TIMEOUT_MS",
-          "description": "HTTP timeout for one dataset's SDMX dataflow structure, in milliseconds. Held separate from EUROSTAT_REQUEST_TIMEOUT_MS because the structure carries a label for every code the dataset uses: 23 MB, uncompressed, for DS-045409. Defaults to 2 minutes.",
+          "description": "Total allowance for one dataset's SDMX dataflow structure across retries, backoff and body consumption, in milliseconds. Defaults to 120000; separate from EUROSTAT_REQUEST_TIMEOUT_MS for large structures.",
           "format": "string",
           "isRequired": false,
           "default": "120000"
@@ -207,7 +221,7 @@
         },
         {
           "name": "EUROSTAT_BULK_TIMEOUT_MS",
-          "description": "HTTP timeout for one eurostat_download_dataset transfer, in milliseconds. Held separate from EUROSTAT_REQUEST_TIMEOUT_MS because a bulk body streams for minutes where a metadata call answers in seconds. Defaults to 2 minutes.",
+          "description": "Total allowance for one eurostat_download_dataset transfer across request retries, backoff and streaming body consumption, in milliseconds. Defaults to 120000.",
           "format": "string",
           "isRequired": false,
           "default": "120000"
@@ -221,10 +235,10 @@
         },
         {
           "name": "CANVAS_PROVIDER_TYPE",
-          "description": "Set to 'duckdb' to enable the dataframe canvas, which lists the eurostat_dataframe_describe and eurostat_dataframe_query tools, lets eurostat_query_dataset stage a match larger than its 5,000-row inline cap as a SQL table, and lets eurostat_download_dataset retain a whole bulk download instead of only its inline preview. The DuckDB binding ships with the server, so this variable is the only switch.",
+          "description": "Dataframe canvas backend. The default, 'duckdb', lists the eurostat_dataframe_describe and eurostat_dataframe_query tools, lets eurostat_query_dataset stage a match larger than its 5,000-row inline cap as a SQL table, and lets eurostat_download_dataset retain a whole bulk download instead of only its inline preview. Set to 'none' to disable the canvas and those tools. The DuckDB binding ships with the server, so this variable is the only switch.",
           "format": "string",
           "isRequired": false,
-          "default": "none"
+          "default": "duckdb"
         },
         {
           "name": "CANVAS_TEMP_PATH",
@@ -241,14 +255,14 @@
         },
         {
           "name": "CANVAS_DEFAULT_ROW_LIMIT",
-          "description": "Maximum rows a single eurostat_dataframe_query returns before the result is reported as truncated.",
+          "description": "Maximum rows a single eurostat_dataframe_query returns before reporting truncated. A separate 64,000-byte budget applies to each serialized response surface, retaining at least one complete row even if oversized.",
           "format": "string",
           "isRequired": false,
           "default": "10000"
         },
         {
           "name": "EUROSTAT_DATAFRAME_DROP_ENABLED",
-          "description": "Set to 'true' to list eurostat_dataframe_drop, which removes one staged table from a dataframe canvas and leaves its other tables in place. Off by default because a drop cannot be undone; staged tables expire with their canvas either way. Takes effect only with CANVAS_PROVIDER_TYPE=duckdb.",
+          "description": "Set to 'true' to list eurostat_dataframe_drop, which removes one staged table from a dataframe canvas and leaves its other tables in place. Off by default because a drop cannot be undone; staged tables expire with their canvas either way. Has no effect with CANVAS_PROVIDER_TYPE=none.",
           "format": "boolean",
           "isRequired": false,
           "default": "false"

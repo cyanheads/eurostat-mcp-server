@@ -283,8 +283,23 @@ async function expectDropUncallable(port: number): Promise<void> {
 }
 
 describe('dataframe tool registration', () => {
+  for (const [label, gate] of [
+    ['unset', {}],
+    ['empty', { CANVAS_PROVIDER_TYPE: '' }],
+  ] satisfies [string, Record<string, string>][]) {
+    it(`defaults the canvas to duckdb when CANVAS_PROVIDER_TYPE is ${label}`, async () => {
+      await withServer(gate, async (port) => {
+        expect(await listedTools(port)).toEqual([
+          ...CORE_TOOLS,
+          'eurostat_dataframe_describe',
+          'eurostat_dataframe_query',
+        ]);
+      });
+    });
+  }
+
   it('keeps every dataframe tool off tools/list without a canvas, naming each setting still missing', async () => {
-    await withServer({}, async (port) => {
+    await withServer({ CANVAS_PROVIDER_TYPE: 'none' }, async (port) => {
       expect(await listedTools(port)).toEqual(CORE_TOOLS);
 
       for (const name of ['eurostat_dataframe_describe', 'eurostat_dataframe_query']) {
@@ -305,15 +320,18 @@ describe('dataframe tool registration', () => {
   });
 
   it('names only the canvas for the drop tool when its own flag is already on', async () => {
-    await withServer({ EUROSTAT_DATAFRAME_DROP_ENABLED: 'true' }, async (port) => {
-      expect(await listedTools(port)).toEqual(CORE_TOOLS);
-      expect(await landingCard(port, 'eurostat_dataframe_drop')).toEqual({
-        disabled: true,
-        reason: CANVAS_OFF_REASON,
-        hint: 'CANVAS_PROVIDER_TYPE=duckdb',
-      });
-      await expectDropUncallable(port);
-    });
+    await withServer(
+      { CANVAS_PROVIDER_TYPE: 'none', EUROSTAT_DATAFRAME_DROP_ENABLED: 'true' },
+      async (port) => {
+        expect(await listedTools(port)).toEqual(CORE_TOOLS);
+        expect(await landingCard(port, 'eurostat_dataframe_drop')).toEqual({
+          disabled: true,
+          reason: CANVAS_OFF_REASON,
+          hint: 'CANVAS_PROVIDER_TYPE=duckdb',
+        });
+        await expectDropUncallable(port);
+      },
+    );
   });
 
   for (const flag of [undefined, 'false']) {

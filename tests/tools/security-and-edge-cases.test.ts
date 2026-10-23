@@ -197,8 +197,8 @@ describe('Input validation', () => {
       expect(() => eurostatSearchDatasets.input.parse({ query: 'GDP', limit: 0 })).toThrow();
     });
 
-    it('rejects limit above 100', () => {
-      expect(() => eurostatSearchDatasets.input.parse({ query: 'GDP', limit: 101 })).toThrow();
+    it('accepts a positive limit above 100 for handler clamping', () => {
+      expect(eurostatSearchDatasets.input.parse({ query: 'GDP', limit: 101 }).limit).toBe(101);
     });
 
     it('accepts limit at boundary values 1 and 100', () => {
@@ -254,12 +254,16 @@ describe('Input validation', () => {
       expect(() => eurostatDownloadDataset.input.parse({ dataset_code: '' })).toThrow();
     });
 
-    it('rejects a preview_limit outside 1..500', () => {
-      for (const preview_limit of [0, -1, 501, 10_000, 1.5]) {
+    it('rejects an invalid preview_limit while permitting positive over-cap integers', () => {
+      for (const preview_limit of [0, -1, 1.5, NaN, Infinity, '501']) {
         expect(() =>
           eurostatDownloadDataset.input.parse({ dataset_code: 'nama_10_gdp', preview_limit }),
         ).toThrow();
       }
+      expect(
+        eurostatDownloadDataset.input.parse({ dataset_code: 'nama_10_gdp', preview_limit: 10000 })
+          .preview_limit,
+      ).toBe(10000);
     });
 
     it('rejects a filters map whose values are not arrays of strings', () => {

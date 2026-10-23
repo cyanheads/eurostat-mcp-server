@@ -46,7 +46,7 @@ export interface BulkStats {
    * the rows are a prefix of the dataset rather than all of it.
    */
   budgetExceeded: boolean;
-  /** Decoded TSV bytes read. The unit the byte budget is enforced in. */
+  /** Decoded TSV bytes accepted for parsing, never more than the configured byte budget. */
   bytesRead: number;
   /** Whether the response body arrived gzip-compressed. */
   compressed: boolean;

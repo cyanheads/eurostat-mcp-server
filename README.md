@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.10.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/eurostat-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/eurostat-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/eurostat-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.10.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/eurostat-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/eurostat-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/eurostat-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -33,7 +33,7 @@ EU statistics from Eurostat: economy, demography, trade, health, and NUTS region
 
 ### Tools
 
-Three of the nine are listed only when the dataframe canvas is enabled (`CANVAS_PROVIDER_TYPE=duckdb`), and `eurostat_dataframe_drop` also needs `EUROSTAT_DATAFRAME_DROP_ENABLED=true`.
+The three `eurostat_dataframe_*` tools need the dataframe canvas, which is on by default and off with `CANVAS_PROVIDER_TYPE=none`; `eurostat_dataframe_drop` also needs `EUROSTAT_DATAFRAME_DROP_ENABLED=true`.
 
 | Tool | Description |
 |:---|:---|
@@ -59,7 +59,7 @@ The same metadata is available through `eurostat_get_dataset_info` for tool-only
 
 ### `eurostat_search_datasets` <sub>tool</sub>
 
-- `query` words are ANDed case-insensitively across each dataset's label, theme breadcrumb, and code, ignoring spacing beside punctuation (`Rev.2` finds `Rev. 2`); `limit` 1–100 (default 20), paged by passing `nextCursor` back as `cursor`
+- `query` words are ANDed case-insensitively across each dataset's label, theme breadcrumb, and code, ignoring spacing beside punctuation (`Rev.2` finds `Rev. 2`); `limit` is a positive integer (default 20), clamped to 100 with a notice. Page by passing `nextCursor` back as `cursor`; cursor calls ignore `limit`
 - Results carry `code`, `label`, `type` (`dataset` / `table`), period coverage, `obsCount`, `lastUpdated`, and `themePath`, with `totalMatches` across every page; fails as `no_match` (naming the words whose removal finds matches), `invalid_cursor`, or a retryable `upstream_fault` when no catalogue is loaded and Eurostat's table of contents is unreachable
 - If the Comext dataflow list cannot be loaded, results carry `comextListMissing` and a `notice`; a catalogue that could not be refreshed carries `catalogueLoadedAt`
 
@@ -90,7 +90,7 @@ The same metadata is available through `eurostat_get_dataset_info` for tool-only
 
 ### `eurostat_query_dataset` <sub>tool</sub>
 
-- `dataset_code` plus `filters` (`{dimension_code: [values]}`), `geo_level`, and either `since_period` / `until_period` (`2020`, `2020-Q1`, `2020-01`, down to `YYYY-Wnn` and `YYYY-Dnnn`) or `last_n_periods`; `preview_limit` 1–500 (default 50) sets the inline rows; `lang` is `EN`, `FR`, or `DE`
+- `dataset_code` plus `filters` (`{dimension_code: [values]}`), `geo_level`, and either `since_period` / `until_period` (`2020`, `2020-Q1`, `2020-01`, down to `YYYY-Wnn` and `YYYY-Dnnn`) or `last_n_periods`; `preview_limit` is a positive integer (default 50), clamped to 500 with a notice; `lang` is `EN`, `FR`, or `DE`
 - Each observation carries code/label pairs per dimension, a nullable `value`, `status` (OBS_FLAG), and `confStatus` (CONF_STATUS); `obsCount`, `missingObsCount`, and `timeRange` cover the whole match, `truncated` is true above 5,000 observations, and `unmatchedValues` names filter values that matched nothing
 - Fails as `not_found`, `no_results` (naming the unmatched values and the periods with no value), `invalid_dimension`, `invalid_period`, `conflicting_params`, a non-retryable `async_response` for a query too large to serve, `canvas_not_found`, or a retryable `upstream_fault` when the Statistics API is down
 
@@ -98,9 +98,9 @@ The same metadata is available through `eurostat_get_dataset_info` for tool-only
 
 ### `eurostat_download_dataset` <sub>tool</sub>
 
-- `dataset_code` plus the same `filters` map and `since_period` / `until_period` (no `last_n_periods`: the TSV keeps a column per period unless a range drops it); `preview_limit` 1–500 (default 50)
+- `dataset_code` plus the same `filters` map and `since_period` / `until_period` (no `last_n_periods`: the TSV keeps a column per period unless a range drops it); `preview_limit` is a positive integer (default 50), clamped to 500 with a notice
 - Returns `rowCount` (echoed as `totalCount`), `missingCount`, `periodRange`, and `bytesRead` for the whole download; fails as `not_found`, `invalid_dimension`, `invalid_period`, `filter_arity`, a non-retryable `async_queued` or `extraction_too_big`, `no_results`, `upstream_fault` (retryable when the SDMX endpoint is down), or `canvas_not_found`
-- The `EUROSTAT_BULK_MAX_BYTES` budget (default 50 MiB) stops a transfer mid-stream and returns what arrived with `budgetExceeded: true`
+- The `EUROSTAT_BULK_MAX_BYTES` budget (default 50 MiB decoded) retains complete observations within the permitted prefix and returns `budgetExceeded: true`. A budget too small for a complete header and usable observation fails as `byte_budget_exceeded`, with the configured limit and narrowing guidance. `bytesRead` counts accepted decoded bytes, never more than the budget; incomplete trailing rows are discarded.
 
 ---
 
@@ -114,7 +114,8 @@ The same metadata is available through `eurostat_get_dataset_info` for tool-only
 ### `eurostat_dataframe_query` <sub>tool</sub>
 
 - One read-only `SELECT` per call; chained statements, other verbs, and functions that read files or external data are rejected
-- Returns `columns`, `rows`, `rowCount`, and `truncated`, true past `CANVAS_DEFAULT_ROW_LIMIT` (default 10,000) rows; 64-bit integers arrive as strings. Fails as `missing_table`, `canvas_not_found`, or `canvas_disabled`
+- Returns `columns`, `rows`, `rowCount`, and required boolean `truncated`. Whole rows fit within `CANVAS_DEFAULT_ROW_LIMIT` (default 10,000) and 64,000 bytes independently for JSON-serialized `structuredContent` and `content[]`, including enrichment. At least one complete row is retained even if oversized. Cells render as lossless JSON, including nesting and quoted strings; 64-bit integers arrive as strings. Fails as `missing_table`, `canvas_not_found`, or `canvas_disabled`
+- A cut sets `truncated: true` and adds a notice. Page an unchanged deterministic SELECT with a total `ORDER BY` (tie-breakers required), `LIMIT` and `OFFSET`; advance by actual `rowCount`. Restart an initially unordered result sorted at offset zero. Volatile SQL and changing or expired tables cannot provide stable paging
 
 ---
 
@@ -137,11 +138,10 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 Eurostat-specific:
 
 - The Statistics API (JSON-stat 2.0) for slices, the SDMX 2.1 TSV bulk endpoint for whole datasets at roughly half the bytes, and the catalogue TOC cached in memory for 12 hours
-- The Statistics API (JSON-stat 2.0) for slices, the SDMX 2.1 TSV bulk endpoint for whole datasets at roughly half the bytes, and the catalogue TOC cached in memory for 12 hours
 - The Comext host's `DS-*` collections (detailed trade by CN8, HS, SITC, BEC and CPA, and PRODCOM) through the same tools. Filter every request, `freq` included, since trade flows mix annual and monthly series; aggregates such as `TOTAL`, `EU27_2020`, and `EXT_EU27_2020` double-count when summed with their members. PRODCOM text values arrive in `valueText` / `obs_value_text`
 - NUTS geo-level filtering (`aggregate` / `country` / `nuts1` / `nuts2` / `nuts3`), and OBS_FLAG and CONF_STATUS decoded into separate fields
 - Too-large-to-serve responses come back as non-retryable `async_response`, `extraction_too_big`, or `async_queued` errors that name the dimensions left to filter
-- With `CANVAS_PROVIDER_TYPE=duckdb`, a query match above 5,000 observations, or any bulk download, is staged whole as a SQL table (`canvasId` / `tableName` / `stagedRowCount`) for the dataframe tools. The `.mcpb` bundle strips the native DuckDB binding, so SQL analytics need the npm, Docker, or from-source install
+- A query match above 5,000 observations, or any bulk download, is staged whole as a SQL table (`canvasId` / `tableName` / `stagedRowCount`) on the DuckDB dataframe canvas, which is on by default. The `.mcpb` bundle strips the native DuckDB binding and runs with `CANVAS_PROVIDER_TYPE=none`, so SQL analytics need the npm, Docker, or from-source install
 
 Agent-friendly output:
 
@@ -263,15 +263,16 @@ cp .env.example .env
 |:---|:---|:---|
 | `EUROSTAT_BASE_URL` | Eurostat API base URL. | `https://ec.europa.eu/eurostat/api/dissemination` |
 | `EUROSTAT_COMEXT_BASE_URL` | Comext dissemination host, which serves every `DS-*` dataset code (detailed trade and PRODCOM). | `https://ec.europa.eu/eurostat/api/comext/dissemination` |
-| `EUROSTAT_REQUEST_TIMEOUT_MS` | HTTP request timeout, in ms. | `30000` |
-| `EUROSTAT_METADATA_TIMEOUT_MS` | Timeout for one dataset's SDMX structure, in ms. | `120000` (2 min) |
+| `EUROSTAT_REQUEST_TIMEOUT_MS` | Total allowance for one request, including retries, backoff and body reads, in ms. | `30000` |
+| `EUROSTAT_METADATA_TIMEOUT_MS` | Total allowance for one dataset's SDMX dataflow structure, including retries, backoff and body reads, in ms. | `120000` (2 min) |
 | `EUROSTAT_TOC_CACHE_TTL_MS` | Catalogue TOC cache lifetime, in ms. | `43200000` (12 h) |
-| `EUROSTAT_BULK_TIMEOUT_MS` | Timeout for one `eurostat_download_dataset` transfer, in ms. | `120000` (2 min) |
+| `EUROSTAT_BULK_TIMEOUT_MS` | Total allowance for one bulk transfer, including request retries, backoff and streaming, in ms. | `120000` (2 min) |
 | `EUROSTAT_BULK_MAX_BYTES` | Byte budget for one bulk download. | `52428800` (50 MiB) |
-| `CANVAS_PROVIDER_TYPE` | `duckdb` enables the dataframe canvas and its tools. | `none` |
+| `CANVAS_PROVIDER_TYPE` | Dataframe canvas backend; `none` disables the canvas and its tools. The `.mcpb` bundle sets `none`. | `duckdb` |
 | `CANVAS_TTL_MS` | Sliding lifetime of a staged canvas, in ms. | `86400000` (24 h) |
-| `CANVAS_DEFAULT_ROW_LIMIT` | Max rows one `eurostat_dataframe_query` returns before reporting `truncated`. | `10000` |
-| `EUROSTAT_DATAFRAME_DROP_ENABLED` | `true` lists `eurostat_dataframe_drop`; needs `CANVAS_PROVIDER_TYPE=duckdb`. | `false` |
+| `CANVAS_DEFAULT_ROW_LIMIT` | Max rows one `eurostat_dataframe_query` returns before reporting `truncated`; a separate 64,000-byte budget applies to each serialized response surface, retaining at least one complete row. | `10000` |
+| `EUROSTAT_CLAMP_LIMITS` | Clamp positive integer preview/search limits to 500/100 with a notice. `false` restores schemas rejecting over-cap inputs; zero, negatives, fractions and nonnumeric inputs are always rejected. Each clamp logs once and increments `eurostat.limit_clamps`, labelled by tool. | `true` |
+| `EUROSTAT_DATAFRAME_DROP_ENABLED` | `true` lists `eurostat_dataframe_drop`; no effect with `CANVAS_PROVIDER_TYPE=none`. | `false` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
 | `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. The server declares `stateless`; a set value overrides it. | `stateless` |

@@ -5,22 +5,27 @@
  */
 
 import { createApp, disabledTool } from '@cyanheads/mcp-ts-core';
-import { config } from '@cyanheads/mcp-ts-core/config';
+import { config, parseConfig, resetConfig } from '@cyanheads/mcp-ts-core/config';
 import { getServerConfig } from './config/server-config.js';
 import { eurostatDatasetResource } from './mcp-server/resources/definitions/eurostat-dataset.resource.js';
 import { eurostatBrowseThemes } from './mcp-server/tools/definitions/eurostat-browse-themes.tool.js';
 import { eurostatDataframeDescribe } from './mcp-server/tools/definitions/eurostat-dataframe-describe.tool.js';
 import { eurostatDataframeDrop } from './mcp-server/tools/definitions/eurostat-dataframe-drop.tool.js';
 import { eurostatDataframeQuery } from './mcp-server/tools/definitions/eurostat-dataframe-query.tool.js';
-import { eurostatDownloadDataset } from './mcp-server/tools/definitions/eurostat-download-dataset.tool.js';
+import { createEurostatDownloadDataset } from './mcp-server/tools/definitions/eurostat-download-dataset.tool.js';
 import { eurostatGetDatasetInfo } from './mcp-server/tools/definitions/eurostat-get-dataset-info.tool.js';
 import { eurostatGetDimensionValues } from './mcp-server/tools/definitions/eurostat-get-dimension-values.tool.js';
-import { eurostatQueryDataset } from './mcp-server/tools/definitions/eurostat-query-dataset.tool.js';
-import { eurostatSearchDatasets } from './mcp-server/tools/definitions/eurostat-search-datasets.tool.js';
+import { createEurostatQueryDataset } from './mcp-server/tools/definitions/eurostat-query-dataset.tool.js';
+import { createEurostatSearchDatasets } from './mcp-server/tools/definitions/eurostat-search-datasets.tool.js';
 import { setCanvas } from './services/canvas-accessor.js';
 import { initEurostatBulkService } from './services/eurostat-bulk/eurostat-bulk-service.js';
 import { initEurostatCatalogueService } from './services/eurostat-catalogue/eurostat-catalogue-service.js';
 import { initEurostatDataService } from './services/eurostat-data/eurostat-data-service.js';
+
+parseConfig();
+// DataCanvas defaults on; set CANVAS_PROVIDER_TYPE=none to disable it.
+process.env.CANVAS_PROVIDER_TYPE ||= 'duckdb';
+resetConfig();
 
 /**
  * The dataframe tools address tables on a canvas, so without one they have
@@ -72,6 +77,20 @@ function dataframeDropTool() {
       });
 }
 
+/**
+ * Registration is provisional until setup validates this same memoized config.
+ * Invalid parses are never cached: setup repeats the failure inside createApp's
+ * configuration boundary, prints its banner and exits before serving a call.
+ */
+function readClampLimits(): boolean {
+  try {
+    return getServerConfig().clampLimits;
+  } catch {
+    return true;
+  }
+}
+const clampLimits = readClampLimits();
+
 await createApp({
   name: 'eurostat-mcp-server',
   title: 'eurostat-mcp-server',
@@ -82,12 +101,12 @@ await createApp({
    */
   sessionMode: 'stateless',
   tools: [
-    eurostatSearchDatasets,
+    createEurostatSearchDatasets(clampLimits),
     eurostatBrowseThemes,
     eurostatGetDatasetInfo,
     eurostatGetDimensionValues,
-    eurostatQueryDataset,
-    eurostatDownloadDataset,
+    createEurostatQueryDataset(clampLimits),
+    createEurostatDownloadDataset(clampLimits),
     canvasEnabled ? eurostatDataframeDescribe : disabledTool(eurostatDataframeDescribe, CANVAS_OFF),
     canvasEnabled ? eurostatDataframeQuery : disabledTool(eurostatDataframeQuery, CANVAS_OFF),
     dataframeDropTool(),

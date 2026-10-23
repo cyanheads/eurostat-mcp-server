@@ -42,6 +42,9 @@ const mockDatasets = [
 ];
 
 describe('eurostatSearchDatasets', () => {
+  it('accepts oversized positive limits for bounded reads', () => {
+    expect(eurostatSearchDatasets.input.parse({ query: 'GDP', limit: 101 }).limit).toBe(101);
+  });
   beforeEach(() => {
     vi.mocked(getEurostatCatalogueService).mockReturnValue({
       search: vi.fn().mockResolvedValue({ datasets: mockDatasets, totalMatches: 2 }),
@@ -62,6 +65,43 @@ describe('eurostatSearchDatasets', () => {
     // No nextCursor from the service → last page, not truncated.
     expect(enrichment.truncated).toBe(false);
     expect(enrichment.nextCursor).toBeUndefined();
+  });
+
+  it('clamps the first page, composes notices, and leaves cursor calls unaccounted', async () => {
+    const search = vi
+      .fn()
+      .mockResolvedValue({ datasets: mockDatasets, totalMatches: 2, comextListMissing: true });
+    vi.mocked(getEurostatCatalogueService).mockReturnValue({ search } as never);
+    const ctx = createMockContext({ errors: eurostatSearchDatasets.errors });
+    const log = vi.spyOn(ctx.log, 'info');
+    await eurostatSearchDatasets.handler(
+      eurostatSearchDatasets.input.parse({ query: 'GDP', limit: 1000 }),
+      ctx,
+    );
+    expect(search).toHaveBeenCalledWith('GDP', 100, undefined, ctx);
+    expect(log.mock.calls.filter(([message]) => message === 'Read limit clamped')).toHaveLength(1);
+    expect(getEnrichment(ctx).notice).toMatch(
+      /limit requested 1000; applied 100.*were not searched/,
+    );
+    const result = await runToolContract(eurostatSearchDatasets, { query: 'GDP', limit: 1000 });
+    expect(result.structuredContent).toMatchObject({
+      notice: expect.stringContaining('limit requested 1000; applied 100'),
+    });
+    expect(result.content.map((b) => ('text' in b ? b.text : '')).join('\n')).toContain(
+      'limit requested 1000; applied 100',
+    );
+    log.mockClear();
+    const cursorCtx = createMockContext({ errors: eurostatSearchDatasets.errors });
+    const cursorLog = vi.spyOn(cursorCtx.log, 'info');
+    await eurostatSearchDatasets.handler(
+      eurostatSearchDatasets.input.parse({ query: 'GDP', limit: 1000, cursor: 'CURSOR' }),
+      cursorCtx,
+    );
+    expect(search).toHaveBeenLastCalledWith('GDP', 1000, 'CURSOR', cursorCtx);
+    expect(
+      cursorLog.mock.calls.filter(([message]) => message === 'Read limit clamped'),
+    ).toHaveLength(0);
+    expect(getEnrichment(cursorCtx).notice).not.toContain('applied 100');
   });
 
   it('forwards the cursor and surfaces pagination enrichment', async () => {

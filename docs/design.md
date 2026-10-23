@@ -86,7 +86,7 @@ Parsing is DOM-style: the first load of `DS-045409` builds its 23 MB body into a
 | `download_dataset` | SDMX data (TSV) | 4, the request only | 5.25–8.75 s |
 | `search_datasets`, `browse_themes`, cold start only | Catalogue table of contents | 4 | 5.25–8.75 s |
 
-Each call settles within one ladder, plus the time each refused attempt takes — milliseconds for a 5xx or a refused connection. Two calls can meet a second ladder: a filtered download whose structure read recovers inside its retries and whose data request then fails, and a `query_dataset` or unfiltered download refused as too large, whose hint then reads the dimension order from a structure endpoint that is down (that read keeps the hint generic rather than failing the call); both stay under 17.5 s of backoff. The bulk request is retried only before its body is read, so a retry repeats a request rather than a transfer; a timeout or a failure once the body is streaming surfaces on its first attempt. The catalogue reports an outage only on a cold start: once a catalogue is loaded, a failed refresh serves that copy instead, and a failed Comext merge never fails a call. The resource has no error contract, so a failed read reaches its client as the service threw it, with the same `reason`, `status`, and `retryable`, and no recovery hint.
+Each request's configured allowance bounds its whole retry ladder, including attempts, backoff, Retry-After and body consumption: 30 s by default for Statistics, structure definitions, content constraints and catalogue loads; 120 s for the metadata dataflow and bulk transfer. Deadline expiry remains Timeout with `retry_deadline_exceeded`; caller cancellation keeps precedence. Shared metadata and catalogue loads own detached deadlines, so cancelling a waiter leaves the cache fill and other waiters running. The Comext list retains its single-attempt policy. A filtered bulk call first reads the structure under its own request allowance, then starts the separately budgeted bulk transfer. The successful bulk request's body timer receives only the allowance left after retries; a timeout or streaming failure never restarts the transfer. Once a catalogue is loaded, a failed refresh serves that copy instead, and a failed Comext merge never fails a call. The dataset resource carries service error data without a tool recovery hint.
 
 ---
 
@@ -96,20 +96,23 @@ Each call settles within one ladder, plus the time each refused attempt takes �
 |:--------|:---------|:------------|
 | `EUROSTAT_BASE_URL` | No | Override API base URL (default: `https://ec.europa.eu/eurostat/api/dissemination`) |
 | `EUROSTAT_COMEXT_BASE_URL` | No | Comext dissemination host, serving every `DS-*` dataset code (default: `https://ec.europa.eu/eurostat/api/comext/dissemination`) |
-| `EUROSTAT_REQUEST_TIMEOUT_MS` | No | HTTP request timeout in ms (default: `30000`) |
-| `EUROSTAT_METADATA_TIMEOUT_MS` | No | HTTP timeout for one dataset's SDMX dataflow structure in ms, held separate because it carries every code's label — 23 MB for `DS-045409` (default: `120000` — 2 minutes) |
+| `EUROSTAT_REQUEST_TIMEOUT_MS` | No | Total request allowance across retries, backoff and body reads in ms (default: `30000`) |
+| `EUROSTAT_METADATA_TIMEOUT_MS` | No | Total SDMX dataflow allowance across retries, backoff and body reads in ms, held separate because it carries every code's label — 23 MB for `DS-045409` (default: `120000` — 2 minutes) |
 | `EUROSTAT_TOC_CACHE_TTL_MS` | No | How long a fetched catalogue TOC stays usable before the next catalogue call refreshes it, in ms (default: `43200000` — 12 hours) |
-| `EUROSTAT_BULK_TIMEOUT_MS` | No | HTTP timeout for one `download_dataset` transfer in ms, held separate because a bulk body streams for minutes (default: `120000` — 2 minutes) |
+| `EUROSTAT_BULK_TIMEOUT_MS` | No | Total bulk allowance across request retries, backoff and streaming in ms (default: `120000` — 2 minutes) |
 | `EUROSTAT_BULK_MAX_BYTES` | No | Byte budget for one `download_dataset` transfer, counted on the decoded TSV and enforced while streaming (default: `52428800` — 50 MiB) |
-| `CANVAS_PROVIDER_TYPE` | No | `duckdb` enables the dataframe canvas — `dataframe_describe` and `dataframe_query` become callable, `query_dataset` stages a match above 5,000 observations, and `download_dataset` retains a whole bulk download rather than only its preview (default: `none`) |
+| `CANVAS_PROVIDER_TYPE` | No | Dataframe canvas backend. With `duckdb`, `dataframe_describe` and `dataframe_query` are callable, `query_dataset` stages a match above 5,000 observations, and `download_dataset` retains a whole bulk download rather than only its preview; `none` disables all of that. The `.mcpb` manifest sets `none` (default: `duckdb`) |
 | `CANVAS_TEMP_PATH` | No | Parent directory for DuckDB spill files; the provider creates a private `mcp-canvas-XXXXXX` directory inside it, so it must be writable by the server process (default: the OS temp directory) |
 | `CANVAS_TTL_MS` | No | Sliding lifetime of a staged canvas in ms (default: `86400000` — 24 hours) |
-| `CANVAS_DEFAULT_ROW_LIMIT` | No | Max rows one `dataframe_query` response carries before reporting `truncated` (default: `10000`) |
-| `EUROSTAT_DATAFRAME_DROP_ENABLED` | No | `true` makes `dataframe_drop` callable; takes effect only beside `CANVAS_PROVIDER_TYPE=duckdb`. Parsed with `z.stringbool()`, so `false` disables and an unrecognised value fails startup (default: `false`) |
+| `CANVAS_DEFAULT_ROW_LIMIT` | No | Max rows one `dataframe_query` response carries; a separate 64,000-byte budget applies to each serialized surface, retaining at least one complete row even if oversized (default: `10000`) |
+| `EUROSTAT_CLAMP_LIMITS` | No | Clamp positive integer preview/search limits to 500/100 with a notice. `false` restores rejecting maximum schemas; parsed with `z.stringbool()` (default: `true`) |
+| `EUROSTAT_DATAFRAME_DROP_ENABLED` | No | `true` makes `dataframe_drop` callable; has no effect with `CANVAS_PROVIDER_TYPE=none`. Parsed with `z.stringbool()`, so `false` disables and an unrecognised value fails startup (default: `false`) |
 
-No API keys required. The canvas variables are framework-owned (`@cyanheads/mcp-ts-core`), not part of this server's own Zod config schema. `@duckdb/node-api` is a runtime dependency, so every install and the published image already carry the binding and `CANVAS_PROVIDER_TYPE` is the only switch.
+No API keys required. The canvas variables are framework-owned (`@cyanheads/mcp-ts-core`), not part of this server's own Zod config schema; the framework defaults `CANVAS_PROVIDER_TYPE` to `none`, and `src/index.ts` sets `duckdb` when it is unset or empty. `@duckdb/node-api` is a runtime dependency, so every install and the published image already carry the binding and `CANVAS_PROVIDER_TYPE` is the only switch.
 
 ---
+
+The limit policy is selected before tool registration. By default positive integer previews are clamped to 500 and first-page searches to 100; defaults remain 50 and 20. `EUROSTAT_CLAMP_LIMITS=false` restores rejecting maximum schemas. Zero, negative, fractional, non-finite and nonnumeric limits remain invalid. One log and one `eurostat.limit_clamps` counter increment, labelled by tool, record each clamp. The requested and applied values join existing notices; all preview guidance uses the applied value. Cursor searches ignore the supplied limit and record no clamp. Integer validation uses `multipleOf(1)` on the default-on schema because Zod's `int()` also advertises a safe-integer maximum.
 
 ## Implementation Order
 
@@ -288,7 +291,7 @@ Paginated with the framework's opaque-cursor primitives (`encodeCursor` / `decod
 
 **Input:**
 - `query: string` — search terms (tokenized, AND-matched across label + theme_path + code, with spacing beside punctuation ignored in that text)
-- `limit: number` (default 20, max 100) — page size
+- `limit: number` (positive integer, default 20) — first-page size, clamped to 100 with a notice by default; ignored on cursor calls, whose page size is fixed by their cursor
 - `cursor: string?` — opaque pagination cursor from a prior call's `next_cursor`; omit for the first page
 
 **Output:**
@@ -428,7 +431,7 @@ The primary data-fetching tool. Accepts dimension filters as a map and returns d
 - `since_period: string?` — e.g., `"2020"`, `"2023-Q1"`, `"2024-01"`. Use `last_n_periods` instead for the N most recent periods without knowing the end date. See **Period literals** below.
 - `until_period: string?` — e.g., `"2024"`. Omit for data through the latest available period.
 - `last_n_periods: number?` — N most recent periods; mutually exclusive with `since_period`/`until_period`. N counts back from the dataset's latest period, not from the latest period published for the filtered slice, so a slice that has not yet published the dataset's latest period can come back empty.
-- `preview_limit: number?` (1–500, default 50) — deterministic inline prefix only; does not reduce the match or alter the staging threshold
+- `preview_limit: number?` (positive integer, default 50, clamped to 500 with a notice) — deterministic inline prefix only; does not reduce the match or alter the staging threshold
 - `lang: "EN"|"FR"|"DE"?` (default: `EN`)
 
 **Output:**
@@ -493,17 +496,17 @@ The dimension order costs one structure-definition request, a few KB whatever th
 2. The **queue envelope** on HTTP 200. A `syncResponse` ticket parsed as TSV yields a header row of XML and no observations — a successful-looking empty download. The body is classified as XML before the header parse rather than after.
 3. **Data**, possibly gzipped with no `Content-Encoding`.
 
-**Byte budget, enforced mid-transfer.** The body is chunked with no `Content-Length`, so a limit checked after the fact would already have paid for the whole transfer. The budget counts decoded bytes as they arrive and cancels the stream the moment it is spent. Counting *decoded* rather than wire bytes is the uniform measure across both encodings, and since a gzip body is never larger than what it expands to, bounding the decoded size bounds the transfer too.
+**Byte budget, enforced mid-transfer.** The body is chunked with no `Content-Length`, so a limit checked after the fact would already have paid for the whole transfer. The budget admits only the allowed decoded-byte prefix, independent of plain or gzip chunk boundaries, and cancels the stream when more bytes arrive. `bytesRead` counts bytes accepted for parsing, never more than the configured budget.
 
 **No canvas until the first row.** The handler pulls one row off the stream before it acquires a canvas. A download with no populated cells — Eurostat answers a filter combination or range that misses the series with a header-only TSV — fails as `no_results` there, exactly as on a deployment without a canvas: no canvas is minted, and a caller-supplied `canvas_id` gains no 0-row table and is not even looked up. The row stream is closed on every exit, so a canvas that cannot be acquired still cancels the response body.
 
-Overspend truncates rather than throws. The caller has already paid for everything downloaded; discarding it to raise an error trades a usable prefix for nothing. The response carries `budgetExceeded: true`, `bytesRead`, and a notice naming `EUROSTAT_BULK_MAX_BYTES` and the filters that would fit the dataset inside it. The line the budget cut in half is dropped — only complete lines are parsed — so a truncated download never emits a row with silently missing fields.
+When the prefix carries observations, overspend returns `budgetExceeded: true`, `bytesRead`, and a notice naming `EUROSTAT_BULK_MAX_BYTES` and narrowing controls. The line or UTF-8 character cut by the budget is discarded. A prefix too short for a complete header or usable observation fails locally as `byte_budget_exceeded` (ValidationError), with `maxBytes`, `bytesRead`, `rowCount` and narrowing guidance. A genuinely empty body remains an upstream failure, while a complete table without observations remains `no_results`.
 
 **Input:**
 - `dataset_code: string`
 - `filters: Record<string, string[]>` (default `{}`) — blank and whitespace-only values are dropped, and a dimension left with none is unfiltered, as an empty array is, so `{"geo": [""]}` builds no key and `["", "DE"]` is `["DE"]`. The normalized set feeds the dimension-order read, the key, `appliedQuery`, and the `extraction_too_big` hint
 - `since_period?` / `until_period?: string` → `startPeriod` / `endPeriod`, checked as **Period literals** above before any request
-- `preview_limit: number` (1–500, default 50) — inline rows
+- `preview_limit: number` (positive integer, default 50, clamped to 500 with a notice) — inline rows
 - `canvas_id?: string` — `CanvasIdSchema`, the minted 10-character id
 
 **Output:** `datasetCode`, `dimensionsUsed` (read from the TSV header), `rowCount`, `missingCount`, `periodRange`, `bytesRead`, `compressed`, `budgetExceeded`, `observations[]` (the preview), and `canvasId` / `tableName` / `stagedRowCount` when something was staged. Enrichment adds `appliedQuery`, `totalCount` (equal to `rowCount`), and a `notice` composed of the byte-budget sentence when it applies, a preview sentence when `preview_limit` returns fewer rows than were downloaded, and the staged or no-canvas sentence. The no-canvas sentence suggests a narrower `query_dataset` only when the download holds more rows than `preview_limit` can ever return (500); below that it says every row came back, or names the `preview_limit` that returns them all. A short preview is not `truncated`: the download is complete, and `budgetExceeded` is the completeness signal.
@@ -523,6 +526,10 @@ The SQL surface over what `query_dataset`, `download_dataset`, and `get_dimensio
 - `sql: string` (query only) — a single read-only `SELECT`
 
 **Output:** `describe` returns `canvasId`, `expiresAt`, and `tables[]` (`name`, `kind`, `rowCount`, `expiresAt?`, `columns[]`). `query` returns `canvasId`, `columns[]`, `rows[]`, `rowCount`, `truncated`. 64-bit integer results come back as strings — the framework's JSON-safe row shape — so `COUNT(*)` is a string unless cast.
+
+SQL cells render as JSON on the text surface, preserving nested LIST/STRUCT values, nulls, quoted strings and escaped line breaks. SQL retrieval returns a whole-row prefix bounded by both `CANVAS_DEFAULT_ROW_LIMIT` and 64,000 bytes independently for JSON-serialized `structuredContent` and `content[]`, including the separate enrichment trailer block. At least one complete row is retained even if it alone exceeds the byte budget. `rowCount` is the returned count; required boolean `truncated` says rows were omitted, and only a cut adds a notice. A full result that fits without a notice stays complete even when a partial prefix plus its notice would exceed the budget.
+
+Continuation keeps the same deterministic SELECT over unchanged staged tables, a total `ORDER BY` with tie-breakers, and `LIMIT`/`OFFSET` advancing by actual returned `rowCount`. An initially unordered result restarts sorted at offset zero. Volatile expressions and changing or expired tables do not support stable paging. SQL retrieval creates no cursor or materialized snapshot.
 
 **Errors:**
 - `canvas_disabled` (ServiceUnavailable, non-retryable): the deployment runs without a canvas. Recovery is `query_dataset` with narrower filters
@@ -624,7 +631,7 @@ Both come from the canvas, which words them for staging — re-run the tool that
 
 > **Superseded 2026-08-04 — see "Why the canvas earns its keep now" below.** The reasoning above holds only while a result set fits in the response. It does not: `query_dataset` caps the observations it returns at 5,000, and a filtered query on a mid-sized dataset routinely matches more (`nama_10_gdp` filtered to one unit, last four periods, matches ~6.6k). "The agent can analyse it in subsequent steps" was true of the rows it received and false of the rows it never saw, which no follow-up call could reach — there is no cursor, and the only recovery was to hand-partition the query across dimension values.
 
-**Why the canvas earns its keep now:** the rows past the cap are already in memory. `query_dataset` downloads and parses the entire upstream body before decoding starts — the cap bounds object construction, not the transfer — so staging the full match costs no additional request to Eurostat and no re-fetch. That makes this the cheapest possible way to close the gap. It also passes both gates the framework's canvas guidance sets: the data is analytical rather than a discovery surface (an agent writes `GROUP BY geo` over observations, which is exactly the workload), and it is too large to inline (that is the premise). The canvas stays opt-in and off by default, so a deployment that does not want a native dependency loses nothing it had.
+**Why the canvas earns its keep now:** the rows past the cap are already in memory. `query_dataset` downloads and parses the entire upstream body before decoding starts — the cap bounds object construction, not the transfer — so staging the full match costs no additional request to Eurostat and no re-fetch. That makes this the cheapest possible way to close the gap. It also passes both gates the framework's canvas guidance sets: the data is analytical rather than a discovery surface (an agent writes `GROUP BY geo` over observations, which is exactly the workload), and it is too large to inline (that is the premise). The canvas is on by default; a deployment that does not want it sets `CANVAS_PROVIDER_TYPE=none` and keeps the inline-only behaviour.
 
 ---
 
@@ -658,7 +665,7 @@ Both come from the canvas, which words them for staging — re-run the tool that
 
 **Canvas tables are in-memory and per-process:** a restart drops every staged table, and a `canvas_id` issued by one process is meaningless to another. Behind a load balancer, a follow-up `dataframe_query` must reach the same instance that staged the table. Both are properties of the framework's canvas, not of this server; a `canvas_id` that no longer resolves fails as `canvas_not_found` with a recovery hint to re-run the query.
 
-**No canvas from a `.mcpb` bundle:** the bundle strips platform-specific native bindings so it stays portable and inside the registry size cap, which removes DuckDB. A bundle install runs the six core tools; SQL analytics needs the npm, Docker, or from-source install.
+**No canvas from a `.mcpb` bundle:** the bundle strips platform-specific native bindings so it stays portable and inside the registry size cap, which removes DuckDB. Its manifest sets `CANVAS_PROVIDER_TYPE=none`, so a bundle install runs the six core tools rather than starting with a canvas that fails on its first staging call; SQL analytics needs the npm, Docker, or from-source install.
 
 ---
 
@@ -710,6 +717,7 @@ Both come from the canvas, which words them for staging — re-run the tool that
 | 2026-10-03 | Re-throw an unwritable `CANVAS_TEMP_PATH` as `ConfigurationError` (`canvas_unavailable`), superseding `ServiceUnavailable` | Since framework 0.13.9 the provider creates a private `mcp-canvas-XXXXXX` directory inside `CANVAS_TEMP_PATH` and fails canvas creation as `ConfigurationError`, with the filesystem error on `cause`. Its message names the variable, but the errno never reaches the caller and `CANVAS_PROVIDER_TYPE=none` goes unmentioned, so the re-throw stays to add both. It keeps the framework's code: `ServiceUnavailable` counted a local misconfiguration as an upstream outage in `mcp.error.category`. |
 | 2026-08-04 | `dataframe_describe` omits the canvas's `approxSizeBytes` | The framework populates that field from DuckDB's `duckdb_tables().estimated_size`, which is an estimated row *cardinality*, not a byte size — measured, it comes back equal to `rowCount` (6,607 and 7,882 on two staged tables). Surfacing it would report a row count under a byte-shaped name, and `row_count` already carries that number exactly. |
 | 2026-08-04 | `@duckdb/node-api` as a runtime dependency, with no build-time gate on it | The canvas is already gated at runtime by `CANVAS_PROVIDER_TYPE` (`none` by default), so the ~110 MB binding sits inert until an operator turns the feature on. Gating the install on top of that — a dev dependency plus a Docker build arg — would mean the published image, which is built with no custom build args, could never list the dataframe tools at all. Shipping the binding in every install and image leaves one switch to reason about. The `.mcpb` bundle is the one surface that cannot run the canvas: it strips platform-specific native bindings to stay portable and inside the registry size cap. |
+| 2026-10-19 | Default `CANVAS_PROVIDER_TYPE` to `duckdb`, with the `.mcpb` manifest setting `none`, superseding "Canvas stays off by default" above | Every npm install and image already carries the binding, so off by default kept the dataframe tools and full-match staging behind a variable most deployments never set. The framework default stays `none`, so `src/index.ts` runs the framework's config parse first (it loads `.env` without overwriting set variables, so an earlier default would mask a `.env` value of `none`), applies the default with `\|\|=` so an empty value from a client config gets it too, and drops the cached parse. The bundle has no DuckDB binding, so with `duckdb` it would start and then fail on its first staging call. |
 | 2026-08-04 | Add `eurostat_download_dataset` over the SDMX 2.1 TSV endpoint rather than widening `query_dataset` | The two answer different questions and have different failure modes. `query_dataset` fetches a filtered slice as JSON-stat and decodes it in memory; the bulk path streams a whole dataset in a format with different error encoding (XML SOAP), different transport behaviour (undeclared gzip, chunked), and a size bound this server has to impose itself. Folding that into one tool would mean one description covering two shapes and one error contract covering both fault vocabularies. |
 | 2026-08-04 | Take filters as a dimension map and build the positional key server-side | The SDMX key must carry one position per dimension in dataset order; a count mismatch is faultcode 140, not a partial match. Emitting a position for every dimension of the resolved order makes correct arity structural rather than the caller's problem. The residual failure — a filter naming a dimension the dataset does not have — is caught locally, before the request, and answered with the real dimension list. |
 | 2026-08-04 | Resolve the dimension order only when a filter is present, and omit the key segment otherwise | An unfiltered download needs no key, and the TSV header names the dimensions anyway, so the metadata request is skipped. An all-wildcard key of the right arity is accepted upstream, but omitting it asks the same question without staking the request on this server's copy of the dimension order still being current. |

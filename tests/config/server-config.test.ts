@@ -22,6 +22,27 @@ afterEach(() => {
 });
 
 describe('getServerConfig', () => {
+  for (const [raw, expected] of [
+    ['true', true],
+    ['false', false],
+    ['0', false],
+    ['yes', true],
+    ['', true],
+  ] as const) {
+    it(`parses EUROSTAT_CLAMP_LIMITS=${JSON.stringify(raw)}`, async () => {
+      vi.stubEnv('EUROSTAT_CLAMP_LIMITS', raw);
+      expect((await loadConfig())().clampLimits).toBe(expected);
+    });
+  }
+  it('rejects a malformed clamp flag naming its environment variable', async () => {
+    vi.stubEnv('EUROSTAT_CLAMP_LIMITS', 'maybe');
+    expect(await loadConfig()).toThrow(
+      expect.objectContaining({
+        code: JsonRpcErrorCode.ConfigurationError,
+        message: expect.stringContaining('EUROSTAT_CLAMP_LIMITS'),
+      }),
+    );
+  });
   it('applies the documented defaults when nothing is set', async () => {
     for (const name of [
       'EUROSTAT_BASE_URL',
@@ -32,6 +53,7 @@ describe('getServerConfig', () => {
       'EUROSTAT_BULK_TIMEOUT_MS',
       'EUROSTAT_BULK_MAX_BYTES',
       'EUROSTAT_DATAFRAME_DROP_ENABLED',
+      'EUROSTAT_CLAMP_LIMITS',
     ]) {
       vi.stubEnv(name, undefined);
     }
@@ -45,6 +67,7 @@ describe('getServerConfig', () => {
       bulkTimeoutMs: 120_000,
       bulkMaxBytes: 52_428_800,
       dataframeDropEnabled: false,
+      clampLimits: true,
     });
   });
 

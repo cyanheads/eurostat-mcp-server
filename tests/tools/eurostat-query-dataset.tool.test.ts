@@ -138,7 +138,10 @@ describe('eurostatQueryDataset', () => {
     expect(
       eurostatQueryDataset.input.parse({ dataset_code: 'x', preview_limit: 500 }).preview_limit,
     ).toBe(500);
-    for (const preview_limit of [0, -1, 1.5, 501]) {
+    expect(
+      eurostatQueryDataset.input.parse({ dataset_code: 'x', preview_limit: 501 }).preview_limit,
+    ).toBe(501);
+    for (const preview_limit of [0, -1, 1.5, NaN, Infinity, '501']) {
       expect(() =>
         eurostatQueryDataset.input.parse({ dataset_code: 'x', preview_limit }),
       ).toThrow();
@@ -549,6 +552,30 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
   });
 
   describe('with a canvas', () => {
+    it('clamps over-cap previews without changing full-match counts or staging threshold', async () => {
+      fetchMock.mockImplementation(async () =>
+        okResponse(jsonStatBody(PERIODS.slice(0, 6), GEOS, 550)),
+      );
+      const result = await runToolContract(
+        eurostatQueryDataset,
+        { dataset_code: 'nama_10_gdp', preview_limit: 1000 },
+        { context: { tenantId: 'default' } },
+      );
+      expect(result.isError).not.toBe(true);
+      const structured = result.structuredContent as { observations: unknown[]; notice: string };
+      expect(structured.observations).toHaveLength(500);
+      expect(result.structuredContent).toMatchObject({
+        obsCount: 550,
+        truncated: false,
+        notice: expect.stringMatching(
+          /preview_limit requested 1000; applied 500.*preview_limit=500 returns the first 500 of 550/,
+        ),
+      });
+      expect(result.structuredContent).not.toHaveProperty('tableName');
+      expect(result.content.map((b) => ('text' in b ? b.text : '')).join('\n')).toContain(
+        structured.notice,
+      );
+    });
     for (const [label, matchSize, previewLimit, expectedInline] of [
       ['shorter than the match', 5, 3, 3],
       ['equal to the match', 5, 5, 5],

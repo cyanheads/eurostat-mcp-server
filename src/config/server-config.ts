@@ -7,6 +7,12 @@ import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
+  clampLimits: z
+    .stringbool()
+    .default(true)
+    .describe(
+      'Clamp positive read limits to preview 500 and search 100 with a notice. False restores rejecting maximum schemas.',
+    ),
   baseUrl: z
     .string()
     .url()
@@ -24,14 +30,16 @@ const ServerConfigSchema = z.object({
     .int()
     .positive()
     .default(30_000)
-    .describe('HTTP request timeout in milliseconds'),
+    .describe(
+      'Total allowance for one Eurostat request, including retries, backoff and body consumption, in milliseconds',
+    ),
   metadataTimeoutMs: z.coerce
     .number()
     .int()
     .positive()
     .default(120_000)
     .describe(
-      "HTTP timeout for one dataset's SDMX dataflow structure, in milliseconds. Held separate from EUROSTAT_REQUEST_TIMEOUT_MS because the structure carries a label for every code the dataset uses: 23 MB, uncompressed, for the CN8 trade collection DS-045409. Defaults to 2 minutes.",
+      "Total allowance for one dataset's SDMX dataflow structure, including retries, backoff and body consumption, in milliseconds. Held separate from EUROSTAT_REQUEST_TIMEOUT_MS because the structure carries a label for every code the dataset uses: 23 MB, uncompressed, for the CN8 trade collection DS-045409. Defaults to 2 minutes.",
     ),
   tocCacheTtlMs: z.coerce
     .number()
@@ -47,7 +55,7 @@ const ServerConfigSchema = z.object({
     .positive()
     .default(120_000)
     .describe(
-      'HTTP timeout for one SDMX bulk download, in milliseconds. Held separate from EUROSTAT_REQUEST_TIMEOUT_MS because a bulk body streams for minutes where a metadata call answers in seconds. Defaults to 2 minutes.',
+      'Total allowance for one SDMX bulk download, including request retries, backoff and streaming body consumption, in milliseconds. Held separate from EUROSTAT_REQUEST_TIMEOUT_MS because a bulk body can take longer than a metadata call. Defaults to 2 minutes.',
     ),
   bulkMaxBytes: z.coerce
     .number()
@@ -61,7 +69,7 @@ const ServerConfigSchema = z.object({
     .stringbool()
     .default(false)
     .describe(
-      'Register eurostat_dataframe_drop, which removes one staged table from a dataframe canvas. Off by default: a drop cannot be undone, and staged tables already expire with their canvas. Takes effect only with CANVAS_PROVIDER_TYPE=duckdb.',
+      'Register eurostat_dataframe_drop, which removes one staged table from a dataframe canvas. Off by default: a drop cannot be undone, and staged tables already expire with their canvas. Has no effect with CANVAS_PROVIDER_TYPE=none.',
     ),
 });
 
@@ -69,6 +77,7 @@ let _config: z.infer<typeof ServerConfigSchema> | undefined;
 
 export function getServerConfig(): z.infer<typeof ServerConfigSchema> {
   _config ??= parseEnvConfig(ServerConfigSchema, {
+    clampLimits: 'EUROSTAT_CLAMP_LIMITS',
     baseUrl: 'EUROSTAT_BASE_URL',
     comextBaseUrl: 'EUROSTAT_COMEXT_BASE_URL',
     requestTimeoutMs: 'EUROSTAT_REQUEST_TIMEOUT_MS',

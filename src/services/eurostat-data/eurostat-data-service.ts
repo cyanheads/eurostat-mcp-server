@@ -319,10 +319,10 @@ export class EurostatDataService {
     const url = this.buildSdmxUrl(resource, datasetCode).toString();
     const fetchCtx = withExtra(ctx, { endpoint: `sdmx-${resource}`, datasetCode });
     return withRetry(
-      async () => {
+      async (attempt) => {
         try {
           const response = await fetchWithTimeout(url, timeoutMs, fetchCtx, {
-            ...(signal && { signal }),
+            signal: attempt.signal,
             expectedStatuses: [404],
           });
           return await response.text();
@@ -341,6 +341,7 @@ export class EurostatDataService {
         operation: 'fetchSdmxMetadata',
         context: fetchCtx,
         baseDelayMs: 1000,
+        deadlineMs: timeoutMs,
         ...(signal && { signal }),
       },
     ).catch((error: unknown) => {
@@ -446,11 +447,11 @@ export class EurostatDataService {
     const { requestTimeoutMs } = getServerConfig();
     const fetchCtx = withExtra(ctx, { endpoint: 'statistics-data' });
     return withRetry(
-      async () => {
+      async (attempt) => {
         let response: Awaited<ReturnType<typeof fetchWithTimeout>>;
         try {
           response = await fetchWithTimeout(url.toString(), requestTimeoutMs, fetchCtx, {
-            signal: ctx.signal,
+            signal: attempt.signal,
             // 400 (invalid dimension / conflicting params), 404 (unknown dataset) and 413
             // (extraction too large) are modeled outcomes reclassified below into the
             // declared error contract, not service failures — log them at debug. The
@@ -509,7 +510,13 @@ export class EurostatDataService {
         this.checkResponseErrors(parsed, url.toString());
         return parsed;
       },
-      { operation: 'fetchJsonStat', context: fetchCtx, baseDelayMs: 1000, signal: ctx.signal },
+      {
+        operation: 'fetchJsonStat',
+        context: fetchCtx,
+        baseDelayMs: 1000,
+        signal: ctx.signal,
+        deadlineMs: requestTimeoutMs,
+      },
     ).catch((error: unknown) => {
       if (ctx.signal.aborted) throw error;
       throw (

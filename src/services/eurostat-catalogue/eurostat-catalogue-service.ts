@@ -35,7 +35,7 @@ const MAX_PAGE_SIZE = 100;
 
 /**
  * How long a failed refresh keeps the stale cache in service before upstream is
- * tried again. `withRetry` bounds one attempt; this bounds the attempt rate, so
+ * tried again. `withRetry` bounds one load; this bounds the attempt rate, so
  * an upstream outage costs one fetch per minute rather than one per call. A failed
  * Comext merge is retried on the same schedule.
  */
@@ -247,12 +247,25 @@ export class EurostatCatalogueService {
   /** The Comext host's dataflow list — the `DS-*` collections the TOC does not carry. */
   private async fetchComextFlows(ctx: Context): Promise<SdmxDataflowSummary[]> {
     const { comextBaseUrl, requestTimeoutMs } = getServerConfig();
-    const response = await fetchWithTimeout(
-      `${comextBaseUrl}/sdmx/2.1/dataflow/ESTAT`,
-      requestTimeoutMs,
-      withExtra(ctx, { endpoint: 'comext-dataflows' }),
+    const fetchCtx = withExtra(ctx, { endpoint: 'comext-dataflows' });
+    const text = await withRetry(
+      async ({ signal }) => {
+        const response = await fetchWithTimeout(
+          `${comextBaseUrl}/sdmx/2.1/dataflow/ESTAT`,
+          requestTimeoutMs,
+          fetchCtx,
+          { signal },
+        );
+        return response.text();
+      },
+      {
+        operation: 'fetchComextFlows',
+        context: fetchCtx,
+        maxRetries: 0,
+        deadlineMs: requestTimeoutMs,
+      },
     );
-    const flows = parseSdmxDataflowList(await response.text());
+    const flows = parseSdmxDataflowList(text);
     // An empty list is a broken answer, not an empty host: merging it would report every
     // DS-* code as undisseminated, so it is retried like any other failure.
     if (flows.length === 0) throw new Error('The Comext dataflow list listed no dataflows');
@@ -316,11 +329,12 @@ export class EurostatCatalogueService {
     ctx.log.info('Fetching Eurostat TOC');
 
     const text = await withRetry(
-      async () => {
+      async ({ signal }) => {
         const response = await fetchWithTimeout(
           `${baseUrl}/catalogue/toc/txt?lang=en`,
           requestTimeoutMs,
           fetchCtx,
+          { signal },
         );
         const body = await response.text();
         if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(body)) {
@@ -330,7 +344,7 @@ export class EurostatCatalogueService {
         }
         return body;
       },
-      { operation: 'fetchToc', context: fetchCtx, baseDelayMs: 1000 },
+      { operation: 'fetchToc', context: fetchCtx, baseDelayMs: 1000, deadlineMs: requestTimeoutMs },
     ).catch((error: unknown) => {
       // The load is shared and runs without a caller's signal, so nothing here is a cancellation.
       throw (

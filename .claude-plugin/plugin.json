@@ -22,12 +22,22 @@
     "statistics",
     "open-data"
   ],
+  "userConfig": {
+    "clamp_limits": {
+      "type": "boolean",
+      "title": "Clamp read limits",
+      "description": "Clamp positive integer preview/search limits to 500/100 with a notice. Disable to reject over-cap inputs.",
+      "default": true,
+      "required": false
+    }
+  },
   "mcpServers": {
     "eurostat-mcp-server": {
       "command": "npx",
       "args": ["-y", "@cyanheads/eurostat-mcp-server"],
       "env": {
-        "MCP_TRANSPORT_TYPE": "stdio"
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "EUROSTAT_CLAMP_LIMITS": "${user_config.clamp_limits}"
       }
     }
   }

@@ -97,6 +97,13 @@ function mockBody(chunks: Uint8Array[]): void {
   vi.mocked(fetchWithTimeout).mockResolvedValue(responseOf(chunks));
 }
 
+/** Consume the full row source so assertions include streaming failures and final counters. */
+async function collectRows(source: AsyncIterable<BulkRow>): Promise<BulkRow[]> {
+  const rows: BulkRow[] = [];
+  for await (const row of source) rows.push(row);
+  return rows;
+}
+
 async function drain(
   svc: EurostatBulkService,
   dataset = 'nama_10_gdp',
@@ -576,6 +583,107 @@ describe('EurostatBulkService — streaming', () => {
     );
     const HEADER_CHUNK = utf8('freq,geo\\TIME_PERIOD\t2023 \r\n');
 
+    it('keeps complete rows already delivered before a later chunk exceeds the budget (characterization)', async () => {
+      const { svc: fresh } = await freshServiceWithBudget(
+        HEADER_CHUNK.length + ROW_CHUNKS[0]!.length + 1,
+        [HEADER_CHUNK, ...ROW_CHUNKS],
+      );
+      const dl = await fresh.startDownload('x', [], {}, undefined, undefined, createMockContext());
+      expect((await collectRows(dl.rows())).map((row) => row.geo)).toEqual(['AT']);
+      expect(dl.stats.budgetExceeded).toBe(true);
+    });
+
+    it.each([false, true])(
+      'consumes complete rows within a single oversized decoded chunk (gzip=%s)',
+      async (gzip) => {
+        const plain = utf8(`geo\\TIME_PERIOD\t2024 \nDE\t42 \nFR\t43 \n${'IT\t44 \n'.repeat(10)}`);
+        const { svc: fresh } = await freshServiceWithBudget(40, [gzip ? gzipSync(plain) : plain]);
+        const dl = await fresh.startDownload(
+          'x',
+          [],
+          {},
+          undefined,
+          undefined,
+          createMockContext(),
+        );
+        expect((await collectRows(dl.rows())).map((row) => row.geo)).toEqual(['DE', 'FR']);
+        expect(dl.stats).toMatchObject({
+          budgetExceeded: true,
+          bytesRead: 40,
+          rowCount: 2,
+          compressed: gzip,
+        });
+      },
+    );
+
+    it.each(
+      [false, true].flatMap((gzip) =>
+        [1, 7, 1_000].flatMap((chunkSize) =>
+          [1, 20, 22, 25].map((budget) => ({ gzip, chunkSize, budget })),
+        ),
+      ),
+    )(
+      'reports local exhaustion at $budget bytes (gzip=$gzip, chunks=$chunkSize)',
+      async ({ gzip, chunkSize, budget }) => {
+        const plain = utf8('geo\\TIME_PERIOD\t2024 \nDE\t42 \nFR\t43 \n');
+        const bytes = gzip ? gzipSync(plain) : plain;
+        const chunks: Uint8Array[] = [];
+        for (let offset = 0; offset < bytes.length; offset += chunkSize)
+          chunks.push(bytes.subarray(offset, offset + chunkSize));
+        const { svc: fresh } = await freshServiceWithBudget(budget, chunks);
+        const run = async () => {
+          const dl = await fresh.startDownload(
+            'x',
+            [],
+            {},
+            undefined,
+            undefined,
+            createMockContext(),
+          );
+          return collectRows(dl.rows());
+        };
+        await expect(run()).rejects.toMatchObject({
+          data: {
+            reason: 'byte_budget_exceeded',
+            maxBytes: budget,
+            bytesRead: budget,
+            rowCount: 0,
+            recovery: { hint: expect.stringContaining('filters') },
+          },
+        });
+      },
+    );
+
+    it.each(
+      [false, true].flatMap((gzip) => [1, 7, 1_000].map((chunkSize) => ({ gzip, chunkSize }))),
+    )(
+      'keeps complete UTF-8 rows and drops a cut character (gzip=$gzip, chunks=$chunkSize)',
+      async ({ gzip, chunkSize }) => {
+        const prefix = 'geo\\TIME_PERIOD\t2024 \r\n日本\t42 \r\n';
+        const plain = utf8(`${prefix}日本\t43 \r\nFR\t44 \r\n`);
+        // Two bytes into the following three-byte UTF-8 character, with one valid row retained.
+        const budget = utf8(prefix).length + 2;
+        const bytes = gzip ? gzipSync(plain) : plain;
+        const chunks: Uint8Array[] = [];
+        for (let offset = 0; offset < bytes.length; offset += chunkSize)
+          chunks.push(bytes.subarray(offset, offset + chunkSize));
+        const { svc: fresh } = await freshServiceWithBudget(budget, chunks);
+        const dl = await fresh.startDownload(
+          'x',
+          [],
+          {},
+          undefined,
+          undefined,
+          createMockContext(),
+        );
+        const rows = await collectRows(dl.rows());
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ geo: '日本', obs_value: 42, time: '2024' });
+        expect(JSON.stringify(rows)).not.toContain('�');
+        expect(dl.stats).toMatchObject({ bytesRead: budget, budgetExceeded: true, rowCount: 1 });
+      },
+    );
+
     it('stops the transfer with chunks unsent rather than draining and reporting after', async () => {
       // Budget covers the header plus three rows. The remaining five chunks must never
       // be requested — a budget checked after the fact would have pulled all eight.
@@ -843,6 +951,102 @@ describe('EurostatBulkService — an unavailable SDMX data endpoint (#71)', () =
     const err = (await settle(start(createMockContext({ signal: controller.signal })))) as McpError;
     expect((err.data as { reason?: string } | undefined)?.reason).not.toBe('upstream_fault');
     expect(fetchWithTimeout).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('EurostatBulkService — operation deadline through body ownership (#72)', () => {
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    const actual = await vi.importActual<typeof import('@cyanheads/mcp-ts-core/utils')>(
+      '@cyanheads/mcp-ts-core/utils',
+    );
+    vi.mocked(fetchWithTimeout).mockImplementation(actual.fetchWithTimeout);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('retains the remaining 120-second allowance after headers, with no stream retry', async () => {
+    const requests: Request[] = [];
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const request = new Request(url, init);
+      requests.push(request);
+      if (requests.length === 1) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 20_000));
+        return new Response('Unavailable', { status: 503 });
+      }
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(utf8('geo\\TIME_PERIOD\t2024 \nDE\t42 \n'));
+            request.signal.addEventListener(
+              'abort',
+              () => controller.error(request.signal.reason),
+              { once: true },
+            );
+          },
+        }),
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const svc = new EurostatBulkService(mockConfig, mockStorage);
+    let settled = false;
+    const outcome = svc
+      .startDownload('x', [], {}, undefined, undefined, createMockContext())
+      .then(async (download) => collectRows(download.rows()))
+      .catch((error: unknown) => error)
+      .then((value) => {
+        settled = true;
+        return value;
+      });
+    await vi.advanceTimersByTimeAsync(30_001);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect(await outcome).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'retry_deadline_exceeded', deadlineMs: 120_000 },
+    });
+    expect(requests).toHaveLength(2);
+    expect(requests[1]?.signal.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('cancels a streaming body as the caller outcome and never retries', async () => {
+    const requests: Request[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        const request = new Request(url, init);
+        requests.push(request);
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(utf8('geo\\TIME_PERIOD\t2024 \nDE\t42 \n'));
+              request.signal.addEventListener(
+                'abort',
+                () => controller.error(request.signal.reason),
+                { once: true },
+              );
+            },
+          }),
+        );
+      }),
+    );
+    const controller = new AbortController();
+    const download = await new EurostatBulkService(mockConfig, mockStorage).startDownload(
+      'x',
+      [],
+      {},
+      undefined,
+      undefined,
+      createMockContext({ signal: controller.signal }),
+    );
+    const outcome = collectRows(download.rows()).catch((error: unknown) => error);
+    controller.abort();
+    expect(await outcome).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+    expect(requests).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 

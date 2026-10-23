@@ -10,6 +10,7 @@ import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as serverConfig from '@/config/server-config.js';
 import { eurostatDownloadDataset } from '@/mcp-server/tools/definitions/eurostat-download-dataset.tool.js';
 import { setCanvas } from '@/services/canvas-accessor.js';
 import { withRealCanvas } from '../helpers/real-canvas.js';
@@ -128,14 +129,42 @@ const renderedText = (result: Parameters<NonNullable<typeof eurostatDownloadData
     .join('');
 
 describe('eurostatDownloadDataset — input schema', () => {
+  it('bounds a large requested preview and preserves full counts and composed notices', async () => {
+    const previousCanvas = withRealCanvas();
+    setCanvas(undefined);
+    try {
+      mockDownload(stubDownload(makeRows(200), { budgetExceeded: true }));
+      const result = await runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'nama_10_gdp',
+        preview_limit: 1000,
+      });
+      expect(result.isError).not.toBe(true);
+      const structured = result.structuredContent as {
+        observations: BulkRow[];
+        rowCount: number;
+        notice: string;
+      };
+      expect(structured.observations).toHaveLength(500);
+      expect(structured.rowCount).toBe(600);
+      expect(structured.notice).toMatch(
+        /preview_limit requested 1000; applied 500.*byte budget.*preview_limit=500.*without a dataframe canvas/s,
+      );
+      expect(structured.notice).not.toContain('preview_limit=1,000');
+      const text = result.content.map((b) => ('text' in b ? b.text : '')).join('\n');
+      expect(text).toContain(structured.notice);
+      expect(text).toContain('G166');
+    } finally {
+      await previousCanvas.teardown();
+    }
+  });
   it('defaults filters to an empty map and preview_limit to 50', () => {
     const input = parse({});
     expect(input.filters).toEqual({});
     expect(input.preview_limit).toBe(50);
   });
 
-  it('rejects a preview_limit above the 500-row cap', () => {
-    expect(() => parse({ preview_limit: 501 })).toThrow();
+  it('accepts an oversized positive preview_limit and rejects zero', () => {
+    expect(parse({ preview_limit: 501 }).preview_limit).toBe(501);
     expect(() => parse({ preview_limit: 0 })).toThrow();
   });
 
@@ -1459,6 +1488,127 @@ describe('eurostatDownloadDataset — an empty download leaves every canvas unto
     expect(result.isError).not.toBe(true);
     expect(result.structuredContent).toMatchObject({ rowCount: 2 });
     expect(result.structuredContent).not.toHaveProperty('canvasId');
+  });
+});
+
+describe('eurostatDownloadDataset — local transfer limits on both surfaces (#72, #76)', () => {
+  beforeEach(() => {
+    setCanvas(undefined);
+    vi.mocked(getEurostatBulkService).mockReturnValue(
+      new EurostatBulkService({} as never, {} as never),
+    );
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it.each([10, 22, 25, 40])(
+    'discloses an accepted %s-byte prefix or a local budget failure',
+    async (budget) => {
+      vi.spyOn(serverConfig, 'getServerConfig').mockReturnValue({
+        ...serverConfig.getServerConfig(),
+        bulkMaxBytes: budget,
+      });
+      const requests: Request[] = [];
+      let cancelled = false;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+          requests.push(new Request(input, init));
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(
+                  new TextEncoder().encode('geo\\TIME_PERIOD\t2024 \nDE\t42 \nFR\t43 \nIT\t44 \n'),
+                );
+              },
+              cancel() {
+                cancelled = true;
+              },
+            }),
+          );
+        }),
+      );
+      const result = await runToolContract(eurostatDownloadDataset, { dataset_code: 'x' });
+      const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+      if (budget === 40) {
+        expect(result.structuredContent).toMatchObject({
+          budgetExceeded: true,
+          bytesRead: 40,
+          rowCount: 2,
+          observations: [
+            { geo: 'DE', obs_value: 42 },
+            { geo: 'FR', obs_value: 43 },
+          ],
+          notice: expect.stringContaining('filters'),
+        });
+        expect(text).toContain('40 bytes decoded');
+        expect(text).toContain('these 2 observations');
+      } else {
+        expect(result.structuredContent).toMatchObject({
+          error: {
+            code: JsonRpcErrorCode.ValidationError,
+            data: {
+              reason: 'byte_budget_exceeded',
+              maxBytes: budget,
+              bytesRead: budget,
+              rowCount: 0,
+              recovery: { hint: expect.stringContaining('filters') },
+            },
+          },
+        });
+        expect(text).toContain('byte_budget_exceeded');
+        expect(text).toContain(`${budget}-byte`);
+      }
+      expect(text).toContain('since_period/until_period');
+      expect(text).toContain('EUROSTAT_BULK_MAX_BYTES');
+      expect(cancelled).toBe(true);
+      expect(requests).toHaveLength(1);
+    },
+  );
+
+  it('keeps a body deadline as Timeout/retry_deadline_exceeded on both surfaces', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(serverConfig, 'getServerConfig').mockReturnValue({
+      ...serverConfig.getServerConfig(),
+      bulkTimeoutMs: 50,
+    });
+    const requests: Request[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const request = new Request(input, init);
+        requests.push(request);
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('geo\\TIME_PERIOD\t2024 \nDE\t42 \n'));
+              request.signal.addEventListener(
+                'abort',
+                () => controller.error(request.signal.reason),
+                { once: true },
+              );
+            },
+          }),
+        );
+      }),
+    );
+    const pending = runToolContract(eurostatDownloadDataset, { dataset_code: 'x' });
+    await vi.advanceTimersByTimeAsync(51);
+    const result = await pending;
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.Timeout,
+        data: { reason: 'retry_deadline_exceeded', deadlineMs: 50 },
+      },
+    });
+    expect(result.content.map((block) => ('text' in block ? block.text : '')).join('\n')).toContain(
+      'retry_deadline_exceeded',
+    );
+    expect(requests).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 

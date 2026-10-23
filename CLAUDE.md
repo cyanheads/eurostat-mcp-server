@@ -5,7 +5,7 @@
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` `^2.3.1`
-**Zod:** `^4.6.6`
+**Zod:** `^4.6.7`
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -374,6 +374,7 @@ Run the `release-and-publish` skill after git wrapup — it runs the verificatio
 bun publish --access public
 
 docker buildx build --platform linux/amd64,linux/arm64 \
+  --build-arg APP_VERSION=<version> \
   -t ghcr.io/cyanheads/eurostat-mcp-server:<version> \
   -t ghcr.io/cyanheads/eurostat-mcp-server:latest \
   --push .

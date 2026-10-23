@@ -2140,6 +2140,204 @@ describe('EurostatDataService — an unavailable Statistics API (#71)', () => {
 // Period rejections — Eurostat's own refusals of a period literal (#47)
 // ---------------------------------------------------------------------------
 
+describe('EurostatDataService — operation deadlines (#72)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  const routes = ['statistics', 'structure'] as const;
+  const read = (route: (typeof routes)[number], signal?: AbortSignal) => {
+    const service = new EurostatDataService(mockConfig, mockStorage);
+    const ctx = createMockContext(signal ? { signal } : {});
+    return route === 'statistics'
+      ? service.queryDataset('nama_10_gdp', {}, undefined, undefined, undefined, 1, 'EN', 50, ctx)
+      : service.getDimensionOrder('earn_ses_annual', ctx);
+  };
+  const success = (route: (typeof routes)[number]) =>
+    route === 'statistics'
+      ? Response.json(
+          buildJsonStat([{ code: 'DE', label: 'Germany' }], [{ code: '2024', label: '2024' }], {
+            0: 42,
+          }),
+        )
+      : new Response(sdmxDataStructureXml());
+
+  it.each(routes)('expires during the initial %s request without retrying', async (route) => {
+    vi.useFakeTimers();
+    const requests: Request[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string | URL | Request, init?: RequestInit) => {
+        const request = new Request(url, init);
+        requests.push(request);
+        return new Promise<Response>((_resolve, reject) =>
+          request.signal.addEventListener('abort', () => reject(request.signal.reason), {
+            once: true,
+          }),
+        );
+      }),
+    );
+    const outcome = read(route).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(30_001);
+    expect(await outcome).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'retry_deadline_exceeded', deadlineMs: 30_000 },
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.signal.aborted).toBe(true);
+  });
+
+  it.each(routes.flatMap((route) => [false, true].map((retryAfter) => ({ route, retryAfter }))))(
+    'expires during $route backoff (Retry-After=$retryAfter)',
+    async ({ route, retryAfter }) => {
+      vi.useFakeTimers();
+      vi.spyOn(Math, 'random').mockReturnValue(0.5);
+      const fetchMock = vi.fn(async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, retryAfter ? 28_000 : 29_000));
+        return new Response('Unavailable', {
+          status: retryAfter ? 429 : 503,
+          headers: retryAfter ? { 'Retry-After': '2' } : {},
+        });
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      const outcome = read(route).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(await outcome).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        data: { reason: 'retry_deadline_exceeded' },
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(routes)('rescues a %s 429 before the shared deadline', async (route) => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response('Limited', { status: 429, headers: { 'Retry-After': '1' } }),
+      )
+      .mockImplementationOnce(async () => success(route));
+    vi.stubGlobal('fetch', fetchMock);
+    const outcome = read(route);
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(await outcome).toMatchObject(
+      route === 'structure' ? EARN_SES_ANNUAL_DIMENSIONS : { obsCount: 1 },
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('lets a cancelled metadata waiter leave while the detached 120-second dataflow load expires', async () => {
+    vi.useFakeTimers();
+    const requests: Request[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        const request = new Request(url, init);
+        requests.push(request);
+        if (request.url.includes('/contentconstraint/')) return new Response(SDMX_CONSTRAINT_XML);
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              request.signal.addEventListener(
+                'abort',
+                () => controller.error(request.signal.reason),
+                { once: true },
+              );
+            },
+          }),
+        );
+      }),
+    );
+    const service = new EurostatDataService(mockConfig, mockStorage);
+    const controller = new AbortController();
+    const cancelled = service
+      .getDatasetInfo('nama_10_gdp', createMockContext({ signal: controller.signal }))
+      .catch((error: unknown) => error);
+    let settled = false;
+    const shared = service
+      .getDatasetInfo('nama_10_gdp', createMockContext())
+      .catch((error: unknown) => error)
+      .then((value) => {
+        settled = true;
+        return value;
+      });
+    controller.abort();
+    expect(await cancelled).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+    await vi.advanceTimersByTimeAsync(30_001);
+    expect(settled).toBe(false);
+    expect(requests.find((request) => request.url.includes('/dataflow/'))?.signal.aborted).toBe(
+      false,
+    );
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect(await shared).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'retry_deadline_exceeded', deadlineMs: 120_000 },
+    });
+    expect(requests).toHaveLength(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('bounds a retry and its body by the original 30-second allowance', async () => {
+    vi.useFakeTimers();
+    const requests: Request[] = [];
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const request = new Request(url, init);
+      requests.push(request);
+      if (requests.length === 1) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 20_000));
+        return new Response('Unavailable', { status: 503 });
+      }
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            request.signal.addEventListener(
+              'abort',
+              () => controller.error(request.signal.reason),
+              { once: true },
+            );
+          },
+        }),
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    let outcome: unknown;
+    const run = new EurostatDataService(mockConfig, mockStorage)
+      .queryDataset(
+        'nama_10_gdp',
+        {},
+        undefined,
+        undefined,
+        undefined,
+        1,
+        'EN',
+        50,
+        createMockContext(),
+      )
+      .then(
+        (value) => {
+          outcome = value;
+        },
+        (error: unknown) => {
+          outcome = error;
+        },
+      );
+    await vi.advanceTimersByTimeAsync(30_001);
+    const atDeadline = outcome;
+    await vi.advanceTimersByTimeAsync(150_000);
+    await run;
+    expect(atDeadline).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'retry_deadline_exceeded', deadlineMs: 30_000 },
+    });
+    expect(requests).toHaveLength(2);
+    expect(requests[1]?.signal.aborted).toBe(true);
+  });
+});
+
 describe("EurostatDataService — Eurostat's period rejections map to invalid_period (#47)", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
   beforeEach(() => {
