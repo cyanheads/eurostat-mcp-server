@@ -1,0 +1,33 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "eurostat-mcp-server",
+  "version": "0.10.1",
+  "description": "Search and query the Eurostat catalogue — EU economy, demography, trade, health, and NUTS regional data via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "Casey Hand",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
+  },
+  "homepage": "https://github.com/cyanheads/eurostat-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/eurostat-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "eurostat",
+    "eu",
+    "statistics",
+    "open-data",
+    "nuts",
+    "gdp",
+    "demography",
+    "trade",
+    "health",
+    "economy"
+  ]
+}

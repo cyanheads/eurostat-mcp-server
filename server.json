@@ -23,7 +23,7 @@
       "environmentVariables": [
         {
           "name": "EUROSTAT_CLAMP_LIMITS",
-          "description": "Clamp positive integer preview/search limits to 500/100 with a notice. False restores schemas rejecting over-cap inputs.",
+          "description": "Clamp positive integer preview/search/dimension limits to 500/100/1000 with a notice. False restores schemas rejecting over-cap inputs.",
           "format": "boolean",
           "isRequired": false,
           "default": "true"
@@ -86,7 +86,7 @@
         },
         {
           "name": "CANVAS_PROVIDER_TYPE",
-          "description": "Dataframe canvas backend. The default, 'duckdb', lists the eurostat_dataframe_describe and eurostat_dataframe_query tools, lets eurostat_query_dataset stage a match larger than its 5,000-row inline cap as a SQL table, and lets eurostat_download_dataset retain a whole bulk download instead of only its inline preview. Set to 'none' to disable the canvas and those tools. The DuckDB binding ships with the server, so this variable is the only switch.",
+          "description": "Dataframe canvas backend. The default, 'duckdb', lists eurostat_dataframe_describe and eurostat_dataframe_query, stages query matches with stage=true or above 5,000 observations, and retains bulk downloads beyond their previews. Set to 'none' to disable the canvas and those tools. The DuckDB binding ships with the server.",
           "format": "string",
           "isRequired": false,
           "default": "duckdb"
@@ -106,7 +106,7 @@
         },
         {
           "name": "CANVAS_DEFAULT_ROW_LIMIT",
-          "description": "Maximum rows a single eurostat_dataframe_query returns before reporting truncated. A separate 64,000-byte budget applies to each serialized response surface, retaining at least one complete row even if oversized.",
+          "description": "Maximum complete rows a single eurostat_dataframe_query returns before reporting truncated.",
           "format": "string",
           "isRequired": false,
           "default": "10000"
@@ -138,7 +138,7 @@
         },
         {
           "name": "EUROSTAT_CLAMP_LIMITS",
-          "description": "Clamp positive integer preview/search limits to 500/100 with a notice. False restores schemas rejecting over-cap inputs.",
+          "description": "Clamp positive integer preview/search/dimension limits to 500/100/1000 with a notice. False restores schemas rejecting over-cap inputs.",
           "format": "boolean",
           "isRequired": false,
           "default": "true"
@@ -235,7 +235,7 @@
         },
         {
           "name": "CANVAS_PROVIDER_TYPE",
-          "description": "Dataframe canvas backend. The default, 'duckdb', lists the eurostat_dataframe_describe and eurostat_dataframe_query tools, lets eurostat_query_dataset stage a match larger than its 5,000-row inline cap as a SQL table, and lets eurostat_download_dataset retain a whole bulk download instead of only its inline preview. Set to 'none' to disable the canvas and those tools. The DuckDB binding ships with the server, so this variable is the only switch.",
+          "description": "Dataframe canvas backend. The default, 'duckdb', lists eurostat_dataframe_describe and eurostat_dataframe_query, stages query matches with stage=true or above 5,000 observations, and retains bulk downloads beyond their previews. Set to 'none' to disable the canvas and those tools. The DuckDB binding ships with the server.",
           "format": "string",
           "isRequired": false,
           "default": "duckdb"
@@ -255,7 +255,7 @@
         },
         {
           "name": "CANVAS_DEFAULT_ROW_LIMIT",
-          "description": "Maximum rows a single eurostat_dataframe_query returns before reporting truncated. A separate 64,000-byte budget applies to each serialized response surface, retaining at least one complete row even if oversized.",
+          "description": "Maximum complete rows a single eurostat_dataframe_query returns before reporting truncated.",
           "format": "string",
           "isRequired": false,
           "default": "10000"

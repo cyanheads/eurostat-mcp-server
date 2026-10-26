@@ -608,6 +608,35 @@ describe('eurostatGetDimensionValues — failures raised by the real data servic
   afterEach(() => {
     vi.unstubAllGlobals();
   });
+  it.each([
+    ['GEO', 'geo', { geo_level: 'country' as const }],
+    ['TIME_PERIOD', 'time', {}],
+  ])('resumes a real %s alias with its canonical %s code', async (alias, canonical, extra) => {
+    const first = await runToolContract(eurostatGetDimensionValues, {
+      dataset_code: 'earn_ses_annual',
+      dimension: alias,
+      limit: 1,
+      ...extra,
+    });
+    expect(first.isError).not.toBe(true);
+    expect(first.structuredContent).toMatchObject({ dimensionCode: canonical });
+    const cursor = (first.structuredContent as { nextCursor: string }).nextCursor;
+    expect(cursor).toEqual(expect.any(String));
+    const second = await runToolContract(eurostatGetDimensionValues, {
+      dataset_code: 'earn_ses_annual',
+      dimension: canonical,
+      cursor,
+      ...extra,
+    });
+    expect(second.isError).not.toBe(true);
+    const values = (second.structuredContent as { values: Value[] }).values;
+    expect(values).toHaveLength(1);
+    expect(values[0]?.code).not.toBe(
+      (first.structuredContent as { values: Value[] }).values[0]?.code,
+    );
+    expect(textOf(second)).toContain(canonical);
+    expect(textOf(second)).toContain(values[0]?.code);
+  });
 
   it.each([
     [
@@ -673,7 +702,7 @@ describe('eurostatGetDimensionValues — failures raised by the real data servic
     expect(textOf(result)).toContain('reason no_results');
   });
 
-  it('rejects geo_level on a non-geo dimension as conflicting_params before any request', async () => {
+  it('rejects geo_level on a non-geo dimension after loading canonical dimension metadata', async () => {
     const result = await runToolContract(eurostatGetDimensionValues, {
       dataset_code: 'earn_ses_annual',
       dimension: 'unit',
@@ -684,7 +713,7 @@ describe('eurostatGetDimensionValues — failures raised by the real data servic
       data: { reason: 'conflicting_params', recovery: { hint: expect.stringContaining('"unit"') } },
     });
     expect(textOf(result)).toContain('reason conflicting_params');
-    expect(fetch).not.toHaveBeenCalled();
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 
   it('refuses a cursor replayed for another dataset before downloading that dataset’s structure', async () => {
@@ -832,7 +861,11 @@ function recordedValues(name: string): Value[] {
 function serveList(values: Value[], dimension = { code: 'unit', label: 'Unit' }) {
   const getDimensionValues = vi.fn(
     async (_dataset: string, _dimension: string, geoLevel?: string) => ({
-      dimensionCode: dimension.code,
+      dimensionCode:
+        _dimension.toLowerCase() === dimension.code.toLowerCase() ||
+        (_dimension.toLowerCase() === 'time_period' && dimension.code === 'time')
+          ? dimension.code
+          : _dimension,
       dimensionLabel: dimension.label,
       ...(dimension.code === 'geo' && { geoLevel: geoLevel ?? 'country' }),
       values: [...values],
@@ -847,13 +880,46 @@ describe('eurostatGetDimensionValues — paging and filtering recorded lists (#6
   beforeEach(() => {
     setCanvas(undefined);
   });
+  it('uses count pages regardless of label width, defaults to 25 and binds aliases canonically', async () => {
+    const values = Array.from({ length: 80 }, (_, i) => ({
+      code: `V${i}`,
+      label: 'x'.repeat(40000),
+    }));
+    serveList(values, { code: 'unit', label: 'Unit' });
+    const first = await runToolContract(eurostatGetDimensionValues, {
+      dataset_code: 'demo',
+      dimension: 'UNIT',
+    });
+    expect((first.structuredContent as { values: Value[] }).values).toEqual(values.slice(0, 25));
+    const cursor = (first.structuredContent as { nextCursor: string }).nextCursor;
+    expect(decodeCursor(cursor, createMockContext())).toMatchObject({
+      dimension: 'unit',
+      limit: 25,
+    });
+    const second = await runToolContract(eurostatGetDimensionValues, {
+      dataset_code: 'demo',
+      dimension: 'unit',
+      cursor,
+      limit: 5000,
+    });
+    expect(second.structuredContent).toMatchObject({ values: values.slice(25, 50) });
+    expect(textOf(second)).toContain(values[49]?.label);
+    expect((second.structuredContent as { notice: string }).notice).not.toContain('requested');
+    const forty = await runToolContract(eurostatGetDimensionValues, {
+      dataset_code: 'demo',
+      dimension: 'unit',
+      limit: 40,
+    });
+    expect((forty.structuredContent as { values: Value[] }).values).toEqual(values.slice(0, 40));
+  });
 
-  it('returns a list that fits the budget whole, exactly as before', async () => {
+  it('returns a list within an explicit count whole, exactly as before', async () => {
     const naItem = recordedValues('nama-10-gdp-na-item');
     serveList(naItem, { code: 'na_item', label: 'National accounts indicator (ESA 2010)' });
     const result = await runToolContract(eurostatGetDimensionValues, {
       dataset_code: 'nama_10_gdp',
       dimension: 'na_item',
+      limit: 39,
     });
     expect(result.structuredContent).toEqual({
       dimensionCode: 'na_item',
@@ -867,7 +933,6 @@ describe('eurostatGetDimensionValues — paging and filtering recorded lists (#6
     expect(text).not.toMatch(/nextCursor|truncated/);
   });
 
-  const BUDGET = 64_000;
   type Result = Awaited<ReturnType<typeof runToolContract>>;
   type Page = {
     matchCount?: number;
@@ -878,14 +943,6 @@ describe('eurostatGetDimensionValues — paging and filtering recorded lists (#6
     values: Value[];
   };
   const body = (result: Result) => result.structuredContent as Page;
-  /** UTF-8 bytes of each surface as the caller receives it, enrichment trailer included. */
-  const surfaces = (result: Result) => ({
-    structured: Buffer.byteLength(JSON.stringify(result.structuredContent), 'utf8'),
-    text: result.content.reduce(
-      (sum, block) => sum + ('text' in block ? Buffer.byteLength(block.text, 'utf8') : 0),
-      0,
-    ),
-  });
   const call = (input: Record<string, unknown>) =>
     runToolContract(eurostatGetDimensionValues, {
       dataset_code: 'avia_par_de',
@@ -898,7 +955,7 @@ describe('eurostatGetDimensionValues — paging and filtering recorded lists (#6
    * cannot run away; then one call past the end, with a cursor resuming after the last value
    * returned, which must answer an empty page that closes the list.
    */
-  async function walk(input: Record<string, unknown>, maxPages = 40): Promise<Result[]> {
+  async function walk(input: Record<string, unknown>, maxPages = 200): Promise<Result[]> {
     const { limit: _ignored, ...rest } = input;
     const pages = [await call(input)];
     while (body(pages.at(-1) as Result).nextCursor) {
@@ -927,18 +984,16 @@ describe('eurostatGetDimensionValues — paging and filtering recorded lists (#6
     return pages;
   }
 
-  /** Every page is a success within the budget, cut pages say so, and the last page closes the walk. */
+  /** Every page is a success within its count, cut pages say so, and the last closes the walk. */
   function expectWellFormedWalk(pages: Result[]) {
     for (const [i, page] of pages.entries()) {
       expect(page.isError).not.toBe(true);
-      const size = surfaces(page);
-      expect(size.structured).toBeLessThanOrEqual(BUDGET);
-      expect(size.text).toBeLessThanOrEqual(BUDGET);
+      expect(body(page).values.length).toBeLessThanOrEqual(1000);
       const last = i === pages.length - 1;
       expect(body(page).truncated).toBe(last ? undefined : true);
       if (!last) {
         expect(body(page).values.length).toBeGreaterThan(0);
-        expect(textOf(page)).toContain(`**nextCursor:** ${body(page).nextCursor}`);
+        expect(textOf(page)).toContain(`**nextCursor:** \`${body(page).nextCursor}\``);
       }
     }
   }
@@ -954,21 +1009,18 @@ describe('eurostatGetDimensionValues — paging and filtering recorded lists (#6
     expect(pages.length).toBeGreaterThan(1);
     expect(pages.flatMap((page) => body(page).values)).toEqual(airports);
     expect(body(pages[0] as Result)).toMatchObject({ totalCount: 2_352, truncated: true });
-    expect(body(pages[0] as Result).notice).toContain(
-      'the 64,000-byte response budget ended this page',
-    );
-    // structuredContent is the larger surface, so it is the one the cut lands near.
-    expect(surfaces(pages[0] as Result).structured).toBeGreaterThan(BUDGET - 200);
+    expect(body(pages[0] as Result).notice).toContain('limit 25 ended this page');
+    expect(body(pages[0] as Result).values).toHaveLength(25);
     expect(textOf(pages.at(-1) as Result)).not.toMatch(/nextCursor|truncated/);
-    // The trailer the handler measures is exactly the one the framework appends.
+    // Pagination disclosures reach the content surface too.
     const { nextCursor, notice } = body(pages[0] as Result);
     expect((pages[0] as Result).content.at(-1)).toEqual({
       type: 'text',
-      text: `\n\n**truncated:** true\n**nextCursor:** ${nextCursor}\n> ${notice}`,
+      text: `\n\n**truncated:** true\n**nextCursor:** \`${nextCursor}\`\n> ${notice}`,
     });
   });
 
-  it('holds every DS-045409 product page within the budget, 29349990 and its 4,505-byte label included', async () => {
+  it('returns count-sized product pages, preserving the 4,505-byte label intact', async () => {
     const products = recordedValues('ds-045409-product-excerpt');
     serveList(products, { code: 'product', label: 'Product (CN8)' });
     const pages = await walk({ dataset_code: 'DS-045409', dimension: 'product' });
@@ -980,16 +1032,9 @@ describe('eurostatGetDimensionValues — paging and filtering recorded lists (#6
     ) as Result;
     const long = products.find(({ code }) => code === '29349990') as Value;
     expect(Buffer.byteLength(long.label, 'utf8')).toBe(4_505);
-    // A per-value estimate from the list's average would put far fewer bytes on this page.
-    const average =
-      products.reduce((sum, value) => sum + Buffer.byteLength(JSON.stringify(value), 'utf8'), 0) /
-      products.length;
-    expect(Buffer.byteLength(JSON.stringify(long), 'utf8')).toBeGreaterThan(15 * average);
-    expect(surfaces(holding).structured).toBeLessThanOrEqual(BUDGET);
-    expect(surfaces(holding).text).toBeLessThanOrEqual(BUDGET);
-    // Pages are cut by bytes, not by a count: the long-label pages hold fewer values.
+    expect(textOf(holding)).toContain(long.label);
     const lengths = pages.slice(0, -1).map((page) => body(page).values.length);
-    expect(Math.min(...lengths)).toBeLessThan(Math.max(...lengths));
+    expect(new Set(lengths)).toEqual(new Set([25]));
   });
 
   it.each(['frankfurt palma', 'palma frankfurt'])(
@@ -1065,7 +1110,8 @@ describe('eurostatGetDimensionValues — paging and filtering recorded lists (#6
     const unlimited = await call({});
     const next = await call({ limit: 3, cursor: body(unlimited).nextCursor });
     expect(body(next).values.length).toBeGreaterThan(3);
-    expect(body(next).notice).toContain('response budget ended this page');
+    expect(body(next).values).toHaveLength(25);
+    expect(body(next).notice).toContain('limit 25 ended this page');
   });
 
   it('folds accents and case: "zurich" finds CH040 Zürich among the NUTS-3 regions', async () => {
@@ -1152,32 +1198,29 @@ describe('eurostatGetDimensionValues — paging and filtering recorded lists (#6
       { dataset_code: 'sbs_ovw_act', dimension: 'nace_r2' },
       920,
     ],
-  ])(
-    'pages %s, a list that used to come back whole over the budget',
-    async (_label, fixture, input, total) => {
-      const values = recordedValues(fixture);
-      serveList(values, { code: input.dimension, label: input.dimension });
-      const pages = await walk(input);
-      expectWellFormedWalk(pages);
-      expect(pages.length).toBe(2);
-      expect(pages.flatMap((page) => body(page).values)).toEqual(values);
-      const first = body(pages[0] as Result);
-      expect(first.totalCount).toBe(total);
-      expect(first.notice).toContain('Pass nextCursor as cursor for the next page');
-      expect(first.notice).toContain('pass filter (words of the code or label)');
-      // Without a canvas on this deployment, canvas_id is not offered as a route.
-      expect(first.notice).not.toContain('canvas_id');
-    },
-  );
+  ])('pages %s with a fixed default count', async (_label, fixture, input, total) => {
+    const values = recordedValues(fixture);
+    serveList(values, { code: input.dimension, label: input.dimension });
+    const pages = await walk(input);
+    expectWellFormedWalk(pages);
+    expect(pages.length).toBe(Math.ceil(total / 25));
+    expect(pages.flatMap((page) => body(page).values)).toEqual(values);
+    const first = body(pages[0] as Result);
+    expect(first.totalCount).toBe(total);
+    expect(first.notice).toContain('Pass nextCursor as cursor for the next page');
+    expect(first.notice).toContain('pass filter (words of the code or label)');
+    // Without a canvas on this deployment, canvas_id is not offered as a route.
+    expect(first.notice).not.toContain('canvas_id');
+  });
 
-  it('starts a page past a single value that alone outgrows the budget, holding at least that one', async () => {
+  it('pages wide labels by the requested count without cutting any label', async () => {
     const values = [
       { code: 'A', label: 'x'.repeat(70_000) },
       { code: 'B', label: 'Bee' },
       { code: 'C', label: 'Cee' },
     ];
     serveList(values);
-    const first = await call({ dataset_code: 'demo', dimension: 'unit' });
+    const first = await call({ dataset_code: 'demo', dimension: 'unit', limit: 1 });
     expect(body(first).values).toEqual([values[0]]);
     expect(body(first).truncated).toBe(true);
     const second = await call({
@@ -1185,37 +1228,66 @@ describe('eurostatGetDimensionValues — paging and filtering recorded lists (#6
       dimension: 'unit',
       cursor: body(first).nextCursor,
     });
-    expect(body(second).values).toEqual(values.slice(1));
-    expect(body(second)).not.toHaveProperty('nextCursor');
+    expect(body(second).values).toEqual(values.slice(1, 2));
+    const third = await call({
+      dataset_code: 'demo',
+      dimension: 'unit',
+      cursor: body(second).nextCursor,
+    });
+    expect(body(third).values).toEqual(values.slice(2));
+    expect(body(third)).not.toHaveProperty('nextCursor');
   });
 
-  it('keeps a list exactly at the budget whole and pages it one byte past', async () => {
-    const values = Array.from({ length: 1_000 }, (_, i) => ({
+  it('keeps exactly 1,000 values whole and clamps 1,001 with disclosure on both surfaces', async () => {
+    const values = Array.from({ length: 1_001 }, (_, i) => ({
       code: `V${String(i).padStart(4, '0')}`,
       label: `Value ${i}`,
     }));
     serveList(values);
-    const probe = surfaces(await call({ dataset_code: 'demo', dimension: 'unit' }));
-    expect(probe.structured).toBeLessThan(BUDGET);
-    const pad = (bytes: number) => {
-      const padded = values.map((v) => ({ ...v }));
-      (padded[999] as Value).label += 'p'.repeat(bytes);
-      serveList(padded);
-      return padded;
-    };
-
-    const exact = pad(BUDGET - probe.structured);
-    const whole = await call({ dataset_code: 'demo', dimension: 'unit' });
-    expect(surfaces(whole).structured).toBe(BUDGET);
-    expect(body(whole).values).toEqual(exact);
-    expect(body(whole)).not.toHaveProperty('truncated');
-
-    pad(BUDGET - probe.structured + 1);
-    const cut = await call({ dataset_code: 'demo', dimension: 'unit' });
+    const cut = await call({ dataset_code: 'demo', dimension: 'unit', limit: 1001 });
     expect(body(cut).truncated).toBe(true);
-    expect(body(cut).values.length).toBeLessThan(1_000);
-    expect(surfaces(cut).structured).toBeLessThanOrEqual(BUDGET);
+    expect(body(cut).values).toEqual(values.slice(0, 1000));
+    expect(body(cut).notice).toContain('limit requested 1001; applied 1000');
+    expect(textOf(cut)).toContain(body(cut).notice);
+    const end = await call({
+      dataset_code: 'demo',
+      dimension: 'unit',
+      cursor: body(cut).nextCursor,
+    });
+    expect(body(end).values).toEqual(values.slice(1000));
+    expect(body(end)).not.toHaveProperty('nextCursor');
   });
+  it.each([40, 5000, Number.MAX_SAFE_INTEGER])(
+    'accepts a legacy cursor limit %s and encodes the effective successor count',
+    async (legacyLimit) => {
+      const values = Array.from({ length: 2100 }, (_, i) => ({
+        code: `V${i}`,
+        label: `Value ${i}`,
+      }));
+      serveList(values, { code: 'airp_pr', label: 'Airport pairs' });
+      const cursor = encodeCursor({
+        offset: 1,
+        limit: legacyLimit,
+        after: 'V0',
+        dataset: 'avia_par_de',
+        dimension: 'airp_pr',
+        filter: '',
+        geoLevel: null,
+      });
+      const result = await call({ cursor, limit: 9000 });
+      const effective = Math.min(legacyLimit, 1000);
+      expect(body(result).values).toEqual(values.slice(1, effective + 1));
+      expect(decodeCursor(body(result).nextCursor as string, createMockContext()).limit).toBe(
+        effective,
+      );
+      if (legacyLimit > 1000) {
+        expect(body(result).notice).toContain(`limit requested ${legacyLimit}; applied 1000`);
+        expect(textOf(result)).toContain(body(result).notice);
+      } else {
+        expect(body(result).notice).not.toContain('requested');
+      }
+    },
+  );
 
   describe('a cursor that does not belong to the call', () => {
     const invalid = (result: Result) => {
@@ -1258,7 +1330,6 @@ describe('eurostatGetDimensionValues — paging and filtering recorded lists (#6
     it.each([
       ['malformed', { cursor: 'not-a-cursor' }],
       ['replayed with a different dataset_code', { dataset_code: 'avia_par_uk' }],
-      ['replayed with a different dimension', { dimension: 'airp_pr_x' }],
       ['replayed with a different filter', { filter: 'frankfurt main' }],
     ])('refuses a cursor %s without loading the dimension list', async (_label, change) => {
       const getDimensionValues = serveList(airports, airportDimension);

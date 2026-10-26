@@ -551,6 +551,7 @@ export class EurostatCatalogueService {
     items: BrowseItem[];
     otherPlacements?: string[][];
     parentPath: string[];
+    themeCode?: string;
   }> {
     const toc = await this.ensureLoaded(ctx);
     const comextListMissing = toc.comextRetryAt !== undefined;
@@ -564,13 +565,22 @@ export class EurostatCatalogueService {
       return { items, parentPath: [], ...this.staleness(toc) };
     }
 
-    const folderIdxMaybe = toc.codeIndex.get(themeCode);
+    let folderIdxMaybe = toc.codeIndex.get(themeCode);
+    if (folderIdxMaybe === undefined) {
+      const folded = themeCode.toLowerCase();
+      for (const [code, index] of toc.codeIndex) {
+        if (code.toLowerCase() === folded) {
+          folderIdxMaybe = index;
+          break;
+        }
+      }
+    }
     const folderEntry = folderIdxMaybe !== undefined ? toc.entries[folderIdxMaybe] : undefined;
     if (folderIdxMaybe === undefined || folderEntry === undefined) {
       if (
         comextListMissing &&
-        (Object.hasOwn(COMEXT_FOLDERS, themeCode) ||
-          themeCode === COMEXT_OTHER_FOLDER.code ||
+        (Object.hasOwn(COMEXT_FOLDERS, themeCode.toLowerCase()) ||
+          themeCode.toLowerCase() === COMEXT_OTHER_FOLDER.code ||
           DS_CODE_TOKEN.test(themeCode.toLowerCase()))
       ) {
         throw notFound(
@@ -583,6 +593,7 @@ export class EurostatCatalogueService {
         { reason: 'not_found', themeCode, ...this.staleness(toc) },
       );
     }
+    themeCode = folderEntry.code;
     if (folderEntry.type !== 'folder') {
       throw validationError(
         `Theme code "${themeCode}" identifies a ${folderEntry.type} entry, not a folder. Only folder codes can be expanded with eurostat_browse_themes.`,
@@ -612,6 +623,7 @@ export class EurostatCatalogueService {
     return {
       items,
       parentPath,
+      themeCode,
       ...(otherPlacements.length > 0 && { otherPlacements }),
       ...(comextListMissing && COMEXT_PARENT_FOLDERS.has(themeCode) && { comextListMissing }),
       ...this.staleness(toc),

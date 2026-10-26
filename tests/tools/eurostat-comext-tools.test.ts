@@ -252,7 +252,7 @@ describe('eurostat_query_dataset on DS-* codes (#46)', () => {
     expect(hintOf(result)).not.toContain('geo');
   });
 
-  describe('staging a DS-* match past 5,000 observations', () => {
+  describe('staging DS-* text and confidential cells', () => {
     let canvas: DataCanvas;
     let teardown: () => Promise<void>;
     beforeAll(() => {
@@ -262,45 +262,56 @@ describe('eurostat_query_dataset on DS-* codes (#46)', () => {
       await teardown();
     });
 
-    it('stages a text value in obs_value_text rather than failing the DOUBLE column', async () => {
-      setCanvas(canvas);
-      const products = Array.from({ length: 5_001 }, (_, i) => `P${i}`);
-      const value: Record<string, number | string> = { 0: 'KG', 1: ':C' };
-      for (let i = 2; i < products.length; i++) value[i] = i;
-      upstream.statistics['DS-059358'] = {
-        body: JSON.stringify({
-          version: '2.0',
-          class: 'dataset',
-          label: 'Sold production, exports and imports',
-          id: ['freq', 'product', 'time'],
-          size: [1, products.length, 1],
-          dimension: {
-            freq: { category: { index: { A: 0 } } },
-            product: { category: { index: Object.fromEntries(products.map((p, i) => [p, i])) } },
-            time: { category: { index: { '2022': 0 } } },
-          },
-          value,
-        }),
-      };
-      const result = await runToolContract(eurostatQueryDataset, { dataset_code: 'DS-059358' });
-      expect(result.isError).not.toBe(true);
-      const { canvasId, tableName, stagedRowCount } = structured<{
-        canvasId: string;
-        stagedRowCount: number;
-        tableName: string;
-      }>(result);
-      expect(stagedRowCount).toBe(5_001);
-      const instance = await canvas.acquire(canvasId, createMockContext({ tenantId: 'default' }));
-      const [table] = await instance.describe({ tableName });
-      expect(table?.columns.map((c) => c.name)).toContain('obs_value_text');
-      const rows = await instance.query(
-        `SELECT obs_value_text, conf_status, count(*) AS n FROM ${tableName} WHERE obs_value IS NULL GROUP BY 1, 2 ORDER BY 1`,
-      );
-      expect(rows.rows).toEqual([
-        { obs_value_text: 'KG', conf_status: null, n: '1' },
-        { obs_value_text: null, conf_status: 'C', n: '1' },
-      ]);
-    });
+    for (const [count, stage] of [
+      [5_001, false],
+      [3, true],
+    ] as const) {
+      it(`stages ${count} cells with stage=${stage} without losing text or confidentiality`, async () => {
+        setCanvas(canvas);
+        const products = Array.from({ length: count }, (_, i) => `P${i}`);
+        const value: Record<string, number | string> = { 0: 'KG', 1: ':C' };
+        for (let i = 2; i < products.length; i++) value[i] = i;
+        upstream.statistics['DS-059358'] = {
+          body: JSON.stringify({
+            version: '2.0',
+            class: 'dataset',
+            label: 'Sold production, exports and imports',
+            id: ['freq', 'product', 'time'],
+            size: [1, products.length, 1],
+            dimension: {
+              freq: { category: { index: { A: 0 } } },
+              product: { category: { index: Object.fromEntries(products.map((p, i) => [p, i])) } },
+              time: { category: { index: { '2022': 0 } } },
+            },
+            value,
+          }),
+        };
+        const result = await runToolContract(eurostatQueryDataset, {
+          dataset_code: 'DS-059358',
+          stage,
+          preview_limit: 1,
+        });
+        expect(result.isError).not.toBe(true);
+        const { canvasId, tableName, stagedRowCount } = structured<{
+          canvasId: string;
+          stagedRowCount: number;
+          tableName: string;
+        }>(result);
+        expect(stagedRowCount).toBe(count);
+        expect(structured(result)).toMatchObject({ obsCount: count, truncated: count > 5_000 });
+        expect(text(result)).toContain(`stagedRowCount ${count}`);
+        const instance = await canvas.acquire(canvasId, createMockContext({ tenantId: 'default' }));
+        const [table] = await instance.describe({ tableName });
+        expect(table?.columns.map((c) => c.name)).toContain('obs_value_text');
+        const rows = await instance.query(
+          `SELECT obs_value_text, conf_status, count(*) AS n FROM ${tableName} WHERE obs_value IS NULL GROUP BY 1, 2 ORDER BY 1`,
+        );
+        expect(rows.rows).toEqual([
+          { obs_value_text: 'KG', conf_status: null, n: '1' },
+          { obs_value_text: null, conf_status: 'C', n: '1' },
+        ]);
+      });
+    }
   });
 });
 
@@ -511,12 +522,6 @@ describe('eurostat_get_dimension_values paging long lists (#46, #64)', () => {
       dimension: 'product',
       ...extra,
     } as never);
-  /** UTF-8 bytes of the larger response surface, enrichment trailer included. */
-  const largerSurface = (result: Result) =>
-    Math.max(
-      Buffer.byteLength(JSON.stringify(result.structuredContent), 'utf8'),
-      Buffer.byteLength(text(result), 'utf8'),
-    );
   /**
    * Every code of a walk through nextCursor from the first page to the last, bounded so it
    * cannot run away; then one call past the end, with a cursor resuming after the last code,
@@ -526,10 +531,10 @@ describe('eurostat_get_dimension_values paging long lists (#46, #64)', () => {
     const codes: string[] = [];
     let cursor: string | undefined;
     for (let pages = 0; pages < 40; pages++) {
-      const result = await call(cursor ? { cursor } : {});
+      const result = await call(cursor ? { cursor } : { limit: 1_000 });
       expect(result.isError).not.toBe(true);
-      expect(largerSurface(result)).toBeLessThanOrEqual(64_000);
       const page = structured<Page>(result);
+      expect(page.values).toHaveLength(Math.min(1_000, page.totalCount - codes.length));
       codes.push(...page.values.map(({ code }) => code));
       if (!page.nextCursor) {
         expect(page).not.toHaveProperty('truncated');
@@ -550,14 +555,13 @@ describe('eurostat_get_dimension_values paging long lists (#46, #64)', () => {
     throw new Error('more than 40 pages');
   }
 
-  it('pages the 37,069 CN8 codes within the budget and reaches any of them without a canvas', async () => {
+  it('pages all 37,069 CN8 codes by count without a canvas', async () => {
     upstream.productCount = 37_069;
     const result = await product();
     const body = structured<Page>(result);
     expect(body.values[0]?.code).toBe('P000000');
-    expect(body.values.length).toBeLessThan(37_069);
+    expect(body.values).toHaveLength(25);
     expect(structured(result)).toMatchObject({ totalCount: 37_069, truncated: true });
-    expect(largerSurface(result)).toBeLessThanOrEqual(64_000);
     expect(body.notice).toContain(
       `Values 1–${body.values.length.toLocaleString('en-US')} of 37,069 "product" values`,
     );
@@ -597,9 +601,8 @@ describe('eurostat_get_dimension_values paging long lists (#46, #64)', () => {
       tableName: string;
       values: unknown[];
     }>(result);
-    expect(body.values.length).toBeLessThan(37_069);
+    expect(body.values).toHaveLength(25);
     expect(body.stagedRowCount).toBe(37_069);
-    expect(largerSurface(result)).toBeLessThanOrEqual(64_000);
     const counted = await instance.query(
       `SELECT count(*) AS n, max(code) AS last FROM ${body.tableName}`,
     );
@@ -612,9 +615,9 @@ describe('eurostat_get_dimension_values paging long lists (#46, #64)', () => {
     );
   });
 
-  it('returns a list within the budget whole, with no paging fields', async () => {
+  it('returns a list within the requested count whole, with no paging fields', async () => {
     upstream.productCount = 500;
-    const result = await product();
+    const result = await product({ limit: 500 });
     expect(structured<{ values: unknown[] }>(result).values).toHaveLength(500);
     for (const key of ['truncated', 'nextCursor', 'notice', 'matchCount']) {
       expect(structured(result)).not.toHaveProperty(key);
@@ -622,10 +625,11 @@ describe('eurostat_get_dimension_values paging long lists (#46, #64)', () => {
     expect(text(result)).not.toContain('listed below');
   });
 
-  it('pages 2,000 codes, whole under the old count cap, at the byte budget instead', async () => {
+  it('pages 2,000 codes with the default count and walks every code', async () => {
     upstream.productCount = 2_000;
     const first = await product();
     expect(structured(first)).toMatchObject({ totalCount: 2_000, truncated: true });
+    expect(structured<Page>(first).values).toHaveLength(25);
     expect(await walkCodes(product)).toEqual(
       Array.from({ length: 2_000 }, (_, i) => `P${String(i).padStart(6, '0')}`),
     );

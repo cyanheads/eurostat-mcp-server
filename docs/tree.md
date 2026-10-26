@@ -1,6 +1,6 @@
 # eurostat-mcp-server - Directory Structure
 
-Generated on: 2026-10-23 04:59:56
+Generated on: 2026-10-26 17:56:21
 
 ```text
 eurostat-mcp-server/
@@ -46,6 +46,8 @@ eurostat-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -143,6 +145,11 @@ eurostat-mcp-server/
 │   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
+├── skills/
+│   └── eurostat-guide/
+│       ├── references/
+│       │   └── sql-analysis.md
+│       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -273,7 +280,9 @@ eurostat-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json

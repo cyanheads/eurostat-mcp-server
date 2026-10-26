@@ -16,7 +16,11 @@ export function clampReadLimit(
   requested: number,
   maximum: number,
   field: 'preview_limit' | 'limit',
-  toolName: 'eurostat_query_dataset' | 'eurostat_download_dataset' | 'eurostat_search_datasets',
+  toolName:
+    | 'eurostat_query_dataset'
+    | 'eurostat_download_dataset'
+    | 'eurostat_search_datasets'
+    | 'eurostat_get_dimension_values',
   ctx: Pick<Context, 'log'>,
 ): { value: number; notice?: string } {
   if (requested <= maximum) return { value: requested };

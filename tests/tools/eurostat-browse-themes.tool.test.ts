@@ -86,6 +86,7 @@ describe('eurostatBrowseThemes', () => {
       browse: vi.fn().mockResolvedValue({
         items: mockChildItems,
         parentPath: ['Economy and finance'],
+        themeCode: 'econ',
       }),
     } as never);
     const ctx = createMockContext({ errors: eurostatBrowseThemes.errors });
@@ -384,7 +385,7 @@ describe('eurostatBrowseThemes — disclosing a partial catalogue', () => {
   const LOADED_AT = '2026-10-14T23:35:00.000Z';
 
   it('keeps a healthy browse free of disclosure fields (characterization)', async () => {
-    serve({ items: mockChildItems, parentPath: ['Economy and finance'] });
+    serve({ items: mockChildItems, parentPath: ['Economy and finance'], themeCode: 'econ' });
     const result = await runToolContract(eurostatBrowseThemes, { theme_code: 'econ' });
     expect(Object.keys(result.structuredContent ?? {}).sort()).toEqual([
       'itemCount',
@@ -451,7 +452,9 @@ describe('eurostatBrowseThemes — disclosing a partial catalogue', () => {
       'The Comext dataflow list merge is retried about once a minute: browse "prom" again after that. eurostat_get_dataset_info reads a DS-* code directly.',
     );
     expect(textOf(result)).toContain('comes from the Comext dataflow list');
-    expect(textOf(result)).toContain(`Recovery: ${error.data.recovery.hint}`);
+    expect(textOf(result)).toContain(
+      'Recovery: The Comext dataflow list merge is retried about once a minute: browse "prom" again after that. eurostat_get_dataset_info reads a DS-\\* code directly.',
+    );
   });
 
   const STALE = `The catalogue could not be refreshed, so this lookup ran against the copy loaded at ${LOADED_AT}; folders Eurostat added since then are not in it.`;
@@ -523,6 +526,13 @@ describe('eurostatBrowseThemes — not_found from the real catalogue service', (
     return loadedAt.toISOString();
   }
   const EXPIRED = 13 * 60 * 60 * 1000;
+  it('echoes the canonical theme on both response surfaces after case-insensitive lookup', async () => {
+    serveCatalogue(0);
+    const result = await runToolContract(eurostatBrowseThemes, { theme_code: 'ECONOMY' });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ themeCode: 'economy' });
+    expect(textOf(result)).toContain('economy');
+  });
   const stale = (loadedAt: string) =>
     `The catalogue could not be refreshed, so this lookup ran against the copy loaded at ${loadedAt}; folders Eurostat added since then are not in it.`;
 

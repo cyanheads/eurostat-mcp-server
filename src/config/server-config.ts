@@ -11,7 +11,7 @@ const ServerConfigSchema = z.object({
     .stringbool()
     .default(true)
     .describe(
-      'Clamp positive read limits to preview 500 and search 100 with a notice. False restores rejecting maximum schemas.',
+      'Clamp positive read limits to preview 500, search 100 and dimension values 1,000 with a notice. False restores rejecting maximum schemas.',
     ),
   baseUrl: z
     .string()

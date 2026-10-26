@@ -7,6 +7,7 @@ import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it, vi } from 'vitest';
 import { clampReadLimit } from '@/mcp-server/tools/clamp-read-limit.js';
 import { createEurostatDownloadDataset } from '@/mcp-server/tools/definitions/eurostat-download-dataset.tool.js';
+import { createEurostatGetDimensionValues } from '@/mcp-server/tools/definitions/eurostat-get-dimension-values.tool.js';
 import { createEurostatQueryDataset } from '@/mcp-server/tools/definitions/eurostat-query-dataset.tool.js';
 import { createEurostatSearchDatasets } from '@/mcp-server/tools/definitions/eurostat-search-datasets.tool.js';
 
@@ -22,9 +23,17 @@ vi.mock('@cyanheads/mcp-ts-core/utils', async (original) => {
 
 describe('read limit policy', () => {
   for (const [label, make, field, cap, defaults, args] of [
-    ['query', createEurostatQueryDataset, 'preview_limit', 500, 50, { dataset_code: 'x' }],
-    ['download', createEurostatDownloadDataset, 'preview_limit', 500, 50, { dataset_code: 'x' }],
+    ['query', createEurostatQueryDataset, 'preview_limit', 500, 25, { dataset_code: 'x' }],
+    ['download', createEurostatDownloadDataset, 'preview_limit', 500, 25, { dataset_code: 'x' }],
     ['search', createEurostatSearchDatasets, 'limit', 100, 20, { query: 'GDP' }],
+    [
+      'dimension',
+      createEurostatGetDimensionValues,
+      'limit',
+      1_000,
+      25,
+      { dataset_code: 'x', dimension: 'unit' },
+    ],
   ] as const) {
     it(`${label} advertises both policies and retains validation and defaults`, () => {
       const on = make(true);
@@ -49,6 +58,19 @@ describe('read limit policy', () => {
     });
   }
 
+  it('does not advertise a maximum for last_n_periods in either policy', () => {
+    for (const enabled of [true, false]) {
+      const tool = createEurostatQueryDataset(enabled);
+      const schema = z.toJSONSchema(tool.input) as {
+        properties: Record<string, { maximum?: number }>;
+      };
+      expect(schema.properties.last_n_periods).not.toHaveProperty('maximum');
+      for (const last_n_periods of [0, -1, 0.5, NaN, Infinity, '6']) {
+        expect(tool.input.safeParse({ dataset_code: 'x', last_n_periods }).success).toBe(false);
+      }
+    }
+  });
+
   it('records exactly one log and counter per clamped tool and none for in-cap requests', () => {
     add.mockClear();
     const ctx = createMockContext();
@@ -57,6 +79,7 @@ describe('read limit policy', () => {
       ['eurostat_query_dataset', 'preview_limit', 500],
       ['eurostat_download_dataset', 'preview_limit', 500],
       ['eurostat_search_datasets', 'limit', 100],
+      ['eurostat_get_dimension_values', 'limit', 1_000],
     ] as const) {
       expect(clampReadLimit(cap, cap, field, tool, ctx)).toEqual({ value: cap });
       expect(clampReadLimit(cap + 1, cap, field, tool, ctx)).toEqual({
@@ -71,8 +94,8 @@ describe('read limit policy', () => {
         applied: cap,
       });
     }
-    expect(add).toHaveBeenCalledTimes(3);
-    expect(log).toHaveBeenCalledTimes(3);
+    expect(add).toHaveBeenCalledTimes(4);
+    expect(log).toHaveBeenCalledTimes(4);
   });
 
   it('clamps finite integral values beyond the safe-integer range', () => {

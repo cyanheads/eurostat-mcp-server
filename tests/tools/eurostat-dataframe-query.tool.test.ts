@@ -58,6 +58,28 @@ afterAll(async () => {
 });
 
 describe('eurostatDataframeQuery', () => {
+  it('returns two complete 40,000-character rows without a byte cut on either surface', async () => {
+    const result = await runToolContract(
+      eurostatDataframeQuery,
+      {
+        canvas_id: canvasId,
+        sql: "SELECT i, repeat('x', 40000) AS wide FROM (VALUES (0), (1)) r(i) ORDER BY i",
+      },
+      { context: { tenantId: 'default' } },
+    );
+    expect(result.structuredContent).toMatchObject({
+      rows: [
+        { i: 0, wide: 'x'.repeat(40000) },
+        { i: 1, wide: 'x'.repeat(40000) },
+      ],
+      rowCount: 2,
+      truncated: false,
+    });
+    expect(result.structuredContent).not.toHaveProperty('notice');
+    const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+    expect(text).toContain(`i=0 | wide=${JSON.stringify('x'.repeat(40000))}`);
+    expect(text).toContain(`i=1 | wide=${JSON.stringify('x'.repeat(40000))}`);
+  });
   it('preserves scalar values, bigint strings and empty results before response shaping', async () => {
     const result = await runToolContract(
       eurostatDataframeQuery,
@@ -99,9 +121,9 @@ describe('eurostatDataframeQuery', () => {
     expect(text).toContain('literal="NULL" | nil=null | yes=true | text="雪\\n\\" | ="');
   });
 
-  it('bounds full production envelopes and pages by the returned rowCount', async () => {
+  it('returns complete wide SQL pages and honors explicit offsets', async () => {
     const sql =
-      "SELECT i, repeat('雪\\\"', 5000) AS wide FROM (VALUES (0), (1), (2)) AS r(i) ORDER BY i LIMIT 3";
+      "SELECT i, repeat('雪\\\"', 5000) AS wide FROM (VALUES (0), (1), (2)) AS r(i) ORDER BY i LIMIT 1";
     const first = await runToolContract(
       eurostatDataframeQuery,
       { canvas_id: canvasId, sql },
@@ -110,11 +132,9 @@ describe('eurostatDataframeQuery', () => {
     expect(first.isError).not.toBe(true);
     expect(first.structuredContent).toMatchObject({
       rowCount: 1,
-      truncated: true,
-      notice: expect.stringContaining('64,000'),
+      truncated: false,
     });
-    expect(Buffer.byteLength(JSON.stringify(first.structuredContent))).toBeLessThanOrEqual(64000);
-    expect(Buffer.byteLength(JSON.stringify(first.content))).toBeLessThanOrEqual(64000);
+    expect(first.structuredContent).not.toHaveProperty('notice');
     const next = await runToolContract(
       eurostatDataframeQuery,
       { canvas_id: canvasId, sql: `${sql} OFFSET 1` },
@@ -123,7 +143,7 @@ describe('eurostatDataframeQuery', () => {
     expect(next.structuredContent).toMatchObject({
       rows: [{ i: 1 }],
       rowCount: 1,
-      truncated: true,
+      truncated: false,
     });
     const last = await runToolContract(
       eurostatDataframeQuery,
@@ -140,9 +160,6 @@ describe('eurostatDataframeQuery', () => {
       (page.structuredContent as { rows: { i: number }[] }).rows.map((row) => row.i),
     );
     expect(ids).toEqual([0, 1, 2]);
-    expect(first.content.map((b) => ('text' in b ? b.text : '')).join('\n')).toContain(
-      (first.structuredContent as { notice: string }).notice,
-    );
     const end = await runToolContract(
       eurostatDataframeQuery,
       { canvas_id: canvasId, sql: `${sql} OFFSET 3` },
@@ -151,7 +168,7 @@ describe('eurostatDataframeQuery', () => {
     expect(end.structuredContent).toMatchObject({ rows: [], rowCount: 0, truncated: false });
   });
 
-  it('bounds nested-row costs and keeps empty containers and scalar JSON on both surfaces', async () => {
+  it('keeps every nested row, empty container and scalar JSON on both surfaces', async () => {
     const result = await runToolContract(
       eurostatDataframeQuery,
       {
@@ -161,8 +178,8 @@ describe('eurostatDataframeQuery', () => {
       { context: { tenantId: 'default' } },
     );
     expect(result.structuredContent).toMatchObject({
-      rowCount: 1,
-      truncated: true,
+      rowCount: 2,
+      truncated: false,
       rows: [
         {
           i: 0,
@@ -171,16 +188,22 @@ describe('eurostatDataframeQuery', () => {
           flag: false,
           scalar: 1.25,
         },
+        {
+          i: 1,
+          nested: { deep: [{ value: 'x'.repeat(40000) }] },
+          empty: [],
+          flag: false,
+          scalar: 1.25,
+        },
       ],
     });
-    expect(Buffer.byteLength(JSON.stringify(result.structuredContent))).toBeLessThanOrEqual(64000);
-    expect(Buffer.byteLength(JSON.stringify(result.content))).toBeLessThanOrEqual(64000);
+    expect(result.structuredContent).not.toHaveProperty('notice');
     const text = result.content.map((b) => ('text' in b ? b.text : '')).join('\n');
     expect(text).toContain(`nested=${JSON.stringify({ deep: [{ value: 'x'.repeat(40000) }] })}`);
     expect(text).toContain('empty=[] | flag=false | scalar=1.25');
   });
 
-  it('keeps a full result that fits even when a partial result plus notice would not', async () => {
+  it('keeps uneven-width complete rows without a truncation notice', async () => {
     const result = await runToolContract(
       eurostatDataframeQuery,
       {

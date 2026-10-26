@@ -95,6 +95,38 @@ describe('eurostatQueryDataset', () => {
     expect(enrichment.notice).toBeUndefined();
   });
 
+  it('composes last-N selected-period gaps with clamp, unmatched and preview notices on both surfaces', async () => {
+    setCanvas(undefined);
+    vi.mocked(getEurostatDataService).mockReturnValue({
+      queryDataset: vi
+        .fn()
+        .mockResolvedValue({
+          ...mockQueryResult,
+          obsCount: 600,
+          unpopulatedPeriods: Array.from({ length: 26 }, (_, i) => String(2000 + i)),
+          unmatchedValues: { geo: ['XX'] },
+        }),
+    } as never);
+    const result = await runToolContract(eurostatQueryDataset, {
+      dataset_code: 'nama_10_gdp',
+      last_n_periods: 30,
+      preview_limit: 1000,
+      stage: true,
+    });
+    const notice = (result.structuredContent as { notice: string }).notice;
+    expect(notice).toContain('26 selected periods');
+    expect(notice).toContain('2002, 2003');
+    expect(notice).toContain('2025');
+    expect(notice).toContain('2 earlier periods omitted');
+    expect(notice).toMatch(/replace last_n_periods with until_period/i);
+    expect(notice).toContain('preview_limit requested 1000; applied 500');
+    expect(notice).toContain('geo=[XX]');
+    expect(notice).toContain('first 3 of 600');
+    expect(notice).toContain('staging is unavailable');
+    expect(contentText(result)).toContain(notice);
+    expect(result.structuredContent).not.toHaveProperty('unpopulatedPeriods');
+  });
+
   it('reports only the filters the service actually applied', async () => {
     // The service drops zero-length arrays before building the request; both response
     // surfaces must echo that set, not the raw input that claimed a geo restriction.
@@ -124,10 +156,11 @@ describe('eurostatQueryDataset', () => {
     expect(result).not.toHaveProperty('appliedFilters');
   });
 
-  it('applies default empty filters, a 50-row preview, and EN language', () => {
+  it('applies default empty filters, a 25-row preview, and EN language', () => {
     const input = eurostatQueryDataset.input.parse({ dataset_code: 'nama_10_gdp' });
     expect(input.filters).toEqual({});
-    expect(input.preview_limit).toBe(50);
+    expect(input.preview_limit).toBe(25);
+    expect(input.stage).toBe(false);
     expect(input.lang).toBe('EN');
   });
 
@@ -323,7 +356,7 @@ describe('eurostatQueryDataset', () => {
       undefined,
       5,
       'EN',
-      50,
+      25,
       ctx,
     );
   });
@@ -552,6 +585,76 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
   });
 
   describe('with a canvas', () => {
+    for (const count of [5000, 5001]) {
+      for (const stage of [undefined, false, true]) {
+        it(`preserves truncation and staging for ${count} rows with stage=${stage}`, async () => {
+          fetchMock.mockImplementation(async () =>
+            okResponse(count === 5000 ? atCap() : pastCap()),
+          );
+          const result = await run({ ...(stage === undefined ? {} : { stage }), preview_limit: 1 });
+          expect(result.truncated).toBe(count > 5000);
+          expect(result.stagedRowCount).toBe(stage || count > 5000 ? count : undefined);
+          expect(result.observations).toHaveLength(1);
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+        });
+      }
+    }
+    it('looks up an unknown canvas for an explicitly staged small match', async () => {
+      fetchMock.mockImplementation(async () => okResponse(small()));
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'nama_10_gdp',
+        stage: true,
+        canvas_id: 'zzzzzzzzzz',
+      });
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          data: {
+            reason: 'canvas_not_found',
+            recovery: { hint: expect.stringContaining('Omit canvas_id') },
+          },
+        },
+      });
+      expect(contentText(result)).toContain('Recovery: Omit canvas_id');
+    });
+    for (const preview_limit of [3, 5, 8]) {
+      it(`explicitly stages all five rows with preview ${preview_limit}`, async () => {
+        fetchMock.mockImplementation(async () =>
+          okResponse(jsonStatBody(['2023'], GEOS.slice(0, 5), 5)),
+        );
+        const response = await runToolContract(eurostatQueryDataset, {
+          dataset_code: 'nama_10_gdp',
+          stage: true,
+          preview_limit,
+        });
+        expect(response.isError).not.toBe(true);
+        expect(response.structuredContent).toMatchObject({
+          obsCount: 5,
+          truncated: false,
+          stagedRowCount: 5,
+          notice: expect.stringContaining('eurostat_dataframe_describe'),
+        });
+        const result = response.structuredContent as {
+          canvasId: string;
+          tableName: string;
+          notice: string;
+          observations: unknown[];
+        };
+        expect(result.observations).toHaveLength(Math.min(5, preview_limit));
+        expect(contentText(response)).toContain(result.notice);
+        const instance = await canvas.acquire(result.canvasId, ctx());
+        const staged = await instance.query(
+          `SELECT geo, geo_label, obs_value FROM ${result.tableName} ORDER BY obs_value`,
+        );
+        expect(staged.rows).toEqual(
+          Array.from({ length: 5 }, (_, i) => ({
+            geo: `G${i}`,
+            geo_label: `G${i} label`,
+            obs_value: i,
+          })),
+        );
+      });
+    }
+
     it('clamps over-cap previews without changing full-match counts or staging threshold', async () => {
       fetchMock.mockImplementation(async () =>
         okResponse(jsonStatBody(PERIODS.slice(0, 6), GEOS, 550)),
@@ -602,7 +705,7 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
       const result = await run();
 
       expect(result.truncated).toBe(true);
-      expect(result.observations).toHaveLength(50);
+      expect(result.observations).toHaveLength(25);
       expect(result.obsCount).toBe(6000);
       // The rows outside the inline preview are reachable, which is the whole point.
       expect(result.stagedRowCount).toBe(6000);
@@ -753,7 +856,7 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
       const result = await run();
 
       expect(result.truncated).toBe(false);
-      expect(result.observations).toHaveLength(50);
+      expect(result.observations).toHaveLength(25);
       // No canvas is minted because the full match stays below the 5,000-row threshold.
       expect(acquire).not.toHaveBeenCalled();
       expect(result.canvasId).toBeUndefined();
@@ -876,12 +979,26 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
       setCanvas(undefined);
     });
 
+    it('discloses unavailable explicit staging even when the preview is complete', async () => {
+      fetchMock.mockImplementation(async () => okResponse(jsonStatBody(['2023'], ['DE'], 1)));
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'nama_10_gdp',
+        stage: true,
+        canvas_id: 'zzzzzzzzzz',
+      });
+      expect(result.isError).not.toBe(true);
+      const notice = (result.structuredContent as { notice: string }).notice;
+      expect(notice).toContain('staging is unavailable');
+      expect(notice).not.toContain('eurostat_dataframe_');
+      expect(contentText(result)).toContain(notice);
+    });
+
     it('returns the preview with no canvas fields at all', async () => {
       fetchMock.mockImplementation(async () => okResponse(oversized()));
       const result = await run();
 
       expect(result.truncated).toBe(true);
-      expect(result.observations).toHaveLength(50);
+      expect(result.observations).toHaveLength(25);
       expect(result.obsCount).toBe(6000);
       // Every added field is optional and absent — not null, not an empty string — so a
       // caller on this deployment can distinguish an absent Canvas from an empty handle.
@@ -1153,7 +1270,7 @@ describe('eurostatQueryDataset — period inputs and filter matching (real servi
     expect(data).not.toHaveProperty('matchedPeriods');
   });
 
-  it('returns a fully matched query with no unmatchedValues and no notice', async () => {
+  it('reports the selected period gap even when every filter value matched', async () => {
     fetchMock.mockImplementationOnce(async () =>
       jsonReply(envelope('une-rt-m-geo-de-lower-last3')),
     );
@@ -1170,6 +1287,7 @@ describe('eurostatQueryDataset — period inputs and filter matching (real servi
         'datasetLabel',
         'dimensionsUsed',
         'missingObsCount',
+        'notice',
         'obsCount',
         'observations',
         'timeRange',
@@ -1177,6 +1295,15 @@ describe('eurostatQueryDataset — period inputs and filter matching (real servi
       ].sort(),
     );
     expect(contentText(result as never)).not.toMatch(/unmatched/i);
+    expect(result.structuredContent).toMatchObject({
+      obsCount: 2,
+      timeRange: { start: '2026-06', end: '2026-07' },
+      notice: expect.stringContaining(
+        '1 selected period (2026-08) carries no populated cells anywhere in this match',
+      ),
+    });
+    expect(contentText(result)).toContain('1 selected period (2026-08)');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the preview-short response shape: structured keys and notice text', async () => {
@@ -1206,8 +1333,9 @@ describe('eurostatQueryDataset — period inputs and filter matching (real servi
     expect(result.structuredContent).toMatchObject({
       obsCount: 2,
       truncated: false,
-      notice:
+      notice: expect.stringContaining(
         'preview_limit=1 returns the first 1 of 2 matched rows inline; it does not reduce the match. Use dimension filters (freq, s_adj, age, unit, sex, geo) or a period range to reduce the match itself.',
+      ),
     });
   });
 
@@ -1444,7 +1572,7 @@ describe('eurostatQueryDataset — period inputs and filter matching (real servi
       expect(hint).toContain('eurostat_get_dimension_values');
       expect(hint).toContain('geo');
       expect(hint).not.toMatch(/last_n_periods counts/);
-      expect(text).toContain('geo=[XX]');
+      expect(text).toContain('geo=\\[XX\\]');
       expect(text).toContain('eurostat_get_dimension_values');
     });
 

@@ -188,6 +188,28 @@ describe('EurostatCatalogueService — parseToc', () => {
 // ---------------------------------------------------------------------------
 
 describe('EurostatCatalogueService — browse', () => {
+  it('resolves theme case after exact matches and preserves canonical nested placements', async () => {
+    const svc = await makeLoadedService([
+      tocLine('Root', 'root', 'folder'),
+      tocLine('    Economy', 'econ', 'folder'),
+      tocLine('        National accounts', 'nama', 'folder'),
+      tocLine('            GDP', 'gdp', 'dataset'),
+      tocLine('    Other', 'other', 'folder'),
+      tocLine('        National accounts elsewhere', 'nama', 'folder'),
+      tocLine('    Exact uppercase', 'ECON', 'folder'),
+    ]);
+    const ctx = createMockContext();
+    expect(await svc.browse('NAMA', ctx)).toMatchObject({
+      themeCode: 'nama',
+      items: [{ code: 'gdp' }],
+      parentPath: ['Root', 'Economy', 'National accounts'],
+      otherPlacements: [['Root', 'Other', 'National accounts elsewhere']],
+    });
+    expect(await svc.browse('ECON', ctx)).toMatchObject({ themeCode: 'ECON', items: [] });
+    await expect(svc.browse('GDP', ctx)).rejects.toMatchObject({
+      data: { reason: 'not_a_folder', themeCode: 'gdp', entryType: 'dataset' },
+    });
+  });
   it('returns root themes when themeCode is undefined', async () => {
     const svc = await makeLoadedService([
       tocLine('Database by themes', 'data', 'folder'),

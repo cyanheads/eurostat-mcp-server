@@ -157,10 +157,10 @@ describe('eurostatDownloadDataset — input schema', () => {
       await previousCanvas.teardown();
     }
   });
-  it('defaults filters to an empty map and preview_limit to 50', () => {
+  it('defaults filters to an empty map and preview_limit to 25', () => {
     const input = parse({});
     expect(input.filters).toEqual({});
-    expect(input.preview_limit).toBe(50);
+    expect(input.preview_limit).toBe(25);
   });
 
   it('accepts an oversized positive preview_limit and rejects zero', () => {
@@ -529,7 +529,7 @@ describe('eurostatDownloadDataset — without a canvas', () => {
     await eurostatDownloadDataset.handler(parse({}), ctx);
     const notice = getEnrichment(ctx).notice as string;
     expect(notice).toContain(
-      'only the 50 observations returned inline are retained, and the other 550 were counted and discarded. Set CANVAS_PROVIDER_TYPE=duckdb to keep the download, or use eurostat_query_dataset with dimension filters to fetch a slice small enough to return whole.',
+      'only the 25 observations returned inline are retained, and the other 575 were counted and discarded. Set CANVAS_PROVIDER_TYPE=duckdb to keep the download, or use eurostat_query_dataset with dimension filters to fetch a slice small enough to return whole.',
     );
     expect(notice).not.toContain('Raise preview_limit');
   });

@@ -862,7 +862,7 @@ describe('Edge cases', () => {
 
   describe('eurostatQueryDataset — 5,000-observation staging threshold', () => {
     /**
-     * A previewed service result: the decoder stops at the requested 50 rows, and `obsCount`
+     * A previewed service result: the decoder stops at the default 25 rows, and `obsCount`
      * reports the whole match. The two therefore diverge, keeping preview size independent
      * from the threshold that sets `truncated`.
      */
@@ -870,7 +870,7 @@ describe('Edge cases', () => {
       datasetCode: 'nama_10_gdp',
       datasetLabel: 'GDP',
       dimensionsUsed: ['geo', 'time'],
-      observations: Array.from({ length: 50 }, (_, i) => ({
+      observations: Array.from({ length: 25 }, (_, i) => ({
         dimensions: {
           geo: { code: `G${i}`, label: `Country ${i}` },
           time: { code: '2024', label: '2024' },
@@ -891,7 +891,7 @@ describe('Edge cases', () => {
       const input = eurostatQueryDataset.input.parse({ dataset_code: 'nama_10_gdp' });
       const result = await eurostatQueryDataset.handler(input, ctx);
       expect(result.truncated).toBe(true);
-      expect(result.observations).toHaveLength(50);
+      expect(result.observations).toHaveLength(25);
       expect(result.obsCount).toBe(5100);
     });
 
@@ -902,7 +902,7 @@ describe('Edge cases', () => {
       const ctx = createMockContext({ errors: eurostatQueryDataset.errors });
       const input = eurostatQueryDataset.input.parse({ dataset_code: 'nama_10_gdp' });
       await eurostatQueryDataset.handler(input, ctx);
-      expect(getEnrichment(ctx).notice).toContain('preview_limit=50');
+      expect(getEnrichment(ctx).notice).toContain('preview_limit=25');
       expect(getEnrichment(ctx).notice).toContain('dimension filters');
     });
 
@@ -1202,7 +1202,7 @@ describe('Edge cases', () => {
         undefined,
         undefined,
         'EN',
-        50,
+        25,
         ctx,
       );
     });
@@ -1226,7 +1226,7 @@ describe('Edge cases', () => {
         undefined,
         undefined,
         'EN',
-        50,
+        25,
         ctx,
       );
     });
@@ -1266,7 +1266,7 @@ describe('Edge cases', () => {
         '2024',
         undefined,
         'EN',
-        50,
+        25,
         ctx,
       );
     });

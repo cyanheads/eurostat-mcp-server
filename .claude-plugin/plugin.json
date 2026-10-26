@@ -26,7 +26,7 @@
     "clamp_limits": {
       "type": "boolean",
       "title": "Clamp read limits",
-      "description": "Clamp positive integer preview/search limits to 500/100 with a notice. Disable to reject over-cap inputs.",
+      "description": "Clamp positive integer preview/search/dimension limits to 500/100/1000 with a notice. Disable to reject over-cap inputs.",
       "default": true,
       "required": false
     }

@@ -104,6 +104,7 @@ function spawnServer(
   const {
     CANVAS_PROVIDER_TYPE: _canvas,
     EUROSTAT_DATAFRAME_DROP_ENABLED: _drop,
+    EUROSTAT_CLAMP_LIMITS: _clamp,
     // DEBUG would add a stack trace to a startup banner.
     DEBUG: _debug,
     ...inherited
@@ -283,6 +284,29 @@ async function expectDropUncallable(port: number): Promise<void> {
 }
 
 describe('dataframe tool registration', () => {
+  it.each(['true', 'false'])(
+    'registers the dimension count policy selected by EUROSTAT_CLAMP_LIMITS=%s',
+    async (flag) => {
+      await withServer(
+        { CANVAS_PROVIDER_TYPE: 'none', EUROSTAT_CLAMP_LIMITS: flag },
+        async (port) => {
+          const message = await rpc(port, 'tools/list', {});
+          const tools = message.result?.tools as Array<{
+            name: string;
+            inputSchema: { properties: { limit?: Record<string, unknown> } };
+          }>;
+          const dimension = tools.find((entry) => entry.name === 'eurostat_get_dimension_values');
+          expect(dimension?.inputSchema.properties.limit).toMatchObject({
+            default: 25,
+            minimum: 1,
+          });
+          if (flag === 'false')
+            expect(dimension?.inputSchema.properties.limit).toHaveProperty('maximum', 1000);
+          else expect(dimension?.inputSchema.properties.limit).not.toHaveProperty('maximum');
+        },
+      );
+    },
+  );
   for (const [label, gate] of [
     ['unset', {}],
     ['empty', { CANVAS_PROVIDER_TYPE: '' }],

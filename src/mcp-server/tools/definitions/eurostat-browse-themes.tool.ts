@@ -18,7 +18,7 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
       .string()
       .optional()
       .describe(
-        'Folder code to expand (e.g., "economy", "reg"). Omit to list the top-level theme folders.',
+        'Folder code to expand (e.g., "economy", "reg"). Exact codes take precedence, then case-insensitive matching applies. Omit to list the top-level theme folders.',
       ),
   }),
   output: z.object({
@@ -159,11 +159,12 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
         });
       }
       if (data?.reason === 'not_a_folder') {
+        const canonicalThemeCode = data.themeCode;
         throw ctx.fail('not_a_folder', (err as Error).message, {
-          themeCode,
+          themeCode: canonicalThemeCode,
           entryType: data.entryType,
           recovery: {
-            hint: `Pass "${themeCode}" as dataset_code to eurostat_get_dataset_info to inspect its dimensions, then eurostat_query_dataset to retrieve data.`,
+            hint: `Pass "${canonicalThemeCode}" as dataset_code to eurostat_get_dataset_info to inspect its dimensions, then eurostat_query_dataset to retrieve data.`,
           },
         });
       }
@@ -177,11 +178,16 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
       }
       throw err;
     }
-    const { comextListMissing, catalogueLoadedAt, ...listing } = browsed;
+    const {
+      comextListMissing,
+      catalogueLoadedAt,
+      themeCode: canonicalThemeCode,
+      ...listing
+    } = browsed;
     ctx.log.info('Theme browse complete', { themeCode, itemCount: listing.items.length });
     ctx.enrich({
       itemCount: listing.items.length,
-      ...(themeCode && { themeCode }),
+      ...(canonicalThemeCode && { themeCode: canonicalThemeCode }),
       ...(comextListMissing && { comextListMissing }),
       ...(catalogueLoadedAt && { catalogueLoadedAt }),
     });

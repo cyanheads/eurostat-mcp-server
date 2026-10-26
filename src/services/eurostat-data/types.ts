@@ -192,13 +192,15 @@ export interface QueryExecution extends QueryResult {
    * them — the allocation `OBS_CAP` exists to avoid.
    */
   rows: () => Generator<ObservationRow>;
+  /** Selected last-N time positions without any in-range value/status cell, in index order. */
+  unpopulatedPeriods?: string[];
 }
 
 /**
- * Decode safety limit and threshold for staging a full matched result.
+ * Decode safety limit and automatic staging threshold for a full matched result.
  *
  * The public preview limit is lower, but the decoder still enforces this ceiling. Matches
- * above it are the only ones eligible for Canvas staging; totals remain uncapped.
+ * above it stage automatically; callers can explicitly stage smaller matches. Totals remain uncapped.
  */
 export const OBS_CAP = 5_000;
 

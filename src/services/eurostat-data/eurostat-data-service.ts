@@ -632,6 +632,7 @@ export class EurostatDataService {
     obsCount: number;
     missingObsCount: number;
     timeCodes: string[];
+    unpopulatedPeriods: string[];
   } {
     const dims = data.id ?? [];
     const sizes = data.size ?? [];
@@ -668,10 +669,13 @@ export class EurostatDataService {
       if (pos >= 0 && pos < timeSize) timeCodeAt[pos] = code;
     }
     const timeCodes: string[] = [];
+    const unpopulatedPeriods: string[] = [];
     for (let pos = 0; pos < timeSize; pos++) {
-      if (timeSeen[pos]) timeCodes.push(timeCodeAt[pos] ?? String(pos));
+      const code = timeCodeAt[pos];
+      if (timeSeen[pos]) timeCodes.push(code ?? String(pos));
+      else if (code !== undefined) unpopulatedPeriods.push(code);
     }
-    return { obsCount, missingObsCount, timeCodes: timeCodes.sort() };
+    return { obsCount, missingObsCount, timeCodes: timeCodes.sort(), unpopulatedPeriods };
   }
 
   /**
@@ -832,20 +836,28 @@ export class EurostatDataService {
   ): Promise<DimensionValuesResult> {
     ctx.log.info('Fetching dimension values', { datasetCode, dimension, geoLevel });
 
+    const metadata = await this.getSdmxMetadata(datasetCode, ctx);
+    const dimensions = metadata.meta.dimensions;
+    const folded = dimension.toLowerCase();
+    const dimDef =
+      dimensions.find(({ code }) => code === dimension) ??
+      dimensions.find(({ code }) => code.toLowerCase() === folded) ??
+      (folded === 'time_period' ? dimensions.find(({ code }) => code === 'time') : undefined);
+    const canonicalDimension = dimDef?.code;
+    const values =
+      canonicalDimension === undefined ? undefined : metadata.valuesByDimension[canonicalDimension];
+    if (!dimDef || !values) {
+      throw notFound(
+        `Dimension "${dimension}" not found in dataset "${datasetCode}". Valid dimensions: ${dimensions.map(({ code }) => code).join(', ')}.`,
+        { reason: 'not_found', datasetCode, dimension },
+      );
+    }
+    dimension = dimDef.code;
+
     if (geoLevel && dimension !== 'geo') {
       throw validationError(
         `"geo_level" filters the NUTS hierarchy of the "geo" dimension and has no effect on "${dimension}". Omit geo_level, or set dimension to "geo".`,
         { reason: 'conflicting_params', dimension, geoLevel },
-      );
-    }
-
-    const metadata = await this.getSdmxMetadata(datasetCode, ctx);
-    const dimDef = metadata.meta.dimensions.find(({ code }) => code === dimension);
-    const values = metadata.valuesByDimension[dimension];
-    if (!dimDef || !values) {
-      throw notFound(
-        `Dimension "${dimension}" not found in dataset "${datasetCode}". Use eurostat_get_dataset_info to see valid dimensions.`,
-        { reason: 'not_found', datasetCode, dimension },
       );
     }
 
@@ -988,7 +1000,7 @@ export class EurostatDataService {
 
     // Totals describe the whole match and are counted from the response's cell keys, so the
     // decode cap below cannot shrink them.
-    const { obsCount, missingObsCount, timeCodes } = this.scanCells(data);
+    const { obsCount, missingObsCount, timeCodes, unpopulatedPeriods } = this.scanCells(data);
 
     // Emptiness is the cell count reaching zero — the same count reported below and the same
     // membership the decoder walks. Reading `value` alone instead would reject a slice whose
@@ -1037,6 +1049,7 @@ export class EurostatDataService {
       missingObsCount,
       appliedFilters,
       ...(unmatchedValues && { unmatchedValues }),
+      ...(lastN && unpopulatedPeriods.length > 0 && { unpopulatedPeriods }),
       rows: () => this.iterateRows(data, dimensionsUsed, isComextDataset(datasetCode)),
     };
   }

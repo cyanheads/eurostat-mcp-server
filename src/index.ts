@@ -14,7 +14,7 @@ import { eurostatDataframeDrop } from './mcp-server/tools/definitions/eurostat-d
 import { eurostatDataframeQuery } from './mcp-server/tools/definitions/eurostat-dataframe-query.tool.js';
 import { createEurostatDownloadDataset } from './mcp-server/tools/definitions/eurostat-download-dataset.tool.js';
 import { eurostatGetDatasetInfo } from './mcp-server/tools/definitions/eurostat-get-dataset-info.tool.js';
-import { eurostatGetDimensionValues } from './mcp-server/tools/definitions/eurostat-get-dimension-values.tool.js';
+import { createEurostatGetDimensionValues } from './mcp-server/tools/definitions/eurostat-get-dimension-values.tool.js';
 import { createEurostatQueryDataset } from './mcp-server/tools/definitions/eurostat-query-dataset.tool.js';
 import { createEurostatSearchDatasets } from './mcp-server/tools/definitions/eurostat-search-datasets.tool.js';
 import { setCanvas } from './services/canvas-accessor.js';
@@ -104,7 +104,7 @@ await createApp({
     createEurostatSearchDatasets(clampLimits),
     eurostatBrowseThemes,
     eurostatGetDatasetInfo,
-    eurostatGetDimensionValues,
+    createEurostatGetDimensionValues(clampLimits),
     createEurostatQueryDataset(clampLimits),
     createEurostatDownloadDataset(clampLimits),
     canvasEnabled ? eurostatDataframeDescribe : disabledTool(eurostatDataframeDescribe, CANVAS_OFF),
@@ -113,13 +113,9 @@ await createApp({
   ],
   resources: [eurostatDatasetResource],
   prompts: [],
-  instructions: `Eurostat MCP server — EU statistical data across the Eurostat catalogue.
-Workflow: eurostat_search_datasets or eurostat_browse_themes to find a dataset code → eurostat_get_dataset_info to see dimensions → eurostat_get_dimension_values to list valid filter values → eurostat_query_dataset to fetch observations.
-Apply dimension filters to keep queries small: an unfiltered query on a large dataset is slow and can return an async response error instead of data.
-The catalogue covers two hosts. Most datasets come from the Eurostat dissemination table of contents; the DS-* codes — detailed trade by CN8, HS, SITC, BEC and CPA, and PRODCOM — come from the Comext host, and every tool routes a DS-* code there by its prefix. Comext collections are large: filter every request (freq included, since the trade flows mix annual and monthly series), and expect eurostat_get_dimension_values to page a long list such as the 37,069 CN8 product codes — pass filter with words of the code or label to find one value, or follow nextCursor. A collection on neither host, such as the legacy DS-056120, is not disseminated.
-Two paths past eurostat_query_dataset's 5,000-observation inline cap. For a slice of a dataset, keep using eurostat_query_dataset: when the match is larger than the cap and this deployment runs a dataframe canvas, the whole match is also staged as a SQL table named in the response. For a whole dataset, use eurostat_download_dataset, which reads the SDMX bulk endpoint instead — about half the bytes — and stages every observation the same way, bounded by a byte budget it reports back. Read either staged table with eurostat_dataframe_query (eurostat_dataframe_describe lists the table and column names); the two stage different column sets, since the bulk endpoint carries dimension codes with no labels. To label a download's codes, pass its canvasId to eurostat_get_dimension_values as canvas_id: the dimension's values are staged beside it as a code/label table to join on.
-Staged tables expire with their canvas. eurostat_dataframe_drop removes one sooner, leaving the canvas and its other tables in place; it is opt-in, listed only where the deployment also sets EUROSTAT_DATAFRAME_DROP_ENABLED=true.
-The dataframe tools are not listed when the canvas is off. There, narrowing the filters is what brings a capped match into reach, and eurostat_download_dataset retains only its inline preview.`,
+  skills: 'skills',
+  instructions:
+    'Eurostat statistical data, including Comext DS-* collections; no API key required. Resolve dataset codes with eurostat_search_datasets or eurostat_browse_themes, inspect dimensions with eurostat_get_dataset_info, and resolve their values with eurostat_get_dimension_values before fetching observations. Filter large requests, including frequency on Comext, and keep units and aggregation levels comparable. Previews and incomplete bulk transfers cannot support complete totals; inspect notices and flags before concluding data is absent. When a response includes tableName, pass its canvasId as canvas_id to eurostat_dataframe_describe before eurostat_dataframe_query; reuse that canvas for joins. Staging and dataframe tools depend on the deployment canvas. Read eurostat-guide for statistical interpretation and SQL workflows.',
   landing: { requireAuth: false },
   setup(core) {
     // Parsed here so a bad value fails startup with the configuration banner, not every call.

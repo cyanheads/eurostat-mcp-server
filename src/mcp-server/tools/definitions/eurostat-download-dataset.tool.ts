@@ -87,9 +87,9 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
         ? z.number().multipleOf(1).min(1)
         : z.number().int().min(1).max(PREVIEW_MAX)
       )
-        .default(50)
+        .default(25)
         .describe(
-          `How many observations to echo inline, from the start of the download. Default 50; ${clampLimits ? 'positive integers above 500 are clamped to 500 with a notice' : 'maximum 500; larger values are rejected'}. The full download is on the canvas table when one was staged; this is orientation, not the result set.`,
+          `How many observations to echo inline, from the start of the download. Default 25; ${clampLimits ? 'positive integers above 500 are clamped to 500 with a notice' : 'maximum 500; larger values are rejected'}. The full download is on the canvas table when one was staged; this is orientation, not the result set.`,
         ),
       canvas_id: CanvasIdSchema.optional().describe(
         'Reuse an existing dataframe canvas so this download lands beside earlier results and can be joined against them. Pass the canvasId a previous eurostat_download_dataset or eurostat_query_dataset response returned; omit to start a fresh canvas. Ignored on deployments without a dataframe canvas. A download that carries no observations fails as no_results and leaves the canvas untouched.',
@@ -430,7 +430,7 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
            * the preview is discarded, but the counts, the period coverage and the
            * budget verdict then describe the download rather than describing the
            * preview — and the byte budget still bounds what is transferred. Stopping
-           * at preview_limit instead would report a row count of 50 for a dataset of
+           * at preview_limit instead would report a row count of 25 for a dataset of
            * millions.
            */
           for await (const _row of rows) {

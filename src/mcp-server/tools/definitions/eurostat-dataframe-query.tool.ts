@@ -7,12 +7,6 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import {
-  fitPage,
-  INLINE_BUDGET_BYTES,
-  type SurfaceBytes,
-  utf8Bytes,
-} from '@/mcp-server/tools/value-list-paging.js';
 import { acquireCanvas, getCanvas, isCanvasFailure } from '@/services/canvas-accessor.js';
 
 const QueryOutputSchema = z.object({
@@ -21,18 +15,16 @@ const QueryOutputSchema = z.object({
   rows: z
     .array(z.record(z.string(), z.unknown()))
     .describe(
-      'Complete result rows, keyed by column name, bounded by the canvas row limit and 64,000 bytes per serialized surface. Nested cells render as JSON; 64-bit integers arrive as strings so they survive intact. Cast to DOUBLE in SQL if a number is wanted.',
+      'Complete result rows, keyed by column name, bounded by the canvas row limit. Nested cells render as JSON; 64-bit integers arrive as strings so they survive intact. Cast to DOUBLE in SQL if a number is wanted.',
     ),
   rowCount: z
     .number()
     .describe(
-      'Complete rows returned after the canvas row limit and the 64,000-byte budget per serialized response surface. Advance SQL OFFSET by this actual count.',
+      'Complete rows returned after the canvas row limit. Advance SQL OFFSET by this actual count.',
     ),
   truncated: z
     .boolean()
-    .describe(
-      'True when the canvas row limit or the 64,000-byte budget per serialized response surface omitted rows. At least one complete row is retained even if oversized. Follow notice for SQL paging.',
-    ),
+    .describe('True when the canvas row limit omitted rows. Follow notice for SQL paging.'),
 });
 type QueryOutput = z.infer<typeof QueryOutputSchema>;
 
@@ -41,7 +33,7 @@ function renderRow(columns: string[], row: Record<string, unknown>): string {
   return columns.map((column) => `${column}=${JSON.stringify(row[column])}`).join(' | ');
 }
 
-/** Shared by the formatter and the serialized response budget. */
+/** Render every complete row without changing cell values. */
 function renderText(result: QueryOutput): string {
   return [
     `# Query result (canvas \`${result.canvasId}\`)`,
@@ -53,13 +45,13 @@ function renderText(result: QueryOutput): string {
 
 /** Paging depends on a fixed deterministic SELECT over unchanged staged tables. */
 function cutNotice(rows: number): string {
-  return `Returned ${rows.toLocaleString('en-US')} complete rows; the canvas row limit or the 64,000-byte budget per serialized response surface cut this result. Page with the same deterministic SELECT and a total ORDER BY (add tie-breakers for tied keys), using LIMIT/OFFSET and advancing OFFSET by the actual returned rowCount, not the requested LIMIT. If the first page had no ORDER BY, restart sorted at OFFSET 0. Volatile expressions and changing or expired tables do not support stable paging.`;
+  return `Returned ${rows.toLocaleString('en-US')} complete rows; the canvas row limit cut this result. Page with the same deterministic SELECT and a total ORDER BY (add tie-breakers for tied keys), using LIMIT/OFFSET and advancing OFFSET by the actual returned rowCount, not the requested LIMIT. If the first page had no ORDER BY, restart sorted at OFFSET 0. Volatile expressions and changing or expired tables do not support stable paging.`;
 }
 
 export const eurostatDataframeQuery = tool('eurostat_dataframe_query', {
   title: 'Query Eurostat Dataframes',
   description:
-    'Run a read-only SQL SELECT against tables staged on a Eurostat dataframe canvas — the way to reach observations past the 5,000-row inline cap of eurostat_query_dataset and past the inline preview of a eurostat_download_dataset bulk download, and to aggregate, group, or join across staged tables without re-fetching from Eurostat. Call eurostat_dataframe_describe first for the table and column names, which differ between the tools that stage them. Only a single SELECT statement runs: statement chaining, non-SELECT verbs, and functions that read files or external data are rejected. Columns are flat — every dimension is a code column named after the dimension, the measure is obs_value, the observation flag is obs_flag / obs_flag_label and the confidentiality marker is conf_status / conf_status_label; a "_label" companion per dimension exists only on tables eurostat_query_dataset staged. Both observation stagers write the same five measure columns with the same codes, so join their tables on dimension codes and time and compare obs_flag or conf_status across them directly; a DS-* table also carries obs_value_text, a value published as text (e.g. a PRODCOM unit "KG"). A value list eurostat_get_dimension_values staged has two columns, code and label: join it to the code column of a download (e.g. JOIN df_x g ON d.geo = g.code) to label that table. Returns complete rows within the canvas row limit and 64,000 bytes per serialized response surface, retaining at least one complete row even if oversized. Nested cells render as JSON. A cut sets truncated and adds a notice: page the same deterministic SELECT over unchanged tables with a total ORDER BY and LIMIT/OFFSET, advancing by actual rowCount; restart an unordered first page sorted at offset zero. Tied keys need tie-breakers; volatile SQL and changing or expired tables cannot provide stable paging.',
+    'Run a read-only SQL SELECT against tables staged on a Eurostat dataframe canvas, reaching observations beyond an inline preview and aggregating or joining tables without re-fetching Eurostat. Call eurostat_dataframe_describe first for table and column names. Only a single SELECT runs: statement chaining, non-SELECT verbs, and functions reading files or external data are rejected. Columns are flat: dimension codes, obs_value, obs_flag / obs_flag_label, and conf_status / conf_status_label. Tables eurostat_query_dataset staged also carry dimension _label companions; DS-* tables also carry obs_value_text for published text values. Join observation tables on dimension codes and time. A staged dimension value list has code and label columns; join it to an observation dimension code to add labels. Returns every complete row the canvas supplies, bounded only by the canvas row limit; nested cells render as lossless JSON. A row-limit cut sets truncated and adds a notice: page the same deterministic SELECT over unchanged tables with a total ORDER BY and LIMIT/OFFSET, advancing by actual rowCount. Restart an unordered first page sorted at offset zero; tied keys need tie-breakers. Volatile SQL and changing or expired tables cannot provide stable paging.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({
     canvas_id: CanvasIdSchema.describe(
@@ -150,59 +142,14 @@ export const eurostatDataframeQuery = tool('eurostat_dataframe_query', {
      */
     const result = await instance.query(input.sql, { signal: ctx.signal }).catch(asDeclared);
 
-    const page = (count: number): QueryOutput => ({
+    const output: QueryOutput = {
       canvasId: instance.canvasId,
       columns: result.columns,
-      rows: result.rows.slice(0, count),
-      rowCount: count,
-      truncated: result.truncated === true || count < result.rows.length,
-    });
-    const measure = (count: number) => {
-      const output = page(count);
-      const notice = output.truncated ? cutNotice(count) : undefined;
-      const content = [
-        { type: 'text', text: renderText(output) },
-        ...(notice ? [{ type: 'text', text: `\n\n> ${notice}` }] : []),
-      ];
-      return {
-        structured: utf8Bytes(JSON.stringify({ ...output, ...(notice && { notice }) })),
-        text: utf8Bytes(JSON.stringify(content)),
-      };
-    };
-    const costs: SurfaceBytes[] = [];
-    const costOf = (index: number): SurfaceBytes => {
-      const cached = costs[index];
-      if (cached) return cached;
-      const row = result.rows[index] as QueryOutput['rows'][number];
-      const cost = {
-        structured: utf8Bytes(JSON.stringify(row)) + 1,
-        text: utf8Bytes(JSON.stringify(`\n${renderRow(result.columns, row)}`)) - 2,
-      };
-      costs[index] = cost;
-      return cost;
-    };
-    /**
-     * A full result has no cut notice, so it can fit when a partial prefix plus
-     * that notice cannot. Test that case with additive row costs, stopping at
-     * the budget instead of serializing an arbitrarily large full result.
-     */
-    const empty = {
-      ...page(0),
+      rows: result.rows,
       rowCount: result.rows.length,
       truncated: result.truncated === true,
     };
-    let structured = utf8Bytes(JSON.stringify(empty));
-    let text = utf8Bytes(JSON.stringify([{ type: 'text', text: renderText(empty) }]));
-    let fullFits = !empty.truncated;
-    for (let index = 0; fullFits && index < result.rows.length; index++) {
-      const cost = costOf(index);
-      structured += cost.structured - (index === 0 ? 1 : 0);
-      text += cost.text;
-      fullFits = structured <= INLINE_BUDGET_BYTES && text <= INLINE_BUDGET_BYTES;
-    }
-    const count = fullFits ? result.rows.length : fitPage(result.rows.length, measure, costOf);
-    const output = page(count);
-    if (output.truncated) ctx.enrich.notice(cutNotice(count));
+    if (output.truncated) ctx.enrich.notice(cutNotice(output.rowCount));
     ctx.log.info('Canvas query complete', {
       canvasId: instance.canvasId,
       rowCount: output.rowCount,

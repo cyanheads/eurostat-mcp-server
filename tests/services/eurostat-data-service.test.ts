@@ -18,6 +18,7 @@ import {
   splitStatus,
   toObservationRow,
 } from '@/services/eurostat-data/eurostat-data-service.js';
+import type { SdmxDatasetMetadata } from '@/services/eurostat-data/sdmx-metadata.js';
 import {
   type JsonStatResponse,
   OBS_CAP,
@@ -739,11 +740,86 @@ describe('EurostatDataService — dataset-scoped SDMX metadata (#44)', () => {
     expect(result.values.at(-1)).toEqual({ code: 'U11', label: 'Unit 11' });
   });
 
-  it('rejects geo_level paired with a non-geo dimension before requesting metadata', async () => {
+  it.each(['GEO', 'GeO'])(
+    'resolves %s before geo validation and preserves value labels (#81)',
+    async (dimension) => {
+      const result = await svc().getDimensionValues(
+        'earn_ses_annual',
+        dimension,
+        'nuts2',
+        createMockContext(),
+      );
+      expect(result.dimensionCode).toBe('geo');
+      expect(result.values).toEqual([{ code: 'DE11', label: 'Stuttgart' }]);
+    },
+  );
+
+  it('resolves the SDMX time alias to the canonical time dimension (#81)', async () => {
+    const result = await svc().getDimensionValues(
+      'earn_ses_annual',
+      'TIME_PERIOD',
+      undefined,
+      createMockContext(),
+    );
+    expect(result.dimensionCode).toBe('time');
+    expect(result.values.map(({ code }) => code)).toEqual([
+      '2002',
+      '2006',
+      '2010',
+      '2014',
+      '2018',
+      '2022',
+    ]);
+  });
+
+  it('names the loaded valid dimension codes on a genuine miss (#81)', async () => {
+    await expect(
+      svc().getDimensionValues('earn_ses_annual', 'absent', undefined, createMockContext()),
+    ).rejects.toMatchObject({
+      data: { reason: 'not_found' },
+      message: expect.stringContaining('freq, unit, geo, time'),
+    });
+  });
+
+  it('preserves exact identifier matches ahead of case folding and the time alias (#81)', async () => {
+    const service = svc();
+    const values = [{ code: 'MiXeD', label: 'Keep Case' }];
+    const metadata: SdmxDatasetMetadata = {
+      meta: {
+        code: 'test',
+        label: 'test',
+        timeRange: {},
+        dimensions: [
+          { code: 'geo', label: 'lower' },
+          { code: 'GEO', label: 'exact' },
+          { code: 'time', label: 'time' },
+          { code: 'TIME_PERIOD', label: 'exact alias' },
+        ],
+      },
+      valuesByDimension: { geo: values, GEO: values, time: values, TIME_PERIOD: values },
+      geoLevelsByCode: {},
+    };
+    const seam = service as unknown as { getSdmxMetadata(): Promise<SdmxDatasetMetadata> };
+    vi.spyOn(seam, 'getSdmxMetadata').mockResolvedValue(metadata);
+    for (const [dimension, label] of [
+      ['GEO', 'exact'],
+      ['TIME_PERIOD', 'exact alias'],
+    ] as const) {
+      const result = await service.getDimensionValues(
+        'test',
+        dimension,
+        undefined,
+        createMockContext(),
+      );
+      expect(result).toMatchObject({ dimensionCode: dimension, dimensionLabel: label, values });
+    }
+  });
+
+  it('rejects geo_level paired with a resolved non-geo dimension', async () => {
     await expect(
       svc().getDimensionValues('earn_ses_annual', 'unit', 'nuts3', createMockContext()),
     ).rejects.toMatchObject({ data: { reason: 'conflicting_params' } });
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('reports an empty default geo level as no_results, not a missing dataset (#38)', async () => {
@@ -833,12 +909,11 @@ describe('EurostatDataService — getDimensionValues param building', () => {
   });
 
   it('rejects geo_level paired with a non-geo dimension instead of ignoring it', async () => {
-    fetchMock.mockResolvedValue(okResponse(jsonStat({ unit: ['CP_MEUR'] })));
+    fetchMock.mockImplementation(async (input: string | URL) => sdmxMetadataResponse(input));
     await expect(
       svc().getDimensionValues('nama_10_gdp', 'unit', 'nuts3', createMockContext()),
     ).rejects.toMatchObject({ data: { reason: 'conflicting_params' } });
-    // Rejected before any request — the parameter had no effect on the query it was sent with.
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('surfaces malformed structure metadata as a non-retryable upstream fault', async () => {
@@ -2677,6 +2752,93 @@ describe('EurostatDataService — no_results diagnosis from the envelope (#48)',
     );
     expect(res.obsCount).toBe(6);
     expect(res).not.toHaveProperty('unmatchedValues');
+  });
+});
+
+describe('EurostatDataService — selected period membership (#79)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const run = (data: JsonStatResponse, lastN: number | false = 6) => {
+    const fetchMock = vi.fn(async () => okResponse(data));
+    vi.stubGlobal('fetch', fetchMock);
+    return new EurostatDataService(mockConfig, mockStorage)
+      .queryDataset(
+        'DS-test',
+        {},
+        undefined,
+        undefined,
+        undefined,
+        lastN || undefined,
+        'EN',
+        1,
+        createMockContext(),
+      )
+      .then((result) => ({ result, fetchMock }));
+  };
+  const partial = (): JsonStatResponse => ({
+    ...jsonStat({
+      time: ['2026-01', '2026-02', '2026-03', '2026-04', '2026-05', '2026'],
+      geo: ['DE', 'FR'],
+    }),
+    value: { '0': 12, '3': null, '4': 'KG', '6': ':C', '99': 9 },
+    status: { '8': 'C', '0': 'p', '-1': 'C' },
+  });
+
+  it('characterizes complete totals, numeric period bounds and lazy rows behind a one-row preview', async () => {
+    const { result, fetchMock } = await run(partial());
+    expect(result.obsCount).toBe(5);
+    expect(result.missingObsCount).toBe(4);
+    expect(result.timeRange).toEqual({ start: '2026-01', end: '2026-05' });
+    expect(result.observations).toHaveLength(1);
+    expect([...result.rows()].map((row) => row.time)).toEqual([
+      '2026-01',
+      '2026-02',
+      '2026-03',
+      '2026-04',
+      '2026-05',
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports only unpopulated selected positions beyond the full membership, including mixed frequency', async () => {
+    const { result } = await run(partial());
+    expect(result).toHaveProperty('unpopulatedPeriods', ['2026']);
+  });
+
+  it('does not attach a last-N diagnosis to a ranged or fully populated query', async () => {
+    expect((await run(partial(), false)).result).not.toHaveProperty('unpopulatedPeriods');
+    const full = partial();
+    full.status = { ...full.status, '10': 'C' };
+    expect((await run(full)).result).not.toHaveProperty('unpopulatedPeriods');
+  });
+
+  it('uses the time stride when time follows another dimension', async () => {
+    const { result } = await run({
+      ...jsonStat({ geo: ['DE', 'FR'], time: ['2024', '2025', '2026'] }),
+      value: { '0': 1, '4': 2 },
+    });
+    expect(result).toHaveProperty('unpopulatedPeriods', ['2026']);
+  });
+
+  it('retains every gap beyond the eventual display bound and preserves index order', async () => {
+    const periods = Array.from({ length: 30 }, (_, index) => String(2030 - index));
+    const { result } = await run(
+      { ...jsonStat({ time: periods, geo: ['DE'] }), value: { '29': 1 } },
+      30,
+    );
+    expect(result.unpopulatedPeriods).toEqual(periods.slice(0, 29));
+  });
+
+  it('does not infer gaps from the decoder safety cap', async () => {
+    const periods = ['2024', '2025'];
+    const geos = Array.from({ length: 3000 }, (_, index) => `G${index}`);
+    const { result } = await run({
+      ...jsonStat({ time: periods, geo: geos }),
+      value: Object.fromEntries(Array.from({ length: 6000 }, (_, index) => [String(index), index])),
+    });
+    expect(result.obsCount).toBe(6000);
+    expect(result).not.toHaveProperty('unpopulatedPeriods');
+    expect([...result.rows()]).toHaveLength(6000);
   });
 });
 

@@ -33,9 +33,8 @@ import { PERIOD_FORMS, resolvePeriods } from '@/services/eurostat-periods.js';
 const PREVIEW_MAX = 500;
 
 /**
- * Newest valueless periods a `no_results` error lists. A daily dataset's time index
- * runs to ~14,000 periods, so the list is bounded; `matchedPeriodCount` carries the
- * full count and the message the full span.
+ * Newest unpopulated periods listed in empty-result errors and successful gap notices.
+ * Daily indexes can contain thousands of positions; each disclosure keeps the full count.
  */
 const MATCHED_PERIODS_LISTED = 24;
 
@@ -44,7 +43,7 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
   tool('eurostat_query_dataset', {
     title: 'Query Eurostat Dataset',
     description:
-      'Fetch statistical data from a Eurostat dataset with dimension filters. Returns a deterministic inline prefix of decoded observations with dimension codes and labels, numeric values, an OBS_FLAG status (e.g., "p" = provisional, "e" = estimated) and a separate CONF_STATUS confidentiality marker (e.g., "C" = confidential, which is usually why a value is null). preview_limit controls only that prefix; filters and period controls reduce the matched result itself. Call eurostat_get_dataset_info first to discover valid dimension codes and values. Apply filters to keep the result set manageable — large unfiltered queries may trigger an async response error. Use filters.geo for specific country/region codes, or geo_level for NUTS hierarchy filtering (mutually exclusive). Use last_n_periods for the N most recent periods without knowing the end date. Matches above 5,000 observations are staged whole when this deployment runs a dataframe canvas: call eurostat_dataframe_describe first, then eurostat_dataframe_query. Matches at or below 5,000 are never staged. When the target is a whole dataset rather than a slice, eurostat_download_dataset reads the SDMX bulk endpoint instead and is the cheaper route.',
+      'Fetch statistical data from a Eurostat dataset with dimension filters. Returns a deterministic inline prefix of decoded observations with dimension codes and labels, numeric values, an OBS_FLAG status (e.g., "p" = provisional, "e" = estimated) and a separate CONF_STATUS confidentiality marker (e.g., "C" = confidential, which is usually why a value is null). preview_limit controls only that prefix; filters and period controls reduce the matched result itself. Call eurostat_get_dataset_info first to discover valid dimension codes and values. Apply filters to keep the result set manageable — large unfiltered queries may trigger an async response error. Use filters.geo for specific country/region codes, or geo_level for NUTS hierarchy filtering (mutually exclusive). Use last_n_periods for the N most recent dataset time positions without knowing the end date; a notice names selected periods with no populated cells for the slice. Set stage=true to stage the whole match at any size on a canvas-enabled deployment; matches above 5,000 observations stage automatically. Call eurostat_dataframe_describe first, then eurostat_dataframe_query. When the target is a whole dataset rather than a slice, eurostat_download_dataset reads the SDMX bulk endpoint instead and is the cheaper route.',
     annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
     input: z.object({
       dataset_code: z
@@ -79,19 +78,25 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
         ),
       last_n_periods: z
         .number()
-        .int()
+        .multipleOf(1)
         .min(1)
         .optional()
         .describe(
-          "Return only the N most recent periods. N counts back from the dataset's latest period, not from the latest period published for this slice, so a slice that lags the rest of the dataset can come back empty — raise N, or use until_period ending at a period the slice has published. Mutually exclusive with since_period and until_period.",
+          "Return only the N most recent dataset time positions. Selected periods without populated cells for this slice are disclosed in a notice on successful queries. N counts back from the dataset's latest period, not from the latest period published for this slice, so a slice that lags can come back empty — increase N, or replace last_n_periods with until_period ending at a period the slice has published. Mutually exclusive with since_period and until_period.",
         ),
       preview_limit: (clampLimits
         ? z.number().multipleOf(1).min(1)
         : z.number().int().min(1).max(PREVIEW_MAX)
       )
-        .default(50)
+        .default(25)
         .describe(
-          `How many matched observations to return inline, from the deterministic start of the JSON-stat cell order. Default 50; ${clampLimits ? 'positive integers above 500 are clamped to 500 with a notice' : 'maximum 500; larger values are rejected'}. This changes only the inline prefix: it does not reduce obsCount, missingObsCount, timeRange, the upstream response, or the rows staged when the match exceeds 5,000. Use filters or period controls to reduce the match itself.`,
+          `How many matched observations to return inline, from the deterministic start of the JSON-stat cell order. Default 25; ${clampLimits ? 'positive integers above 500 are clamped to 500 with a notice' : 'maximum 500; larger values are rejected'}. This changes only the inline prefix: it does not reduce obsCount, missingObsCount, timeRange, the upstream response, or staged rows. Use filters or period controls to reduce the match itself.`,
+        ),
+      stage: z
+        .boolean()
+        .default(false)
+        .describe(
+          'Stage every matched observation on a dataframe canvas, regardless of preview length or match size. Default false preserves automatic staging only above 5,000 observations. Ignored with an unavailable-staging notice on deployments without a canvas.',
         ),
       lang: z
         .enum(['EN', 'FR', 'DE'])
@@ -100,7 +105,7 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
           'Language for labels in the response. Default is "EN". Options: "EN", "FR", "DE".',
         ),
       canvas_id: CanvasIdSchema.optional().describe(
-        'Reuse an existing dataframe canvas, so a result staged by this call lands beside earlier ones and can be joined against them. Pass the canvasId a previous eurostat_query_dataset or eurostat_download_dataset response returned; omit to start a fresh canvas. Ignored on deployments without a dataframe canvas and when the match is at or below 5,000 observations.',
+        'Reuse an existing dataframe canvas, so a result staged by this call lands beside earlier ones and can be joined against them. Pass the canvasId a previous eurostat_query_dataset or eurostat_download_dataset response returned; omit to start a fresh canvas. Used only when staging: stage=true or a match above 5,000 observations, on a canvas-enabled deployment.',
       ),
     }),
     output: z.object({
@@ -186,7 +191,7 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
         .string()
         .optional()
         .describe(
-          'Canvas table holding every matched observation in flat form — one code column per dimension plus a "_label" companion, then obs_value, obs_flag, obs_flag_label, conf_status, conf_status_label. A DS-* table also carries obs_value_text, the valueText of each row. Call eurostat_dataframe_describe with canvasId first to confirm the table and columns, then eurostat_dataframe_query. Omitted when nothing was staged: either the match was at or below 5,000 observations, or this deployment runs without a dataframe canvas.',
+          'Canvas table holding every matched observation in flat form — one code column per dimension plus a "_label" companion, then obs_value, obs_flag, obs_flag_label, conf_status, conf_status_label. A DS-* table also carries obs_value_text, the valueText of each row. Call eurostat_dataframe_describe with canvasId first to confirm the table and columns, then eurostat_dataframe_query. Omitted when nothing was staged: stage was false with at most 5,000 observations, or this deployment runs without a dataframe canvas.',
         ),
       stagedRowCount: z
         .number()
@@ -242,7 +247,7 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
         .string()
         .optional()
         .describe(
-          'Guidance when a filter value matched nothing, when preview_limit omits matched rows, or when the match was staged — names the unmatched values, distinguishes the inline prefix from filters that reduce the match and, when staged, gives the describe-then-query sequence. Omitted when every filter value matched and the preview contains the whole match.',
+          'Composed guidance for unmatched filter values, selected last_n_periods positions with no populated cells, inline previews, staging and unavailable explicit staging. Period gaps list up to the newest 24 periods with an omitted count; staged matches give the describe-then-query sequence. Omitted when none of these disclosures applies.',
         ),
     },
 
@@ -440,19 +445,19 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
 
       // The service bounds `observations` to the requested preview, so its length says nothing
       // about match size. `obsCount` is the full total and is what truncation turns on.
-      const { appliedFilters, rows, ...queryResult } = result;
+      const { appliedFilters, rows, unpopulatedPeriods, ...queryResult } = result;
       const truncated = result.obsCount > OBS_CAP;
 
       /**
-       * Stage the whole match only above the independent 5,000-row threshold.
-       * A smaller preview does not make an under-threshold match eligible, so it
-       * cannot burn a per-tenant canvas slot by itself.
+       * Stage the whole match on explicit request or above the independent
+       * 5,000-row threshold. Preview length never triggers staging by itself.
        *
        * `rows()` is a generator over the response body already in memory, so this
        * costs no extra upstream request and never builds the full row set as an
        * array — the canvas appender pulls one row at a time.
        */
-      const canvas = truncated ? getCanvas() : undefined;
+      const availableCanvas = getCanvas();
+      const canvas = truncated || input.stage ? availableCanvas : undefined;
       let staged: { canvasId: string; tableName: string; stagedRowCount: number } | undefined;
       if (canvas) {
         // Re-thrown so the declared recovery replaces the canvas service's generic one.
@@ -500,6 +505,18 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
       });
       // `notice` is last-wins, so every sentence is collected here and written once.
       const notices: string[] = preview.notice ? [preview.notice] : [];
+      if (input.last_n_periods && unpopulatedPeriods?.length) {
+        const listed = unpopulatedPeriods.slice(-MATCHED_PERIODS_LISTED);
+        const omitted = unpopulatedPeriods.length - listed.length;
+        notices.push(
+          `${countOf(unpopulatedPeriods.length, 'selected period')} (${listed.join(', ')}${omitted ? `; ${countOf(omitted, 'earlier period')} omitted` : ''}) ${unpopulatedPeriods.length === 1 ? 'carries' : 'carry'} no populated cells anywhere in this match. last_n_periods counts dataset time positions, not periods with populated cells for this slice; preview_limit does not select periods. Increase last_n_periods, or replace last_n_periods with until_period ending at a period this slice has published.`,
+        );
+      }
+      if (input.stage && !availableCanvas) {
+        notices.push(
+          'Dataframe staging is unavailable on this deployment, so stage=true did not stage any rows. Use dimension filters or period controls to reduce the match.',
+        );
+      }
       if (result.unmatchedValues) {
         notices.push(
           `These filter values matched nothing and contribute no rows: ${formatValues(result.unmatchedValues)}. Check the valid codes for ${joinAnd(Object.keys(result.unmatchedValues))} with eurostat_get_dimension_values.`,
@@ -511,7 +528,12 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
         notices.push(
           staged
             ? `preview_limit=${input.preview_limit.toLocaleString()} returns the first ${result.observations.length.toLocaleString()} of ${result.obsCount.toLocaleString()} matched rows inline; it does not reduce the match. All ${staged.stagedRowCount.toLocaleString()} matched rows are staged as table "${staged.tableName}" on canvas "${staged.canvasId}". Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query. Use ${filterOn} or a period range when the match itself should be smaller.`
-            : `preview_limit=${input.preview_limit.toLocaleString()} returns the first ${result.observations.length.toLocaleString()} of ${result.obsCount.toLocaleString()} matched rows inline; it does not reduce the match. Use ${filterOn} or a period range to reduce the match itself.`,
+            : `preview_limit=${input.preview_limit.toLocaleString()} returns the first ${result.observations.length.toLocaleString()} of ${result.obsCount.toLocaleString()} matched rows inline; it does not reduce the match. ${availableCanvas ? 'Set stage=true to retain every matched row on a dataframe canvas. ' : ''}Use ${filterOn} or a period range to reduce the match itself.`,
+        );
+      }
+      if (staged && result.obsCount <= result.observations.length) {
+        notices.push(
+          `All ${staged.stagedRowCount.toLocaleString()} matched rows are staged as table "${staged.tableName}" on canvas "${staged.canvasId}". Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query.`,
         );
       }
       if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
