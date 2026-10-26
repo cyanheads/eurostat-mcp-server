@@ -12,14 +12,14 @@
       "url": "https://eurostat.caseyjhand.com/mcp"
     }
   ],
-  "version": "0.10.1",
+  "version": "0.11.0",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/eurostat-mcp-server",
       "runtimeHint": "npx",
-      "version": "0.10.1",
+      "version": "0.11.0",
       "environmentVariables": [
         {
           "name": "EUROSTAT_CLAMP_LIMITS",
@@ -128,7 +128,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/eurostat-mcp-server",
       "runtimeHint": "npx",
-      "version": "0.10.1",
+      "version": "0.11.0",
       "environmentVariables": [
         {
           "name": "MCP_TRANSPORT_TYPE",

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.11.0](changelog/0.11.x/0.11.0.md) — 2026-10-26 · ⚠️ Breaking
+
+Complete Eurostat results and guided statistical analysis.
+
 ## [0.10.1](changelog/0.10.x/0.10.1.md) — 2026-10-22
 
 Bounded Eurostat reads and lossless SQL results.
