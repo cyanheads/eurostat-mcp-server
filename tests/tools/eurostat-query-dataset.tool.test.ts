@@ -98,14 +98,12 @@ describe('eurostatQueryDataset', () => {
   it('composes last-N selected-period gaps with clamp, unmatched and preview notices on both surfaces', async () => {
     setCanvas(undefined);
     vi.mocked(getEurostatDataService).mockReturnValue({
-      queryDataset: vi
-        .fn()
-        .mockResolvedValue({
-          ...mockQueryResult,
-          obsCount: 600,
-          unpopulatedPeriods: Array.from({ length: 26 }, (_, i) => String(2000 + i)),
-          unmatchedValues: { geo: ['XX'] },
-        }),
+      queryDataset: vi.fn().mockResolvedValue({
+        ...mockQueryResult,
+        obsCount: 600,
+        unpopulatedPeriods: Array.from({ length: 26 }, (_, i) => String(2000 + i)),
+        unmatchedValues: { geo: ['XX'] },
+      }),
     } as never);
     const result = await runToolContract(eurostatQueryDataset, {
       dataset_code: 'nama_10_gdp',
