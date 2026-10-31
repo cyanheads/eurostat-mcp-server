@@ -656,6 +656,63 @@ describe('diagnoseEmptyRange', () => {
       ).toBe('no_published_period');
     });
   });
+
+  describe('a whole period inside the range is not what emptied it', () => {
+    const surveys = { oldest: '2002', latest: '2022' };
+
+    for (const [label, since, until, frequencies, cover] of [
+      ['a skipped year between two cut years', '2019-06', '2021-06', ['A'], surveys],
+      ['a skipped year after a bound on its edge', '2019', '2021-06', ['A'], surveys],
+      ['a skipped year before a bound on its edge', '2019-06', '2021', ['A'], surveys],
+      ['a skipped month, with no coverage', '2023-01-15', '2023-03-15', ['M'], NONE],
+      ['a skipped week between two cut weeks', '2022-06-15', '2022-06-29', ['W'], NONE],
+    ] as const) {
+      it(label, () => {
+        expect(
+          diagnoseEmptyRange({ since_period: since, until_period: until }, [...frequencies], cover),
+        ).toEqual({ kind: 'no_published_period', coverage: cover });
+      });
+    }
+
+    it('falls to the coarser frequency the range holds no whole period of', () => {
+      expect(
+        diagnoseEmptyRange({ since_period: '2022-06-10', until_period: '2022-08-20' }, ['A', 'M'], {
+          oldest: '2000',
+          latest: '2025',
+        }),
+      ).toEqual({
+        kind: 'no_whole_period',
+        coverage: { oldest: '2000', latest: '2025' },
+        cuts: [{ bounds: ['since_period', 'until_period'], frequency: 'annual', period: '2022' }],
+      });
+    });
+
+    it('counts no whole period that lies before the reported coverage', () => {
+      expect(
+        diagnoseEmptyRange({ since_period: '1960-06', until_period: '1975-06' }, ['A'], coverage),
+      ).toEqual({
+        kind: 'no_whole_period',
+        coverage,
+        cuts: [{ bounds: ['until_period'], frequency: 'annual', period: '1975' }],
+      });
+    });
+
+    it('keeps the cut when an open side leaves nothing to measure against', () => {
+      expect(diagnoseEmptyRange({ until_period: '2023-06' }, ['A'], NONE)).toEqual({
+        kind: 'no_whole_period',
+        coverage: NONE,
+        cuts: [{ bounds: ['until_period'], frequency: 'annual', period: '2023' }],
+      });
+    });
+
+    it('closes an open side at the reported coverage', () => {
+      expect(diagnoseEmptyRange({ since_period: '2025-06' }, ['A'], coverage)).toEqual({
+        kind: 'no_whole_period',
+        coverage,
+        cuts: [{ bounds: ['since_period'], frequency: 'annual', period: '2025' }],
+      });
+    });
+  });
 });
 
 describe('cutNotice', () => {

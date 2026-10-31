@@ -335,6 +335,25 @@ function missesCoverage(
 }
 
 /**
+ * Whether a whole period of `frequency` lies inside a span of days, clipped to the
+ * reported coverage, since a period past the coverage is no period the reply could
+ * select. An open side no coverage closes has no end to measure against, so it holds none.
+ */
+function holdsWholePeriod(
+  span: { firstDay: number; lastDay: number },
+  coverage: PeriodCoverage,
+  frequency: DivisibleFrequency,
+): boolean {
+  const first = Math.max(span.firstDay, daysOf(coverage.oldest)?.firstDay ?? span.firstDay);
+  const last = Math.min(span.lastDay, daysOf(coverage.latest)?.lastDay ?? span.lastDay);
+  if (!Number.isFinite(first) || !Number.isFinite(last)) return false;
+  const holding = periodHolding(first, frequency);
+  const whole =
+    holding.firstDay === first ? holding : periodHolding(holding.lastDay + 1, frequency);
+  return whole.lastDay <= last;
+}
+
+/**
  * The range a pair of bounds selects when it names exactly one calendar day, whatever
  * forms the bounds take (`2022-06-15` twice, `2022-D166` beside `2022-06-15`, `2022`
  * beside `2022-01-01`), with the day after it.
@@ -409,8 +428,10 @@ export function periodCuts(
  * Why a range selected no period, read from the reply in hand.
  *
  * Coverage comes first, then {@link periodCuts} at the finest frequency a bound falls
- * inside. What is left overlaps the data with no bound inside a period: a weekend, a
- * survey gap, or, on a host that reports no coverage, a range past the data.
+ * inside and the range holds no whole period of. A whole period inside the range rules
+ * the cut out as the cause: `2019-06` to `2021-06` holds 2020, which a survey can skip.
+ * What is left overlaps the data with nothing to cut: a weekend, a survey gap, or, on a
+ * host that reports no coverage, a range past the data.
  *
  * A selection made with no bound at all (a `filters.time` value) has nothing to cut.
  */
@@ -429,7 +450,10 @@ export function diagnoseEmptyRange(
     return { kind: 'outside_coverage', coverage };
   }
 
-  const cuts = periodCuts(range, frequencies, coverage);
+  const whole = DIVISIBLE_FREQUENCIES.filter((f) => holdsWholePeriod(span, coverage, f));
+  const cuts = periodCuts(range, frequencies, coverage).filter(
+    (cut) => !whole.some((f) => f.label === cut.frequency),
+  );
   const finest = cuts[0]?.frequency;
   return finest
     ? { kind: 'no_whole_period', coverage, cuts: cuts.filter((c) => c.frequency === finest) }

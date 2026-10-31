@@ -2973,6 +2973,15 @@ describe('eurostatQueryDataset — what Eurostat keeps of a period range (#84, #
         '2002 – 2022',
       ],
       [
+        'a survey gap wholly inside a range whose bounds both fall inside a period',
+        'earn-ses-annual-de-2020',
+        'earn_ses_annual',
+        { geo: ['DE'] },
+        '2019-06',
+        '2021-06',
+        '2002 – 2022',
+      ],
+      [
         'a dataset reporting no coverage',
         'comext/ds-045409-de-fr-no-period',
         'DS-045409',
