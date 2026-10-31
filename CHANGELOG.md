@@ -4,7 +4,7 @@ All notable changes to this project. Each entry links to its full per-version fi
 
 ## [0.11.1](changelog/0.11.x/0.11.1.md) — 2026-10-31
 
-Period bounds that fall inside a period now say so, one-day ranges select that day instead of the whole series, a geo_level that selects nothing names itself as the likely cause and offers only levels that exist, and result rows stop repeating single-valued dimensions.
+Period bounds that fall inside a period now say so, one-day ranges select that day instead of the whole series, a query whose geo_level selects nothing names it as the likely cause, the dimension-values hint offers only levels the dataset lists, and result rows stop repeating single-valued dimensions.
 
 ## [0.11.0](changelog/0.11.x/0.11.0.md) — 2026-10-26 · ⚠️ Breaking
 
