@@ -1,6 +1,6 @@
 # eurostat-mcp-server - Directory Structure
 
-Generated on: 2026-10-26 18:10:29
+Generated on: 2026-10-31 20:40:39
 
 ```text
 eurostat-mcp-server/
@@ -172,6 +172,7 @@ eurostat-mcp-server/
 │   │       │   ├── eurostat-query-dataset.tool.ts
 │   │       │   └── eurostat-search-datasets.tool.ts
 │   │       ├── clamp-read-limit.ts
+│   │       ├── hoist-dimensions.ts
 │   │       ├── narrowing-advice.ts
 │   │       └── value-list-paging.ts
 │   ├── services/
@@ -202,6 +203,11 @@ eurostat-mcp-server/
 │   │   │   ├── ds-045409-constraint.xml
 │   │   │   ├── ds-045409-dataflow.xml
 │   │   │   ├── ds-045409-datastructure.xml
+│   │   │   ├── ds-045409-de-fr-2023-06-to-2023-12.json
+│   │   │   ├── ds-045409-de-fr-2023-06-to-2023-12.tsv
+│   │   │   ├── ds-045409-de-fr-2023-06-to-2024.json
+│   │   │   ├── ds-045409-de-fr-2023-06-to-2024.tsv
+│   │   │   ├── ds-045409-de-fr-no-period.json
 │   │   │   ├── ds-045409-de-us-m-2026-06-07.tsv
 │   │   │   ├── ds-045409-eu27-us-total-2024-01-02.json
 │   │   │   ├── ds-045409-extraction-too-big.json
@@ -215,11 +221,29 @@ eurostat-mcp-server/
 │   │   │   ├── avia-par-de-airp-pr.json
 │   │   │   ├── demo-r-pjangrp3-geo-nuts3.json
 │   │   │   ├── ds-045409-product-excerpt.json
+│   │   │   ├── nama-10-gdp-constraint.xml
+│   │   │   ├── nama-10-gdp-dataflow.xml
 │   │   │   ├── nama-10-gdp-na-item.json
-│   │   │   └── sbs-ovw-act-nace-r2.json
+│   │   │   ├── sbs-ovw-act-nace-r2.json
+│   │   │   ├── tgs00010-constraint.xml
+│   │   │   └── tgs00010-dataflow.xml
+│   │   ├── demo-r-mwk-ts-de-2022-to-2023.json
+│   │   ├── demo-r-mwk-ts-de-2022-to-2023.tsv
+│   │   ├── earn-ses-annual-de-2020.json
+│   │   ├── ert-bil-eur-d-usd-2022-06-15.json
+│   │   ├── ert-bil-eur-d-usd-no-period.json
 │   │   ├── eurostat-sdmx-metadata.ts
+│   │   ├── nama-10-gdp-country-level-2022-06-to-2023-06.json
+│   │   ├── nama-10-gdp-datastructure.xml
+│   │   ├── nama-10-gdp-de-2022-06-to-2024.json
+│   │   ├── nama-10-gdp-de-2022.json
+│   │   ├── nama-10-gdp-de-2024-to-2031-06.json
+│   │   ├── nama-10-gdp-de-no-period.json
 │   │   ├── nama-10-gdp-de-since-2030.json
 │   │   ├── nama-10-gdp-de-until-1980.json
+│   │   ├── no-results-reply.json
+│   │   ├── nrg-pc-204-de-2022-01-to-2023.json
+│   │   ├── nrg-pc-204-de-2022-06-to-2023.json
 │   │   ├── sts-inpr-m-ie-confidential.json
 │   │   ├── sts-inpr-m-ie-empty.json
 │   │   ├── toc-2026-10-14-excerpt.tsv
@@ -230,7 +254,10 @@ eurostat-mcp-server/
 │   │   ├── une-rt-m-geo-de-xx-since-2024-01.json
 │   │   ├── une-rt-m-geo-xx-age-zzz-last1.json
 │   │   ├── une-rt-m-geo-xx-last1.json
-│   │   └── une-rt-m-unit-fake-last1.json
+│   │   ├── une-rt-m-unit-fake-last1.json
+│   │   ├── urb-cpop1-datastructure.xml
+│   │   ├── urb-cpop1-de1001v-country-last1.json
+│   │   └── urb-cpop1-de1001v-last1-excerpt.json
 │   ├── helpers/
 │   │   ├── comext-fixtures.ts
 │   │   └── real-canvas.ts
