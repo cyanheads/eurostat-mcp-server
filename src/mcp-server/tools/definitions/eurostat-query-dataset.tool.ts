@@ -3,10 +3,11 @@
  * @module mcp-server/tools/definitions/eurostat-query-dataset.tool
  */
 
-import { tool, z } from '@cyanheads/mcp-ts-core';
+import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { clampReadLimit } from '@/mcp-server/tools/clamp-read-limit.js';
+import { hoistDimensions } from '@/mcp-server/tools/hoist-dimensions.js';
 import { dimensionsToNarrow, narrowingAdvice } from '@/mcp-server/tools/narrowing-advice.js';
 import {
   acquireCanvas,
@@ -27,7 +28,12 @@ import {
 import { dropUnsetFilters } from '@/services/eurostat-filters.js';
 import { isComextDataset } from '@/services/eurostat-hosts.js';
 import { outageAnswer } from '@/services/eurostat-outage.js';
-import { PERIOD_FORMS, resolvePeriods } from '@/services/eurostat-periods.js';
+import {
+  cutNotice,
+  cutSelector,
+  PERIOD_FORMS,
+  resolvePeriods,
+} from '@/services/eurostat-periods.js';
 
 /** Upper bound on the deterministic observation prefix returned inline. */
 const PREVIEW_MAX = 500;
@@ -68,13 +74,13 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
         .string()
         .optional()
         .describe(
-          `Start of the time range, inclusive. Accepted forms: ${PERIOD_FORMS} (e.g., "2020", "2023-Q1", "2024-01"). Extra leading zeros after the letter are dropped ("2020-Q01" is sent as "2020-Q1"), a day of the year is sent as three digits ("2026-D1" as "2026-D001"), and YYYY-A1 is sent as YYYY. A period of another frequency is mapped onto the dataset's own, so "2020-01" works on annual data. A malformed or non-existent period (e.g., "2020-13") is rejected as invalid_period. Mutually exclusive with last_n_periods.`,
+          `Start of the time range, inclusive. Accepted forms: ${PERIOD_FORMS} (e.g., "2020", "2023-Q1", "2024-01"). Extra leading zeros after the letter are dropped ("2020-Q01" is sent as "2020-Q1"), a day of the year is sent as three digits ("2026-D1" as "2026-D001"), and YYYY-A1 is sent as YYYY. Any form works on any dataset, read as a span of days, but Eurostat keeps only periods wholly inside the range, per frequency: "2022-06" on annual data excludes 2022, which starts before the bound, and a notice names that period when the response shows its frequency. A range whose first and last day are the same day is sent as that one date. A malformed or non-existent period (e.g., "2020-13") is rejected as invalid_period. Mutually exclusive with last_n_periods.`,
         ),
       until_period: z
         .string()
         .optional()
         .describe(
-          'End of the time range, inclusive (e.g., "2024"), in the same forms as since_period. Omit for data through the latest available period. The range must hold at least one day: a since_period that starts after until_period ends is rejected as invalid_period, while pairs of different frequencies are fine ("2020-06" to "2020"). Mutually exclusive with last_n_periods.',
+          'End of the time range, inclusive (e.g., "2024"), in the same forms as since_period. Omit for data through the latest available period. A bound that falls inside a period excludes it here too: "2023-06" on annual data excludes 2023, which ends after the bound. The range must hold at least one day: a since_period that starts after until_period ends is rejected as invalid_period, and bounds of different frequencies are compared by day. Mutually exclusive with last_n_periods.',
         ),
       last_n_periods: z
         .number()
@@ -247,7 +253,7 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
         .string()
         .optional()
         .describe(
-          'Composed guidance for unmatched filter values, selected last_n_periods positions with no populated cells, inline previews, staging and unavailable explicit staging. Period gaps list up to the newest 24 periods with an omitted count; staged matches give the describe-then-query sequence. Omitted when none of these disclosures applies.',
+          'Composed guidance for a period a bound falls inside, which Eurostat excludes, unmatched filter values, selected last_n_periods positions with no populated cells, inline previews, staging and unavailable explicit staging. Period gaps list up to the newest 24 periods with an omitted count; staged matches give the describe-then-query sequence. Omitted when none of these disclosures applies.',
         ),
     },
 
@@ -284,9 +290,9 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
       {
         reason: 'no_results',
         code: JsonRpcErrorCode.NotFound,
-        when: 'The query matched no observation cells — including Eurostat HTTP-200 error id 100. The dataset is valid, but no cell carries a value or a status flag for that filter combination and period range. When Eurostat returns the empty table, the error names the filter values that matched nothing (data.unmatchedValues) and the selected periods that carry no value (data.matchedPeriods, the newest 24, with data.matchedPeriodCount counting all of them).',
+        when: 'The query matched no observation cells — including Eurostat HTTP-200 error id 100. The dataset is valid, but no cell carries a value or a status flag for that filter combination and period range. When Eurostat returns the empty table, the error names the filter values that matched nothing (data.unmatchedValues), the selected periods that carry no value (data.matchedPeriods, the newest 24, with data.matchedPeriodCount counting all of them), and, for a range that selected no period, whether it misses the coverage, holds no whole period, or holds no published one. When error id 100 answers a query that set geo_level, the error names geo_level as the likely cause, and lists the dataset\'s dimensions when it has no "geo" dimension.',
         recovery:
-          'Verify dimension values with eurostat_get_dimension_values and keep the period range inside the dataset coverage; both an unmatched value and an out-of-coverage range return no data rather than an error.',
+          'Verify dimension values with eurostat_get_dimension_values and keep the period range inside the dataset coverage, holding a whole period; an unmatched value, an out-of-coverage range and a range inside one period all return no data rather than an error. When the error names geo_level, drop it instead, and filter the "geo" codes the query then returns, or the dimension that holds geography.',
       },
       {
         reason: 'invalid_period',
@@ -343,11 +349,12 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
       const svc = getEurostatDataService();
 
       // Trimmed, checked, and rewritten to canonical form: this is both what is sent and
-      // what appliedFilters echoes.
-      const periods = resolvePeriods({
+      // what appliedFilters echoes. The period notice quotes the literals as written.
+      const written = {
         since_period: input.since_period?.trim() || undefined,
         until_period: input.until_period?.trim() || undefined,
-      });
+      };
+      const periods = resolvePeriods(written);
       if (!periods.ok) {
         throw ctx.fail('invalid_period', periods.message);
       }
@@ -375,10 +382,14 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
         // refusals carry none and take the generic one below.
         const serviceHint = data?.recovery?.hint;
         if (data && reason === 'no_results') {
-          const explained = explainNoResults(input.dataset_code, data, {
-            lastN: input.last_n_periods,
-            ranged: Boolean(sinceP || untilP),
-          });
+          const explained =
+            explainNoResults(input.dataset_code, data, {
+              lastN: input.last_n_periods,
+              ranged: Boolean(sinceP || untilP),
+            }) ??
+            (input.geo_level
+              ? await explainGeoLevel(input.dataset_code, input.geo_level, ctx)
+              : undefined);
           throw ctx.fail('no_results', explained?.message ?? (err as Error).message, {
             ...(data.unmatchedValues && { unmatchedValues: data.unmatchedValues }),
             ...(data.matchedPeriods && {
@@ -445,7 +456,7 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
 
       // The service bounds `observations` to the requested preview, so its length says nothing
       // about match size. `obsCount` is the full total and is what truncation turns on.
-      const { appliedFilters, rows, unpopulatedPeriods, ...queryResult } = result;
+      const { appliedFilters, periodCuts, rows, unpopulatedPeriods, ...queryResult } = result;
       const truncated = result.obsCount > OBS_CAP;
 
       /**
@@ -505,6 +516,7 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
       });
       // `notice` is last-wins, so every sentence is collected here and written once.
       const notices: string[] = preview.notice ? [preview.notice] : [];
+      if (periodCuts) notices.push(cutNotice(periodCuts, written));
       if (input.last_n_periods && unpopulatedPeriods?.length) {
         const listed = unpopulatedPeriods.slice(-MATCHED_PERIODS_LISTED);
         const omitted = unpopulatedPeriods.length - listed.length;
@@ -573,16 +585,22 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
           `**Staged:** table \`${result.tableName}\` on canvas \`${result.canvasId}\` (stagedRowCount ${result.stagedRowCount}) — inspect it with eurostat_dataframe_describe first, then query it with eurostat_dataframe_query`,
         );
       }
+      const cell = (obs: (typeof result.observations)[number], dim: string) => {
+        // dimensions is typed as {} from passthrough() — cast to the runtime shape for rendering
+        const value = (
+          obs.dimensions as Record<string, { code: string; label: string } | undefined>
+        )[dim];
+        return value && `${dim}=${value.code} (${value.label})`;
+      };
+      const { header, hoisted } = hoistDimensions(result.observations, result.dimensionsUsed, cell);
+      if (header) lines.push(header);
       lines.push('');
 
       // Render every observation so content[] carries the same rows as structuredContent —
       // both surfaces are already bounded by the row cap the decoder applies.
+      const varying = result.dimensionsUsed.filter((dim) => !hoisted.has(dim));
       for (const obs of result.observations) {
-        // dimensions is typed as {} from passthrough() — cast to the runtime shape for rendering
-        const dims = obs.dimensions as Record<string, { code: string; label: string } | undefined>;
-        const dimParts = result.dimensionsUsed.map(
-          (dim) => `${dim}=${dims[dim]?.code ?? '?'} (${dims[dim]?.label ?? '?'})`,
-        );
+        const dimParts = varying.map((dim) => cell(obs, dim) ?? `${dim}=? (?)`);
         const val = obs.value != null ? String(obs.value) : 'N/A';
         const textPart = obs.valueText ? ` [valueText "${obs.valueText}"]` : '';
         const statusPart = obs.status ? ` [${obs.status.code}: ${obs.status.label}]` : '';
@@ -635,8 +653,8 @@ function explainNoResults(
   diagnosis: NoResultsDiagnosis,
   periods: { lastN: number | undefined; ranged: boolean },
 ): { hint: string; message: string } | undefined {
-  const { unmatchedValues, matchedPeriods, outsideCoverage } = diagnosis;
-  if (!unmatchedValues && !matchedPeriods && !outsideCoverage) return;
+  const { unmatchedValues, matchedPeriods, emptyRange } = diagnosis;
+  if (!unmatchedValues && !matchedPeriods && !emptyRange) return;
 
   const found: string[] = [];
   const next: string[] = [];
@@ -648,17 +666,39 @@ function explainNoResults(
       `Check the valid codes for ${joinAnd(Object.keys(unmatchedValues))} with eurostat_get_dimension_values.`,
     );
   }
-  if (outsideCoverage) {
-    const { oldest, latest } = outsideCoverage;
+  if (emptyRange) {
+    const { oldest, latest } = emptyRange.coverage;
+    const reported = oldest || latest;
     const span = `${oldest ?? 'an unreported start'} – ${latest ?? 'an unreported end'}`;
-    found.push(
-      `The requested period range selects no period of "${datasetCode}", whose data runs ${span}.`,
-    );
-    next.push(
-      oldest || latest
-        ? `Set since_period/until_period inside ${span}.`
-        : "Set since_period/until_period inside the dataset's coverage, which eurostat_get_dataset_info reports.",
-    );
+    const overlap = reported ? `overlaps ${span} but ` : '';
+    switch (emptyRange.kind) {
+      case 'outside_coverage':
+        found.push(
+          `The requested period range selects no period of "${datasetCode}", whose data runs ${span}.`,
+        );
+        next.push(
+          reported
+            ? `Set since_period/until_period inside ${span}.`
+            : "Set since_period/until_period inside the dataset's coverage, which eurostat_get_dataset_info reports.",
+        );
+        break;
+      case 'no_whole_period':
+        found.push(
+          `The requested period range ${overlap}holds no whole ${emptyRange.cuts[0]?.frequency} period of "${datasetCode}": Eurostat keeps only periods wholly inside the range.`,
+        );
+        next.push(`Set ${emptyRange.cuts.map(cutSelector).join(' or ')} to select a whole period.`);
+        break;
+      case 'no_published_period':
+        found.push(
+          `The requested period range ${overlap}holds no published period of "${datasetCode}".`,
+        );
+        next.push(
+          `List the periods "${datasetCode}" publishes with eurostat_get_dimension_values, dimension "time", then set since_period/until_period on one of them.`,
+        );
+        break;
+      default:
+        return emptyRange satisfies never;
+    }
   }
   if (matchedPeriods) {
     const selected = spanOf(matchedPeriods);
@@ -692,4 +732,35 @@ function explainNoResults(
     }
   }
   return { message: `No observations matched. ${found.join(' ')}`, hint: next.join(' ') };
+}
+
+/**
+ * Name `geo_level` behind a reply {@link explainNoResults} could not read. Eurostat answers
+ * with no envelope when the level selects no code, whatever the period range, and with
+ * an envelope when it selects some, so the empty reply alone points at the level.
+ *
+ * The recovery depends on whether the dataset has a `geo` dimension, which only its
+ * structure definition says: geography can sit on `cities` or `reporter`, where Eurostat
+ * still applies the level. Nothing in hand tells the two apart when that read fails, so
+ * the hint then keeps to what holds in both.
+ */
+async function explainGeoLevel(
+  datasetCode: string,
+  geoLevel: string,
+  ctx: Context,
+): Promise<{ hint: string; message: string }> {
+  const dimensions = await dimensionsToNarrow(datasetCode, [], ctx);
+  const message = `No observations matched. geo_level "${geoLevel}" likely selects no code for this query.`;
+  if (!dimensions) return { message, hint: 'Drop geo_level and send the query again.' };
+  if (dimensions.includes('geo')) {
+    return {
+      message,
+      hint: 'Drop geo_level. If the other filters and the period range match anything, the same query then returns the "geo" codes this slice carries, and they work in filters.geo.',
+    };
+  }
+  const listed = dimensions.join(', ');
+  return {
+    message: `${message} "${datasetCode}" has no "geo" dimension; its dimensions are ${listed}.`,
+    hint: `Drop geo_level. To select geography, filter whichever of ${listed} holds it, with codes from eurostat_get_dimension_values.`,
+  };
 }

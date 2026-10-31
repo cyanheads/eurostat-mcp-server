@@ -146,7 +146,7 @@ describe('eurostatGetDimensionValues', () => {
     vi.mocked(getEurostatDataService).mockReturnValue({
       getDimensionValues: vi.fn().mockRejectedValue(
         Object.assign(new Error('No country values'), {
-          data: { reason: 'no_results', geoLevel: 'country' },
+          data: { reason: 'no_results', geoLevel: 'country', availableGeoLevels: ['nuts2'] },
         }),
       ),
     } as never);
@@ -700,6 +700,95 @@ describe('eurostatGetDimensionValues — failures raised by the real data servic
       data: { reason: 'no_results', recovery: { hint: expect.stringContaining('"country"') } },
     });
     expect(textOf(result)).toContain('reason no_results');
+  });
+
+  describe('the levels a no_results hint offers (#87)', () => {
+    const captured = (name: string) =>
+      readFileSync(new URL(`../fixtures/dimension-values/${name}.xml`, import.meta.url), 'utf8');
+    const serveCaptured = (dataset: string) =>
+      serveStructure({
+        dataflow: captured(`${dataset}-dataflow`),
+        constraint: captured(`${dataset}-constraint`),
+      });
+    const hintOf = (result: { structuredContent?: unknown }) =>
+      (errorOf(result).data.recovery as { hint: string }).hint;
+
+    const expectHint = (result: Parameters<typeof textOf>[0], hint: string) => {
+      expect(errorOf(result as never)).toMatchObject({
+        code: JsonRpcErrorCode.NotFound,
+        data: { reason: 'no_results' },
+      });
+      expect(hintOf(result as never)).toBe(hint);
+      expect(textOf(result)).toContain(`Recovery: ${hint}`);
+    };
+
+    it.each(['nuts1', 'nuts2', 'nuts3'] as const)(
+      'offers aggregate and country on nama_10_gdp after %s, with the omit sentence',
+      async (geo_level) => {
+        serveCaptured('nama-10-gdp');
+        const result = await runToolContract(eurostatGetDimensionValues, {
+          dataset_code: 'nama_10_gdp',
+          dimension: 'geo',
+          geo_level,
+        });
+        expectHint(
+          result,
+          `Dataset "nama_10_gdp" has no "geo" values at the "${geo_level}" level. Choose geo_level from the levels it lists: aggregate, country. Omitting geo_level requests country values.`,
+        );
+      },
+    );
+
+    it.each([
+      ['omitted', undefined, 'country'],
+      ['aggregate', 'aggregate', 'aggregate'],
+      ['nuts3', 'nuts3', 'nuts3'],
+    ] as const)(
+      'offers nuts2 alone on tgs00010 with geo_level %s',
+      async (_name, level, failed) => {
+        serveCaptured('tgs00010');
+        const result = await runToolContract(eurostatGetDimensionValues, {
+          dataset_code: 'tgs00010',
+          dimension: 'geo',
+          ...(level && { geo_level: level }),
+        });
+        expectHint(
+          result,
+          `Dataset "tgs00010" has no "geo" values at the "${failed}" level. Choose geo_level from the levels it lists: nuts2.`,
+        );
+      },
+    );
+
+    it('never offers a level the codelist carries but the constraint lists no code at', async () => {
+      serveStructure({
+        constraint: SDMX_CONSTRAINT_WITHOUT_COUNTRIES_XML.replace('<c:Value>DE111</c:Value>', ''),
+      });
+      const result = await runToolContract(eurostatGetDimensionValues, {
+        dataset_code: 'earn_ses_annual',
+        dimension: 'geo',
+        geo_level: 'nuts3',
+      });
+      expectHint(
+        result,
+        'Dataset "earn_ses_annual" has no "geo" values at the "nuts3" level. Choose geo_level from the levels it lists: aggregate, nuts1, nuts2.',
+      );
+    });
+
+    it('offers no level and routes to eurostat_get_dataset_info when no geo code carries one', async () => {
+      serveStructure({
+        dataflow: SDMX_DATAFLOW_XML.replaceAll(
+          /<c:Annotations><c:Annotation><c:AnnotationTitle>[^<]*<\/c:AnnotationTitle><c:AnnotationType>LEVEL<\/c:AnnotationType><\/c:Annotation><\/c:Annotations>/g,
+          '',
+        ),
+      });
+      const result = await runToolContract(eurostatGetDimensionValues, {
+        dataset_code: 'earn_ses_annual',
+        dimension: 'geo',
+      });
+      expectHint(
+        result,
+        'Dataset "earn_ses_annual" has no "geo" values at the "country" level. None of its "geo" codes carries a NUTS level, so no geo_level selects them. eurostat_get_dataset_info lists sample "geo" codes.',
+      );
+    });
   });
 
   it('rejects geo_level on a non-geo dimension after loading canonical dimension metadata', async () => {

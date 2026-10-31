@@ -4,7 +4,7 @@ description: Use with eurostat_* tools to compare countries or regions, analyse 
 license: Apache-2.0
 metadata:
   author: "cyanheads"
-  version: "1.0"
+  version: "1.1"
 ---
 
 ## Scope
@@ -29,9 +29,9 @@ Keep codes as identifiers and labels as display text. Resolve codes within the c
 - Before comparing observations, fix the statistical measure and every dimension that could change its meaning: unit, frequency, geography and any indicator, adjustment, demographic or classification breakdown present in the dataset. Inspect the labels rather than guessing a code from its abbreviation.
 - Before interpreting a GDP comparison, distinguish economic size, per-inhabitant values and price-adjusted comparisons. For comparisons across countries, PPS removes price-level differences; changes in current-price PPS values are not automatically real growth. Consult [Eurostat's PPP guidance](https://ec.europa.eu/eurostat/en/web/purchasing-power-parities/information-data) when choosing the measure.
 - Before a regional time-series comparison, establish the NUTS classification used by the data. A matching code or label alone does not establish unchanged boundaries. Eurostat revises NUTS and historical reconstruction depends on feasibility; consult [NUTS history and changes](https://ec.europa.eu/eurostat/en/web/nuts/history) and the dataset metadata when classifications differ. This server does not supply a concordance operation.
-- Before claiming a series is absent, distinguish an unknown metadata bound, an unlisted page, an unmatched code and an empty combination of otherwise valid codes. Inspect notices and discovery freshness; missing Comext discovery is not evidence that a known DS-* dataset is unavailable.
+- Before claiming a series is absent, distinguish an unknown metadata bound, an unlisted page, an unmatched code, an empty combination of otherwise valid codes and a period range that excludes the period. Eurostat keeps only periods wholly inside since_period–until_period, per frequency, so a bound inside a period drops it; a notice or error names the bound to use. Inspect notices and discovery freshness; missing Comext discovery is not evidence that a known DS-* dataset is unavailable.
 - Before calling observations the latest available for each geography, inspect the selected slice's actual periods. The dataset's latest period can have no populated value for that slice. Expand the search period when necessary; do not report an empty latest-period selection as a zero.
-- Before calculating totals or rankings, establish that the retained observations cover the intended population. Inline observations are a preview, not a random sample; a query's truncated=false does not prove the preview includes every matched row. Compare obsCount with the observations received or inspect the staged table. A bulk result with budgetExceeded is an ordered prefix, even when that prefix has been staged successfully. Narrow and refetch before presenting a complete total.
+- Before calculating totals or rankings, establish that the retained observations cover the intended population. Inline observations are a preview, not a random sample, and a "Same in all N rows shown" line describes those rows, not the match; a query's truncated=false does not prove the preview includes every matched row. Compare obsCount with the observations received or inspect the staged table. A bulk result with budgetExceeded is an ordered prefix, even when that prefix has been staged successfully. Narrow and refetch before presenting a complete total.
 - Preserve missing numeric values, published text values, observation flags and confidentiality status. A null numeric value is not zero; a PRODCOM text value is not a numeric quantity. Carry relevant provisional, break-in-series or reliability flags into the interpretation.
 - Before summing Comext observations, select a frequency and non-overlapping reporter, partner and product levels. Annual and monthly observations coexist, as do aggregates and their members. Do not sum TOTAL or EU aggregates alongside their constituents, or broad product groups alongside their subgroups.
 

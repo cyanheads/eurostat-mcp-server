@@ -98,14 +98,16 @@ The same metadata is available through `eurostat_get_dataset_info` for tool-only
 - `dataset_code` plus `filters` (`{dimension_code: [values]}`), `geo_level`, and either `since_period` / `until_period` (`2020`, `2020-Q1`, `2020-01`, down to `YYYY-Wnn` and `YYYY-Dnnn`) or `last_n_periods`; `preview_limit` is a positive integer (default 25), clamped to 500 with a notice; `lang` is `EN`, `FR`, or `DE`
 - `stage: true` stages the whole match on an available canvas, regardless of size; reuse `canvas_id` or omit it to create one. Without it, automatic staging starts above 5,000 observations. `truncated` still describes that threshold; `tableName` identifies a staged result. Canvas-disabled deployments disclose an explicit staging request as unavailable
 - `last_n_periods` counts dataset time positions, which can include periods with no populated cells. A notice names gaps across the full match (up to the newest 24, with an omitted count); increase N or replace it with `until_period` to reach earlier observations
+- Eurostat keeps only periods wholly inside `since_period`–`until_period`, per frequency. A notice names a period a bound falls inside and the bound that includes it. A one-day range goes out as `time=<date>`, because Eurostat ignores one-day bounds
 - Each observation carries code/label pairs per dimension, a nullable `value`, `status` (OBS_FLAG), and `confStatus` (CONF_STATUS); `obsCount`, `missingObsCount`, and `timeRange` cover the whole match, `truncated` is true above 5,000 observations, and `unmatchedValues` names filter values that matched nothing
-- Fails as `not_found`, `no_results` (naming the unmatched values and the periods with no value), `invalid_dimension`, `invalid_period`, `conflicting_params`, a non-retryable `async_response` for a query too large to serve, `canvas_not_found`, or a retryable `upstream_fault` when the Statistics API is down
+- Fails as `not_found`, `no_results` (naming the unmatched values, the periods with no value, why a range selected no period, or `geo_level` as the likely cause when Eurostat's reply says nothing more), `invalid_dimension`, `invalid_period`, `conflicting_params`, a non-retryable `async_response` for a query too large to serve, `canvas_not_found`, or a retryable `upstream_fault` when the Statistics API is down
 
 ---
 
 ### `eurostat_download_dataset` <sub>tool</sub>
 
 - `dataset_code` plus the same `filters` map and `since_period` / `until_period` (no `last_n_periods`: the TSV keeps a column per period unless a range drops it); `preview_limit` is a positive integer (default 25), clamped to 500 with a notice
+- The wholly-inside rule and its notice apply here too. A one-day range requests that day and the next, and the later day's column is dropped before anything is counted or staged
 - Returns `rowCount` (echoed as `totalCount`), `missingCount`, `periodRange`, and `bytesRead` for the whole download; fails as `not_found`, `invalid_dimension`, `invalid_period`, `filter_arity`, a non-retryable `async_queued` or `extraction_too_big`, `no_results`, `upstream_fault` (retryable when the SDMX endpoint is down), or `canvas_not_found`
 - The `EUROSTAT_BULK_MAX_BYTES` budget (default 50 MiB decoded) retains complete observations within the permitted prefix and returns `budgetExceeded: true`. A budget too small for a complete header and usable observation fails as `byte_budget_exceeded`, with the configured limit and narrowing guidance. `bytesRead` counts accepted decoded bytes, never more than the budget; incomplete trailing rows are discarded.
 

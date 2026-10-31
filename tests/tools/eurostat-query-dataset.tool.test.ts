@@ -3,6 +3,7 @@
  * @module tests/tools/eurostat-query-dataset.tool.test
  */
 
+import { createHash } from 'node:crypto';
 import { chmodSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,7 +12,9 @@ import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as serverConfig from '@/config/server-config.js';
 import { eurostatQueryDataset } from '@/mcp-server/tools/definitions/eurostat-query-dataset.tool.js';
+import { hoistDimensions } from '@/mcp-server/tools/hoist-dimensions.js';
 import { setCanvas } from '@/services/canvas-accessor.js';
 import { withRealCanvas } from '../helpers/real-canvas.js';
 
@@ -767,6 +770,32 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
       expect(text).toContain('df_');
     });
 
+    it('counts the rows shown, not the match, in the hoist header of a staged truncated result (#86)', async () => {
+      fetchMock.mockImplementation(async () => okResponse(pastCap()));
+
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'nama_10_gdp',
+        preview_limit: 3,
+      });
+
+      const structured = result.structuredContent as {
+        obsCount: number;
+        observations: unknown[];
+        stagedRowCount: number;
+        tableName: string;
+        truncated: boolean;
+      };
+      expect(structured.tableName).toMatch(/^df_/);
+      expect(structured).toMatchObject({ obsCount: 5001, stagedRowCount: 5001, truncated: true });
+      expect(structured.observations).toHaveLength(3);
+      const header = '**Same in all 3 rows shown:** time=2000 (2000 label)';
+      expect(contentText(result).split('\n')).toContain(header);
+      const formatted = eurostatQueryDataset.format!(structured as never);
+      expect(formatted.map((b) => (b.type === 'text' ? b.text : '')).join('')).toContain(
+        `${header}\n\ngeo=G0 (G0 label) → 0\n`,
+      );
+    });
+
     it('composes the unmatched, preview and staged sentences into one notice on both surfaces', async () => {
       fetchMock.mockImplementation(async () => okResponse(pastCap()));
 
@@ -1005,6 +1034,27 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
       expect('stagedRowCount' in result).toBe(false);
     });
 
+    it('counts the rows shown, not the match, in the hoist header of a truncated result with no table (#86)', async () => {
+      fetchMock.mockImplementation(async () => okResponse(oversized()));
+
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'nama_10_gdp',
+        preview_limit: 4,
+      });
+
+      const structured = result.structuredContent as {
+        obsCount: number;
+        observations: unknown[];
+        truncated: boolean;
+      };
+      expect(structured).toMatchObject({ obsCount: 6000, truncated: true });
+      expect('tableName' in structured).toBe(false);
+      expect(structured.observations).toHaveLength(4);
+      expect(contentText(result).split('\n')).toContain(
+        '**Same in all 4 rows shown:** time=2000 (2000 label)',
+      );
+    });
+
     it('keeps the notice pointed at narrowing the query', async () => {
       fetchMock.mockImplementation(async () => okResponse(oversized()));
       const c = ctx();
@@ -1233,7 +1283,7 @@ describe('eurostatQueryDataset — period inputs and filter matching (real servi
     });
   });
 
-  it('keeps the generic no_results hint for an HTTP-200 NO_RESULTS reply, which carries no envelope', async () => {
+  it('keeps the generic no_results hint for an HTTP-200 NO_RESULTS reply to a call without geo_level, with no structure read', async () => {
     fetchMock.mockImplementationOnce(async () =>
       jsonReply({
         error: [
@@ -1248,7 +1298,6 @@ describe('eurostatQueryDataset — period inputs and filter matching (real servi
     const result = await runToolContract(eurostatQueryDataset, {
       dataset_code: 'tgs00010',
       filters: { isced11: ['ED0-2'], sex: ['T'] },
-      geo_level: 'country',
       last_n_periods: 1,
     });
     expect(result.structuredContent).toMatchObject({
@@ -1262,6 +1311,10 @@ describe('eurostatQueryDataset — period inputs and filter matching (real servi
         },
       },
     });
+    expect(contentText(result as never)).toContain(
+      "Eurostat returned no observations for this query. Verify the dimension filters with eurostat_get_dimension_values and keep the period range inside the dataset's coverage.",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     const data = (result.structuredContent as { error: { data: Record<string, unknown> } }).error
       .data;
     expect(data).not.toHaveProperty('unmatchedValues');
@@ -2136,6 +2189,383 @@ describe('eurostatQueryDataset — period inputs and filter matching (real servi
   });
 });
 
+describe('hoistDimensions (#86)', () => {
+  type Row = Record<string, string>;
+  const cell = (row: Row, dimension: string) =>
+    dimension in row ? `${dimension}=${row[dimension]}` : undefined;
+  const same = (dimension: string, rows: number) =>
+    Array.from({ length: rows }, (_, i) => ({ [dimension]: '1', row: String(i) }));
+
+  for (const [label, rows, hoisted, header] of [
+    ['no rows', [], [], undefined],
+    ['one row, however constant', [{ a: '1', b: '2', c: '3' }], [], undefined],
+    ['rows that differ on every dimension', [{ a: '1' }, { a: '2' }], [], undefined],
+    [
+      'the constant dimensions, in dimension order',
+      [
+        { c: '3', a: '1', b: '1' },
+        { c: '3', a: '1', b: '2' },
+      ],
+      ['a', 'c'],
+      '**Same in all 2 rows shown:** a=1 | c=3',
+    ],
+    ['nothing that differs only on the last row', [...same('a', 3), { a: '2' }], [], undefined],
+    ['nothing that is absent from the last row', [...same('a', 3), {}], [], undefined],
+    ['nothing that is absent from the first row', [{}, ...same('a', 3)], [], undefined],
+    ['nothing that is absent from every row', [{}, {}, {}], [], undefined],
+  ] as Array<[string, Row[], string[], string | undefined]>) {
+    it(`hoists ${label}`, () => {
+      const result = hoistDimensions(rows, ['a', 'b', 'c'], cell);
+      expect(result.header).toBe(header);
+      expect([...result.hoisted]).toEqual(hoisted);
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Single-valued dimensions in content[] (#86). The rebuild parses the rendered text
+// back and compares it with structuredContent: format-parity samples one observation
+// with no dimensions, so it never reaches the hoisted path.
+// ---------------------------------------------------------------------------
+
+describe('eurostatQueryDataset — single-valued dimensions in content[] (#86)', () => {
+  type Marker = { code: string; label: string };
+  type Observation = {
+    confStatus?: Marker;
+    dimensions: Record<string, Marker>;
+    status?: Marker;
+    value: number | null;
+    valueText?: string;
+  };
+
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(getEurostatDataService).mockReturnValue(
+      new EurostatDataService({} as never, {} as never),
+    );
+    setCanvas(undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const HEADER = /^\*\*Same in all (\d+) rows shown:\*\* (.*)$/;
+  const MEASURE =
+    /^(\S+)(?: \[valueText "(.*)"\])?(?: \[(?!CONF_STATUS )([^:]+): ([^\]]*)\])?(?: \[CONF_STATUS ([^:]+): ([^\]]*)\])?$/;
+
+  /** `dim=code (label)`, the greedy label keeping nested parentheses whole. */
+  const parseCells = (cells: string): Array<readonly [string, Marker]> =>
+    cells
+      .split(' | ')
+      .filter((cell) => cell !== '')
+      .map((cell) => {
+        const match = /^([^=]+)=(\S+) \((.*)\)$/.exec(cell);
+        if (!match) throw new Error(`Unparseable cell: ${cell}`);
+        return [match[1] as string, { code: match[2] as string, label: match[3] as string }];
+      });
+
+  const headerCells = (text: string): string | undefined =>
+    text
+      .split('\n')
+      .map((line) => HEADER.exec(line))
+      .find((match) => match)?.[2];
+
+  const rowLines = (text: string) => text.split('\n').filter((line) => line.includes(' → '));
+
+  /** Everything an observation holds, read back from the header and its row alone. */
+  function rebuild(text: string): Observation[] {
+    const shared = parseCells(headerCells(text) ?? '');
+    return rowLines(text).map((line) => {
+      const [cells = '', measure = ''] = line.split(' → ');
+      const match = MEASURE.exec(measure);
+      if (!match) throw new Error(`Unparseable measure: ${measure}`);
+      const [, value, valueText, statusCode, statusLabel, confCode, confLabel] = match;
+      return {
+        dimensions: Object.fromEntries([...shared, ...parseCells(cells)]),
+        value: value === 'N/A' ? null : Number(value),
+        ...(valueText !== undefined && { valueText }),
+        ...(statusCode !== undefined && {
+          status: { code: statusCode, label: statusLabel as string },
+        }),
+        ...(confCode !== undefined && {
+          confStatus: { code: confCode, label: confLabel as string },
+        }),
+      };
+    });
+  }
+
+  const rendered = (result: unknown) =>
+    (eurostatQueryDataset.format!(result as never) as Array<{ text?: string }>)
+      .map((block) => block.text ?? '')
+      .join('');
+  /** The row section: what follows the blank line closing the summary lines. */
+  const rows = (text: string) => text.slice(text.indexOf('\n\n') + 2);
+
+  const observation = (cells: Record<string, string>, value: number): Observation => ({
+    dimensions: Object.fromEntries(
+      Object.entries(cells).map(([dim, code]) => [dim, { code, label: `${code} label` }]),
+    ),
+    value,
+  });
+  const payload = (dimensionsUsed: string[], observations: Observation[]) => ({
+    ...mockQueryResult,
+    dimensionsUsed,
+    observations,
+    obsCount: observations.length,
+    missingObsCount: 0,
+  });
+
+  describe('what stays as it was', () => {
+    it('renders a single observation with every dimension on its row', () => {
+      const text = rendered({
+        ...mockQueryResult,
+        observations: [makeObs('DE', 'Germany', '2023', 3_867_000)],
+        obsCount: 1,
+        missingObsCount: 0,
+      });
+      expect(rows(text)).toBe(
+        'unit=CP_MEUR (Current prices, million euro) | na_item=B1GQ (Gross domestic product at market prices) | geo=DE (Germany) | time=2023 (2023) → 3867000',
+      );
+    });
+
+    it('renders a result with no single-valued dimension with every dimension on each row', () => {
+      const text = rendered(
+        payload(
+          ['geo', 'time'],
+          [
+            observation({ geo: 'DE', time: '2022' }, 1),
+            observation({ geo: 'FR', time: '2023' }, 2),
+          ],
+        ),
+      );
+      expect(rows(text)).toBe(
+        'geo=DE (DE label) | time=2022 (2022 label) → 1\ngeo=FR (FR label) | time=2023 (2023 label) → 2',
+      );
+    });
+
+    it('renders an empty preview with no header', () => {
+      expect(rendered(payload(['geo', 'time'], []))).not.toContain('rows shown');
+    });
+  });
+
+  const REAL_CALLS = [
+    {
+      name: 'urb_cpop1, cities varying and estimates flagged',
+      fixture: 'urb-cpop1-de1001v-last1-excerpt',
+      input: {
+        dataset_code: 'urb_cpop1',
+        filters: { indic_ur: ['DE1001V'] },
+        last_n_periods: 1,
+        preview_limit: 500,
+      },
+      count: 9,
+      hoisted: ['freq', 'indic_ur', 'time'],
+      varying: ['cities'],
+      sha256: '5099167db84176c5f5fbfa5a18917f91bbb990bab8af1320663d458a7ac9a2f6',
+    },
+    {
+      name: 'DS-059358, text values and confidential cells',
+      fixture: 'comext/ds-059358-de-2022',
+      input: {
+        dataset_code: 'DS-059358',
+        filters: { reporter: ['DE'] },
+        since_period: '2022',
+        until_period: '2022',
+        preview_limit: 500,
+      },
+      count: 58,
+      hoisted: ['freq', 'reporter', 'time'],
+      varying: ['product', 'indicators'],
+      sha256: '59b15d2d6407f5a4a084e15383c6a9acc134e76c05e18faeeafe5483cb2f68d6',
+    },
+    {
+      name: 'DS-045409, a hoisted label with nested parentheses',
+      fixture: 'comext/ds-045409-eu27-us-total-2024-01-02',
+      input: {
+        dataset_code: 'DS-045409',
+        filters: { partner: ['US'] },
+        since_period: '2024-01',
+        until_period: '2024-02',
+      },
+      count: 2,
+      hoisted: ['freq', 'reporter', 'partner', 'product', 'flow', 'indicators'],
+      varying: ['time'],
+      sha256: 'f90b65213910d4237cb48d4cae992f362648e5e7a766816d2cd479970feef8ee',
+    },
+  ];
+
+  for (const { name, fixture, input, count, hoisted, varying, sha256 } of REAL_CALLS) {
+    describe(name, () => {
+      const call = async () => {
+        fetchMock.mockImplementation(async () => jsonReply(envelope(fixture)));
+        const result = await runToolContract(eurostatQueryDataset, input);
+        expect(result.isError).not.toBe(true);
+        const structured = result.structuredContent as { observations: Observation[] };
+        expect(structured.observations).toHaveLength(count);
+        return { structured, text: contentText(result) };
+      };
+
+      it('rebuilds every observation from the header and its row', async () => {
+        const { structured, text } = await call();
+        expect(rebuild(text)).toStrictEqual(structured.observations);
+        expect(rebuild(rendered(structured))).toStrictEqual(structured.observations);
+      });
+
+      it('lists the single-valued dimensions once and leaves the rest on each row', async () => {
+        const { text } = await call();
+        expect(parseCells(headerCells(text) ?? '').map(([dim]) => dim)).toEqual(hoisted);
+        expect(text).toContain(`**Same in all ${count} rows shown:**`);
+        expect(rowLines(text)).toHaveLength(count);
+        for (const line of rowLines(text)) {
+          const [cells = ''] = line.split(' → ');
+          expect(parseCells(cells).map(([dim]) => dim)).toEqual(varying);
+        }
+      });
+
+      it('leaves structuredContent untouched', async () => {
+        const { structured } = await call();
+        const digest = createHash('sha256').update(JSON.stringify(structured.observations));
+        expect(digest.digest('hex')).toBe(sha256);
+      });
+    });
+  }
+
+  it('carries cities alone on each urb_cpop1 row, with the shared dimensions fully labelled above', async () => {
+    fetchMock.mockImplementation(async () =>
+      jsonReply(envelope('urb-cpop1-de1001v-last1-excerpt')),
+    );
+    const result = await runToolContract(eurostatQueryDataset, {
+      dataset_code: 'urb_cpop1',
+      filters: { indic_ur: ['DE1001V'] },
+      last_n_periods: 1,
+      preview_limit: 500,
+    });
+    const text = contentText(result);
+    expect(text).toContain(
+      '**Same in all 9 rows shown:** freq=A (Annual) | indic_ur=DE1001V (Population on the 1st of January, total) | time=2025 (2025)\n\ncities=BE (Belgium) → 11883495\n',
+    );
+    expect(text).toContain('cities=BE001C (Bruxelles/Brussel (greater city)) → 1271709\n');
+    expect(text).toContain('cities=SE015C (Växjö) → 98335 [e: estimated]');
+    expect(headerCells(text)).not.toContain('→');
+  });
+
+  it('keeps a text value and a confidentiality marker on their rows', async () => {
+    fetchMock.mockImplementation(async () => jsonReply(envelope('comext/ds-059358-de-2022')));
+    const result = await runToolContract(eurostatQueryDataset, {
+      dataset_code: 'DS-059358',
+      filters: { reporter: ['DE'] },
+      since_period: '2022',
+      until_period: '2022',
+      preview_limit: 500,
+    });
+    const text = contentText(result);
+    expect(text).toMatch(/\| indicators=QNTUNIT \(Quantity unit\) → N\/A \[valueText "KG"\]\n/);
+    expect(text).toMatch(/\| indicators=PVALFLAG \(.*\) → N\/A \[CONF_STATUS C: confidential\]\n/);
+  });
+
+  it('rebuilds a nested-parenthesis label on a row as well as in the header', () => {
+    const us = "United States (incl. Navassa Island (part of 'UM') from 1995 -> 2000)";
+    const fr =
+      "France (incl. Saint Barthélemy 'BL' -> 2012; incl. French Guiana 'GF', Guadeloupe 'GP', Martinique 'MQ', Réunion 'RE' from 1997; incl. Mayotte 'YT' from 2014)";
+    const reporter = {
+      code: 'DE',
+      label: "Germany (incl. German Democratic Republic 'DD' from 1991)",
+    };
+    const observations: Observation[] = [
+      { dimensions: { reporter, partner: { code: 'US', label: us } }, value: 1 },
+      {
+        dimensions: { reporter, partner: { code: 'FR', label: fr } },
+        value: null,
+        confStatus: { code: 'C', label: 'confidential' },
+      },
+    ];
+    const text = rendered(payload(['reporter', 'partner'], observations));
+    expect(headerCells(text)).toBe(`reporter=DE (${reporter.label})`);
+    expect(rebuild(text)).toStrictEqual(observations);
+  });
+
+  it('hoists a dimension the preview shows one value of, stating it only of the rows shown', async () => {
+    fetchMock.mockImplementation(async () => jsonReply(envelope('comext/ds-059358-de-2022')));
+    const call = async (preview_limit: number) =>
+      contentText(
+        await runToolContract(eurostatQueryDataset, {
+          dataset_code: 'DS-059358',
+          filters: { reporter: ['DE'] },
+          since_period: '2022',
+          until_period: '2022',
+          preview_limit,
+        }),
+      );
+
+    const whole = await call(500);
+    expect(headerCells(whole)).not.toContain('product=');
+
+    const preview = await call(3);
+    expect(preview).toContain('**Inline preview:** first 3 of 58 matched rows');
+    const named = preview.split('\n').filter((line) => line.includes('product=20143420'));
+    expect(named).toHaveLength(1);
+    expect(named[0]).toMatch(/^\*\*Same in all 3 rows shown:\*\* .*product=20143420 \(/);
+  });
+
+  it('compares every row of a full 500-row preview, down to the last', () => {
+    const full = Array.from({ length: 500 }, (_, i) => makeObs(`G${i}`, `Country ${i}`, '2023', i));
+    const render = (observations: typeof full) =>
+      rendered({ ...mockQueryResult, observations, obsCount: 900, missingObsCount: 0 });
+
+    const text = render(full);
+    expect(text).toContain('**Same in all 500 rows shown:** unit=CP_MEUR');
+    expect(rebuild(text)).toStrictEqual(JSON.parse(JSON.stringify(full)));
+
+    const lastDiffers = render([
+      ...full.slice(0, 499),
+      makeObs('G499', 'Country 499', '2024', 499),
+    ]);
+    expect(headerCells(lastDiffers)).not.toContain('time=');
+    expect(rowLines(lastDiffers).at(-1)).toContain('| time=2024 (2024) → 499');
+  });
+
+  it('keeps a dimension on the rows when a later row has no value for it', () => {
+    const lacking = makeObs('IT', 'Italy', '2023', 3);
+    const { na_item: _, ...dimensions } = lacking.dimensions;
+    const text = rendered({
+      ...mockQueryResult,
+      observations: [
+        makeObs('DE', 'Germany', '2023', 1),
+        makeObs('FR', 'France', '2023', 2),
+        { ...lacking, dimensions },
+      ],
+    });
+    expect(headerCells(text)).toBe(
+      'unit=CP_MEUR (Current prices, million euro) | time=2023 (2023)',
+    );
+    expect(rows(text).split('\n').slice(-3)).toEqual([
+      'na_item=B1GQ (Gross domestic product at market prices) | geo=DE (Germany) → 1',
+      'na_item=B1GQ (Gross domestic product at market prices) | geo=FR (France) → 2',
+      'na_item=? (?) | geo=IT (Italy) → 3',
+    ]);
+  });
+
+  it('never states a dimension no row has a value for', () => {
+    const text = rendered(
+      payload(['geo', 'age'], [observation({ geo: 'DE' }, 1), observation({ geo: 'FR' }, 2)]),
+    );
+    expect(headerCells(text)).toBeUndefined();
+    expect(rows(text)).toBe('geo=DE (DE label) | age=? (?) → 1\ngeo=FR (FR label) | age=? (?) → 2');
+  });
+
+  it('keeps a code on the rows when it carries two labels', () => {
+    const relabelled = observation({ unit: 'PC', geo: 'FR' }, 2);
+    relabelled.dimensions.unit = { code: 'PC', label: 'Percentage of total' };
+    const observations = [observation({ unit: 'PC', geo: 'DE' }, 1), relabelled];
+    const text = rendered(payload(['unit', 'geo'], observations));
+    expect(headerCells(text)).toBeUndefined();
+    expect(rebuild(text)).toStrictEqual(observations);
+  });
+});
+
 describe('eurostatQueryDataset — too-large refusal hint with blank filter values (#61)', () => {
   it('counts a dimension whose values are all blank as unfiltered', async () => {
     vi.mocked(getEurostatDataService).mockReturnValue({
@@ -2264,5 +2694,725 @@ describe('eurostatQueryDataset — an unavailable Statistics API (#71)', () => {
     expect(error?.data).toMatchObject({ status: 503 });
     expect(error?.data?.reason).toBeUndefined();
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('eurostatQueryDataset — what Eurostat keeps of a period range (#84, #88)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(getEurostatDataService).mockReturnValue(
+      new EurostatDataService({} as never, {} as never),
+    );
+    setCanvas(undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const NAMA = { unit: ['CP_MEUR'], na_item: ['B1GQ'], geo: ['DE'] };
+  const NRG = {
+    geo: ['DE'],
+    nrg_cons: ['KWH2500-4999'],
+    tax: ['I_TAX'],
+    currency: ['EUR'],
+  };
+  const WEEKLY = { sex: ['T'], unit: ['NR'], geo: ['DE'] };
+  const USD = { statinfo: ['AVG'], unit: ['NAC'], currency: ['USD'] };
+  const DS = {
+    reporter: ['DE'],
+    partner: ['FR'],
+    product: ['TOTAL'],
+    flow: ['1'],
+    indicators: ['VALUE_IN_EUROS'],
+  };
+
+  const query = (
+    fixture: string,
+    dataset_code: string,
+    filters: Record<string, readonly string[]>,
+    since_period: string | undefined,
+    until_period: string | undefined,
+  ) => {
+    fetchMock.mockImplementationOnce(async () => jsonReply(envelope(fixture)));
+    return runToolContract(eurostatQueryDataset, {
+      dataset_code,
+      filters,
+      preview_limit: 500, // the weekly fixture's 104 rows would otherwise add a preview notice
+      ...(since_period !== undefined && { since_period }),
+      ...(until_period !== undefined && { until_period }),
+    } as never);
+  };
+  const requested = (): URL => new URL(String(fetchMock.mock.calls[0]?.[0]));
+  const noticeOf = (result: { structuredContent?: unknown }) =>
+    (result.structuredContent as { notice?: string }).notice;
+  const failureOf = (result: { structuredContent?: unknown }) => {
+    const { error } = result.structuredContent as {
+      error: { data: { reason: string; recovery: { hint: string } }; message: string };
+    };
+    return { hint: error.data.recovery.hint, message: error.message, reason: error.data.reason };
+  };
+  const inside = (literal: string, label: string, period: string) =>
+    `since_period "${literal}" falls inside ${label} period ${period}, which Eurostat excludes: it keeps only periods wholly inside the range. since_period "${period}" includes that period if this slice has it.`;
+
+  describe('a bound that falls inside a period, on a success', () => {
+    for (const [label, fixture, dataset, filters, since, until, obsCount, notice] of [
+      [
+        'annual data (step 1)',
+        'nama-10-gdp-de-2022-06-to-2024',
+        'nama_10_gdp',
+        NAMA,
+        '2022-06',
+        '2024',
+        2,
+        inside('2022-06', 'annual', '2022'),
+      ],
+      [
+        'semester data (step 4)',
+        'nrg-pc-204-de-2022-06-to-2023',
+        'nrg_pc_204',
+        NRG,
+        '2022-06',
+        '2023',
+        3,
+        inside('2022-06', 'semester', '2022-S1'),
+      ],
+      [
+        'a coarser bound on weekly data',
+        'demo-r-mwk-ts-de-2022-to-2023',
+        'demo_r_mwk_ts',
+        WEEKLY,
+        '2022',
+        '2023',
+        104,
+        inside('2022', 'weekly', '2021-W52'),
+      ],
+      [
+        'annual only on mixed frequencies',
+        'comext/ds-045409-de-fr-2023-06-to-2024',
+        'DS-045409',
+        DS,
+        '2023-06',
+        '2024',
+        20,
+        inside('2023-06', 'annual', '2023'),
+      ],
+      [
+        'an annual period time does not show',
+        'comext/ds-045409-de-fr-2023-06-to-2023-12',
+        'DS-045409',
+        DS,
+        '2023-06',
+        '2023-12',
+        7,
+        inside('2023-06', 'annual', '2023'),
+      ],
+    ] as const) {
+      it(`names it on ${label}, on both surfaces and with the same rows`, async () => {
+        const result = await query(fixture, dataset, filters, since, until);
+        expect(result.isError).not.toBe(true);
+        expect(result.structuredContent).toMatchObject({ obsCount });
+        expect(noticeOf(result)).toBe(notice);
+        expect(contentText(result as never)).toContain(notice);
+        expect(requested().searchParams.get('sinceTimePeriod')).toBe(since);
+        expect(requested().searchParams.get('untilTimePeriod')).toBe(until);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      });
+    }
+
+    for (const [label, fixture, dataset, filters, since, until] of [
+      ['a year on annual data', 'nama-10-gdp-de-2022', 'nama_10_gdp', NAMA, '2022', '2022'],
+      [
+        'a month starting a semester',
+        'nrg-pc-204-de-2022-01-to-2023',
+        'nrg_pc_204',
+        NRG,
+        '2022-01',
+        '2023',
+      ],
+      [
+        'a period past the reported coverage',
+        'nama-10-gdp-de-2024-to-2031-06',
+        'nama_10_gdp',
+        NAMA,
+        '2024',
+        '2031-06',
+      ],
+    ] as const) {
+      it(`stays silent for ${label}`, async () => {
+        const result = await query(fixture, dataset, filters, since, until);
+        expect(result.isError).not.toBe(true);
+        expect(noticeOf(result)).toBeUndefined();
+        expect(contentText(result as never)).not.toContain('falls inside');
+      });
+    }
+
+    it('quotes the literal as the caller sent it, trimmed', async () => {
+      const result = await query(
+        'nama-10-gdp-de-2022-06-to-2024',
+        'nama_10_gdp',
+        NAMA,
+        ' 2022-Q02 ',
+        '2024',
+      );
+      expect(requested().searchParams.get('sinceTimePeriod')).toBe('2022-Q2');
+      expect(noticeOf(result)).toBe(inside('2022-Q02', 'annual', '2022'));
+    });
+
+    it('asks for both bounds when both fall inside the one period', async () => {
+      const result = await query(
+        'comext/ds-045409-de-fr-2023-06-to-2023-12',
+        'DS-045409',
+        DS,
+        '2023-06',
+        '2023-08',
+      );
+      expect(noticeOf(result)).toBe(
+        'since_period "2023-06" and until_period "2023-08" fall inside annual period 2023, which Eurostat excludes: it keeps only periods wholly inside the range. since_period "2023" and until_period "2023" together include that period if this slice has it.',
+      );
+    });
+
+    it('collects the notice with the others rather than replacing them', async () => {
+      const result = await query(
+        'nama-10-gdp-de-2022-06-to-2024',
+        'nama_10_gdp',
+        { ...NAMA, geo: ['DE', 'QQ'] },
+        '2022-06',
+        '2024',
+      );
+      expect(noticeOf(result)).toContain(inside('2022-06', 'annual', '2022'));
+      expect(noticeOf(result)).toContain('geo=[QQ]');
+    });
+  });
+
+  describe('a time dimension that comes back empty', () => {
+    const noWhole = (dataset: string, span: string | undefined, label: string) =>
+      `No observations matched. The requested period range ${span ? `overlaps ${span} but ` : ''}holds no whole ${label} period of "${dataset}": Eurostat keeps only periods wholly inside the range.`;
+
+    for (const [label, since, until, bounds] of [
+      [
+        'each bound alone selects one (step 2)',
+        '2022-06',
+        '2023-06',
+        'since_period "2022" or until_period "2023"',
+      ],
+      ['the since bound selects one', '2020-06', '2020', 'since_period "2020"'],
+      ['the last covered period', '2025-06', '2031', 'since_period "2025"'],
+      ['the first covered period', '1974-06', '1975-06', 'until_period "1975"'],
+      [
+        'neither alone selects one',
+        '2022-06',
+        '2022-06',
+        'since_period "2022" and until_period "2022"',
+      ],
+      ['a since bound with no until', '2025-06', undefined, 'since_period "2025"'],
+      ['an until bound with no since', undefined, '1975-06', 'until_period "1975"'],
+    ] as const) {
+      it(`holds no whole period: ${label}`, async () => {
+        const result = await query('nama-10-gdp-de-no-period', 'nama_10_gdp', NAMA, since, until);
+        const failure = failureOf(result);
+        expect(failure.reason).toBe('no_results');
+        expect(failure.message).toBe(noWhole('nama_10_gdp', '1975 – 2025', 'annual'));
+        expect(failure.hint).toBe(`Set ${bounds} to select a whole period.`);
+        const text = contentText(result as never);
+        expect(text).toContain(failure.message);
+        expect(text).toContain(failure.hint);
+      });
+    }
+
+    it('names the finest frequency on a dataset that reports no coverage', async () => {
+      const failure = failureOf(
+        await query(
+          'comext/ds-045409-de-fr-no-period',
+          'DS-045409',
+          DS,
+          '2023-06-10',
+          '2023-06-20',
+        ),
+      );
+      expect(failure.message).toBe(noWhole('DS-045409', undefined, 'monthly'));
+      expect(failure.hint).toBe(
+        'Set since_period "2023-06" and until_period "2023-06" to select a whole period.',
+      );
+    });
+
+    for (const [since, until] of [
+      ['2030', '2031'],
+      ['1960', '1970'],
+    ] as const) {
+      it(`keeps the outside-coverage message for ${since} to ${until}`, async () => {
+        const failure = failureOf(
+          await query('nama-10-gdp-de-no-period', 'nama_10_gdp', NAMA, since, until),
+        );
+        expect(failure.message).toBe(
+          'No observations matched. The requested period range selects no period of "nama_10_gdp", whose data runs 1975 – 2025.',
+        );
+        expect(failure.hint).toBe('Set since_period/until_period inside 1975 – 2025.');
+      });
+    }
+
+    for (const [label, fixture, dataset, filters, since, until, span] of [
+      [
+        'a weekend',
+        'ert-bil-eur-d-usd-no-period',
+        'ert_bil_eur_d',
+        USD,
+        '2022-06-18',
+        '2022-06-19',
+        '1974-07-01 – 2026-10-31',
+      ],
+      [
+        'a survey gap',
+        'earn-ses-annual-de-2020',
+        'earn_ses_annual',
+        { geo: ['DE'] },
+        '2020',
+        '2020',
+        '2002 – 2022',
+      ],
+      [
+        'a dataset reporting no coverage',
+        'comext/ds-045409-de-fr-no-period',
+        'DS-045409',
+        DS,
+        '2031',
+        '2032',
+        undefined,
+      ],
+    ] as const) {
+      it(`holds no published period: ${label}`, async () => {
+        const result = await query(fixture, dataset, filters, since, until);
+        const failure = failureOf(result);
+        expect(failure.reason).toBe('no_results');
+        expect(failure.message).toBe(
+          `No observations matched. The requested period range ${span ? `overlaps ${span} but ` : ''}holds no published period of "${dataset}".`,
+        );
+        expect(failure.hint).toBe(
+          `List the periods "${dataset}" publishes with eurostat_get_dimension_values, dimension "time", then set since_period/until_period on one of them.`,
+        );
+        expect(`${failure.message} ${failure.hint}`).not.toMatch(/(since|until)_period "/);
+        expect(contentText(result as never)).toContain(failure.hint);
+      });
+    }
+
+    it('keeps an unmatched filter value beside the period diagnosis', async () => {
+      const body = envelope('nama-10-gdp-de-no-period') as {
+        dimension: { geo: { category: { index: Record<string, number> } } };
+      };
+      body.dimension.geo.category.index = {};
+      fetchMock.mockImplementationOnce(async () => jsonReply(body));
+      const failure = failureOf(
+        await runToolContract(eurostatQueryDataset, {
+          dataset_code: 'nama_10_gdp',
+          filters: { ...NAMA, geo: ['QQ'] },
+          since_period: '2022-06',
+          until_period: '2023-06',
+        }),
+      );
+      expect(failure.message).toContain('geo=[QQ]');
+      expect(failure.message).toContain('holds no whole annual period');
+      expect(failure.hint).toContain('eurostat_get_dimension_values');
+      expect(failure.hint).toContain('since_period "2022"');
+    });
+
+    it('leaves the bare NO_RESULTS answer with its generic message and hint', async () => {
+      fetchMock.mockImplementationOnce(async () =>
+        jsonReply({
+          error: [
+            {
+              status: 200,
+              id: 100,
+              label: 'NO_RESULTS: The query that has been sent did not return any results.',
+            },
+          ],
+        }),
+      );
+      const failure = failureOf(
+        await runToolContract(eurostatQueryDataset, {
+          dataset_code: 'nama_10_gdp',
+          filters: NAMA,
+          since_period: '2022-06',
+          until_period: '2023-06',
+        }),
+      );
+      expect(failure.reason).toBe('no_results');
+      expect(failure.hint).toContain('an unmatched value and an out-of-coverage range');
+    });
+  });
+
+  describe('a one-day range', () => {
+    for (const [since, until] of [
+      ['2022-06-15', '2022-06-15'],
+      ['2022-D166', '2022-D166'],
+      ['2022-06-15', '2022-D166'],
+    ] as const) {
+      it(`returns the one observation for ${since} to ${until} (#88 step 1)`, async () => {
+        const result = await query(
+          'ert-bil-eur-d-usd-2022-06-15',
+          'ert_bil_eur_d',
+          USD,
+          since,
+          until,
+        );
+        expect(requested().searchParams.get('time')).toBe('2022-06-15');
+        expect(requested().searchParams.has('sinceTimePeriod')).toBe(false);
+        expect(requested().searchParams.has('untilTimePeriod')).toBe(false);
+        expect(result.structuredContent).toMatchObject({
+          obsCount: 1,
+          timeRange: { start: '2022-06-15', end: '2022-06-15' },
+        });
+        expect(noticeOf(result)).toBeUndefined();
+      });
+    }
+
+    it('echoes the bounds as the caller set them', async () => {
+      const result = await query(
+        'ert-bil-eur-d-usd-2022-06-15',
+        'ert_bil_eur_d',
+        USD,
+        '2022-D166',
+        '2022-06-15',
+      );
+      expect(result.structuredContent).toMatchObject({
+        appliedFilters: { sincePeriod: '2022-D166', untilPeriod: '2022-06-15', filters: USD },
+      });
+    });
+
+    it('sends one day of annual data as time and names both bounds (#88 step 3)', async () => {
+      const result = await query(
+        'nama-10-gdp-de-no-period',
+        'nama_10_gdp',
+        NAMA,
+        '2022-06-15',
+        '2022-06-15',
+      );
+      expect(requested().searchParams.get('time')).toBe('2022-06-15');
+      const failure = failureOf(result);
+      expect(failure.reason).toBe('no_results');
+      expect(failure.hint).toBe(
+        'Set since_period "2022" and until_period "2022" to select a whole period.',
+      );
+    });
+
+    for (const day of ['2022-06-18', '2022-06-19']) {
+      it(`takes the no-published-period diagnosis for ${day}, a day with no rate`, async () => {
+        const failure = failureOf(
+          await query('ert-bil-eur-d-usd-no-period', 'ert_bil_eur_d', USD, day, day),
+        );
+        expect(failure.reason).toBe('no_results');
+        expect(failure.message).toContain('holds no published period');
+      });
+    }
+
+    it('leaves two consecutive days as the bounds (#88 step 4)', async () => {
+      await query('ert-bil-eur-d-usd-2022-06-15', 'ert_bil_eur_d', USD, '2022-06-15', '2022-06-16');
+      expect(requested().searchParams.get('sinceTimePeriod')).toBe('2022-06-15');
+      expect(requested().searchParams.get('untilTimePeriod')).toBe('2022-06-16');
+      expect(requested().searchParams.has('time')).toBe(false);
+    });
+  });
+
+  describe('the descriptions', () => {
+    const since = eurostatQueryDataset.input.shape.since_period.description ?? '';
+    const until = eurostatQueryDataset.input.shape.until_period.description ?? '';
+
+    it('state the wholly-inside rule', () => {
+      expect(since).toContain('Eurostat keeps only periods wholly inside the range');
+      expect(until).toContain('falls inside a period');
+    });
+
+    it('state how a one-day range is sent', () => {
+      expect(since).toMatch(/same day is sent as that one date/);
+    });
+
+    it('claim no mapping and offer no range that holds nothing as a working example', () => {
+      for (const description of [since, until]) {
+        expect(description).not.toMatch(/mapped onto/);
+        expect(description).not.toMatch(/"2020-06" to "2020"/);
+        expect(description).not.toMatch(/works on annual data/);
+      }
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// geo_level behind a bare NO_RESULTS (#85). The real service over captured replies:
+// the reply's shape decides the path, so a fake that served any shape would prove
+// nothing. The deadline itself is tabled in narrowing-advice.test.ts.
+// ---------------------------------------------------------------------------
+
+describe('eurostatQueryDataset — geo_level behind a bare NO_RESULTS (#85)', () => {
+  const BARE = envelope('no-results-reply');
+  const URB = { indic_ur: ['DE1001V'] };
+  const NAMA = { unit: ['CP_MEUR'], na_item: ['B1GQ'] };
+  const DS = {
+    partner: ['FR'],
+    product: ['TOTAL'],
+    flow: ['1'],
+    indicators: ['VALUE_IN_EUROS'],
+    freq: ['A'],
+  };
+  const DROP_FOR_GEO_CODES =
+    'Drop geo_level. If the other filters and the period range match anything, the same query then returns the "geo" codes this slice carries, and they work in filters.geo.';
+
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  const structure = (name: string) => async () =>
+    new Response(readFileSync(new URL(`../fixtures/${name}.xml`, import.meta.url), 'utf8'));
+
+  /** The Statistics API answers `reply`; the structure endpoint answers `onStructure`. */
+  const serve = (
+    reply: object,
+    onStructure: (input: unknown, init?: RequestInit) => Promise<Response> = unmockedFetch,
+  ) =>
+    fetchMock.mockImplementation(async (input: unknown, init?: RequestInit) =>
+      new URL(String(input)).pathname.includes('/sdmx/2.1/datastructure/')
+        ? onStructure(input, init)
+        : jsonReply(reply),
+    );
+
+  const structureReads = () =>
+    fetchMock.mock.calls.filter(([input]) =>
+      new URL(String(input)).pathname.includes('/sdmx/2.1/datastructure/'),
+    ).length;
+
+  const errorOf = (result: { structuredContent?: unknown }) =>
+    (result.structuredContent as { error: { code: number; data: Record<string, unknown> } }).error;
+  const hintOf = (result: { structuredContent?: unknown }) =>
+    (errorOf(result).data.recovery as { hint: string }).hint;
+
+  beforeEach(() => {
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(getEurostatDataService).mockReturnValue(
+      new EurostatDataService({} as never, {} as never),
+    );
+    setCanvas(undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it.each([
+    {
+      name: 'urb_cpop1, keyed on cities',
+      input: {
+        dataset_code: 'urb_cpop1',
+        filters: URB,
+        last_n_periods: 1,
+        geo_level: 'nuts2' as const,
+      },
+      fixture: 'urb-cpop1-datastructure',
+      level: 'nuts2',
+      listed: 'freq, indic_ur, cities',
+    },
+    {
+      name: 'DS-045409, keyed on reporter and partner',
+      input: {
+        dataset_code: 'DS-045409',
+        filters: DS,
+        since_period: '2024',
+        until_period: '2024',
+        geo_level: 'country' as const,
+      },
+      fixture: 'comext/ds-045409-datastructure',
+      level: 'country',
+      listed: 'freq, reporter, partner, product, flow, indicators',
+    },
+  ])('lists the dimensions of $name and routes to their codes', async (row) => {
+    serve(BARE, structure(row.fixture));
+    const result = await runToolContract(eurostatQueryDataset, row.input);
+
+    expect(errorOf(result)).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'no_results' },
+    });
+    const message = `No observations matched. geo_level "${row.level}" likely selects no code for this query. "${row.input.dataset_code}" has no "geo" dimension; its dimensions are ${row.listed}.`;
+    const hint = `Drop geo_level. To select geography, filter whichever of ${row.listed} holds it, with codes from eurostat_get_dimension_values.`;
+    expect(hintOf(result)).toBe(hint);
+    const text = contentText(result as never);
+    expect(text).toContain(message);
+    expect(text).toContain(`Recovery: ${hint}`);
+    expect(structureReads()).toBe(1);
+  });
+
+  it.each([
+    ['last_n_periods', { last_n_periods: 1 }],
+    ['a range inside coverage', { since_period: '2022', until_period: '2023' }],
+    ['a range that holds no whole period', { since_period: '2022-06', until_period: '2023-06' }],
+    ['a range past coverage', { since_period: '2030', until_period: '2031' }],
+  ])('says to drop geo_level on a dataset with geo, over %s', async (_name, periods) => {
+    serve(BARE, structure('nama-10-gdp-datastructure'));
+    const result = await runToolContract(eurostatQueryDataset, {
+      dataset_code: 'nama_10_gdp',
+      filters: NAMA,
+      geo_level: 'nuts3',
+      ...periods,
+    });
+
+    expect(errorOf(result)).toMatchObject({ data: { reason: 'no_results' } });
+    expect(hintOf(result)).toBe(DROP_FOR_GEO_CODES);
+    const text = contentText(result as never);
+    expect(text).toContain(
+      'No observations matched. geo_level "nuts3" likely selects no code for this query.',
+    );
+    expect(text).toContain(`Recovery: ${DROP_FOR_GEO_CODES}`);
+    expect(text).not.toContain('freq, unit, na_item');
+    expect(text).not.toContain('eurostat_get_dimension_values');
+    expect(structureReads()).toBe(1);
+  });
+
+  it('lets the envelope diagnosis stand alone, with no geo_level sentence and no structure read', async () => {
+    serve(envelope('nama-10-gdp-country-level-2022-06-to-2023-06'));
+    const result = await runToolContract(eurostatQueryDataset, {
+      dataset_code: 'nama_10_gdp',
+      filters: NAMA,
+      geo_level: 'country',
+      since_period: '2022-06',
+      until_period: '2023-06',
+    });
+
+    expect(errorOf(result)).toMatchObject({ data: { reason: 'no_results' } });
+    expect(hintOf(result)).toBe(
+      'Set since_period "2022" or until_period "2023" to select a whole period.',
+    );
+    const text = contentText(result as never);
+    expect(text).toContain('holds no whole annual period of "nama_10_gdp"');
+    expect(text).not.toContain('geo_level');
+    expect(structureReads()).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('still returns what a level selects on a dataset without geo, with no structure read', async () => {
+    serve(envelope('urb-cpop1-de1001v-country-last1'));
+    const result = await runToolContract(eurostatQueryDataset, {
+      dataset_code: 'urb_cpop1',
+      filters: URB,
+      last_n_periods: 1,
+      geo_level: 'country',
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      obsCount: 5,
+      dimensionsUsed: ['freq', 'indic_ur', 'cities', 'time'],
+    });
+    expect(structureReads()).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  describe('when the structure read does not answer', () => {
+    const SENTENCE =
+      'No observations matched. geo_level "nuts2" likely selects no code for this query.';
+    const DROP = 'Drop geo_level and send the query again.';
+    const input = {
+      dataset_code: 'urb_cpop1',
+      filters: URB,
+      last_n_periods: 1,
+      geo_level: 'nuts2' as const,
+    };
+    /** A request that never answers: it settles only when its signal aborts. */
+    const hang = (_input: unknown, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      // Far past the deadline on both, so neither default stall timeout can end a read for it.
+      vi.spyOn(serverConfig, 'getServerConfig').mockReturnValue({
+        ...serverConfig.getServerConfig(),
+        requestTimeoutMs: 600_000,
+        metadataTimeoutMs: 600_000,
+      });
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+
+    /** The sentence stays and the case stays unclaimed: no list, no "has no geo", no route. */
+    const expectSentenceAlone = (result: Awaited<ReturnType<typeof runToolContract>>) => {
+      expect(errorOf(result)).toMatchObject({
+        code: JsonRpcErrorCode.NotFound,
+        data: { reason: 'no_results' },
+      });
+      expect(hintOf(result)).toBe(DROP);
+      const text = contentText(result as never);
+      expect(text).toContain(SENTENCE);
+      expect(text).toContain(`Recovery: ${DROP}`);
+      expect(text).not.toContain('freq, indic_ur, cities');
+      expect(text).not.toContain('"geo"');
+      expect(text).not.toContain('eurostat_get_dimension_values');
+    };
+
+    it('keeps the sentence when the read fails, after its 3 attempts', async () => {
+      serve(BARE, async () => new Response('Service Unavailable', { status: 503 }));
+      const pending = runToolContract(eurostatQueryDataset, input);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expectSentenceAlone(await pending);
+      expect(structureReads()).toBe(3);
+    });
+
+    it('keeps the sentence when the read hangs, at 5 s', async () => {
+      serve(BARE, hang);
+      let settled = false;
+      const pending = runToolContract(eurostatQueryDataset, input).finally(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(true);
+      expectSentenceAlone(await pending);
+      expect(structureReads()).toBe(1);
+    });
+
+    it('reaches the caller as a cancellation when the call is cancelled during the read', async () => {
+      serve(BARE, hang);
+      const controller = new AbortController();
+      /**
+       * The handler, not runToolContract: the contract runner reports anything thrown after
+       * the abort as RequestCancelled, so only the handler's own throw shows what the
+       * catch did with it.
+       */
+      const outcome = Promise.resolve(
+        eurostatQueryDataset.handler(
+          eurostatQueryDataset.input.parse(input),
+          createMockContext({ signal: controller.signal, errors: eurostatQueryDataset.errors }),
+        ),
+      ).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(await outcome).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+      expect(structureReads()).toBe(1);
+    });
+
+    it('holds a too-large refusal to the same deadline, keeping the refusal', async () => {
+      serve({ warning: { status: 413, label: 'ASYNCHRONOUS_RESPONSE' } }, hang);
+      let settled = false;
+      const pending = runToolContract(eurostatQueryDataset, {
+        dataset_code: 'nama_10_gdp',
+        filters: NAMA,
+      }).finally(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(true);
+      const result = await pending;
+      expect(errorOf(result)).toMatchObject({ data: { reason: 'async_response' } });
+      expect(hintOf(result)).toBe(
+        'Query matched too many observations for "nama_10_gdp". Add dimension filters — eurostat_get_dataset_info lists the dimensions of "nama_10_gdp" — or a narrower since_period/until_period range.',
+      );
+      expect(structureReads()).toBe(1);
+    });
   });
 });

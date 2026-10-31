@@ -3,6 +3,8 @@
  * @module services/eurostat-data/types
  */
 
+import type { EmptyRange, PeriodCut } from '@/services/eurostat-periods.js';
+
 /** Raw JSON-stat 2.0 response from the Statistics API. */
 export interface JsonStatResponse {
   dimension?: Record<string, JsonStatDimension>;
@@ -167,13 +169,10 @@ export type UnmatchedValues = Record<string, string[]>;
  * nothing more than "empty".
  */
 export interface NoResultsDiagnosis {
+  /** Set when the reply's `time` dimension is empty: why the range selected no period. */
+  emptyRange?: EmptyRange;
   /** Periods the reply selected, none carrying a value. Set only when every dimension matched. */
   matchedPeriods?: string[];
-  /**
-   * Set when the requested range selected no period at all: the dataset's overall
-   * coverage from its annotations, each bound absent when Eurostat does not report it.
-   */
-  outsideCoverage?: { oldest?: string; latest?: string };
   unmatchedValues?: UnmatchedValues;
 }
 
@@ -185,6 +184,8 @@ export interface NoResultsDiagnosis {
  * source rather than a separately-derived set that can drift from it.
  */
 export interface QueryExecution extends QueryResult {
+  /** Periods a bound excludes, read from the reply's own frequencies and coverage. */
+  periodCuts?: PeriodCut[];
   /**
    * Fresh generator over every matched cell, in the same order `observations`
    * uses. Nothing is materialized until a consumer pulls, so staging a

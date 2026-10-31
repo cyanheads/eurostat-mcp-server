@@ -1,0 +1,200 @@
+{
+  "version": "2.0",
+  "class": "dataset",
+  "label": "Structure of earnings survey - annual earnings",
+  "source": "ESTAT",
+  "updated": "2026-02-09T23:00:00+0100",
+  "value": {},
+  "id": ["freq", "nace_r2", "isco08", "worktime", "age", "sex", "indic_se", "geo", "time"],
+  "size": [1, 5, 14, 5, 9, 3, 14, 1, 0],
+  "dimension": {
+    "freq": {
+      "label": "Time frequency",
+      "category": { "index": { "A": 0 }, "label": { "A": "Annual" } }
+    },
+    "nace_r2": {
+      "label": "Statistical classification of economic activities in the European Community (NACE Rev. 2)",
+      "category": {
+        "index": { "B-S_X_O": 0, "B-N": 1, "B-F": 2, "G-N": 3, "P-S": 4 },
+        "label": {
+          "B-S_X_O": "Industry, construction and services (except public administration, defense, compulsory social security)",
+          "B-N": "Business economy",
+          "B-F": "Industry and construction",
+          "G-N": "Services of the business economy",
+          "P-S": "Education; human health and social work activities; arts, entertainment and recreation; other service activities"
+        }
+      }
+    },
+    "isco08": {
+      "label": "International Standard Classification of Occupations 2008 (ISCO-08)",
+      "category": {
+        "index": {
+          "TOTAL": 0,
+          "OC1-5": 1,
+          "OC1": 2,
+          "OC2": 3,
+          "OC3": 4,
+          "OC4": 5,
+          "OC5": 6,
+          "OC6-8": 7,
+          "OC6": 8,
+          "OC7-9": 9,
+          "OC7": 10,
+          "OC8": 11,
+          "OC9": 12,
+          "OC0": 13
+        },
+        "label": {
+          "TOTAL": "Total",
+          "OC1-5": "Non manual workers",
+          "OC1": "Managers",
+          "OC2": "Professionals",
+          "OC3": "Technicians and associate professionals",
+          "OC4": "Clerical support workers",
+          "OC5": "Service and sales workers",
+          "OC6-8": "Skilled manual workers",
+          "OC6": "Skilled agricultural, forestry and fishery workers",
+          "OC7-9": "Manual workers",
+          "OC7": "Craft and related trades workers",
+          "OC8": "Plant and machine operators and assemblers",
+          "OC9": "Elementary occupations",
+          "OC0": "Armed forces occupations"
+        }
+      }
+    },
+    "worktime": {
+      "label": "Working time",
+      "category": {
+        "index": { "TOTAL": 0, "PT": 1, "FT": 2, "TOT_FTE": 3, "PT_FTE": 4 },
+        "label": {
+          "TOTAL": "Total",
+          "PT": "Part-time",
+          "FT": "Full-time",
+          "TOT_FTE": "Total in full-time equivalents",
+          "PT_FTE": "Part-time in full-time equivalents"
+        }
+      }
+    },
+    "age": {
+      "label": "Age class",
+      "category": {
+        "index": {
+          "TOTAL": 0,
+          "Y_LT30": 1,
+          "Y30-39": 2,
+          "Y30-49": 3,
+          "Y40-49": 4,
+          "Y50-59": 5,
+          "Y_GE50": 6,
+          "Y_GE60": 7,
+          "UNK": 8
+        },
+        "label": {
+          "TOTAL": "Total",
+          "Y_LT30": "Less than 30 years",
+          "Y30-39": "From 30 to 39 years",
+          "Y30-49": "From 30 to 49 years",
+          "Y40-49": "From 40 to 49 years",
+          "Y50-59": "From 50 to 59 years",
+          "Y_GE50": "50 years or over",
+          "Y_GE60": "60 years or over",
+          "UNK": "Unknown"
+        }
+      }
+    },
+    "sex": {
+      "label": "Sex",
+      "category": {
+        "index": { "T": 0, "M": 1, "F": 2 },
+        "label": { "T": "Total", "M": "Males", "F": "Females" }
+      }
+    },
+    "indic_se": {
+      "label": "Structure of earnings indicator",
+      "category": {
+        "index": {
+          "MEAN_B_SALC_EUR": 0,
+          "MEAN_B_SALC_PPS": 1,
+          "MEAN_H": 2,
+          "HOL": 3,
+          "MEAN_E_EUR": 4,
+          "MEAN_E_PPS": 5,
+          "MED_E_EUR": 6,
+          "MED_E_PPS": 7,
+          "D1_E_EUR": 8,
+          "D1_E_PPS": 9,
+          "D9_E_EUR": 10,
+          "D9_E_PPS": 11,
+          "MEAN_B_SAL_EUR": 12,
+          "MEAN_B_SAL_PPS": 13
+        },
+        "label": {
+          "MEAN_B_SALC_EUR": "Mean annual bonuses per employee concerned in euro",
+          "MEAN_B_SALC_PPS": "Mean annual bonuses per employee concerned in PPS",
+          "MEAN_H": "Mean annual number of holidays",
+          "HOL": "Annual holidays",
+          "MEAN_E_EUR": "Mean earnings in euro",
+          "MEAN_E_PPS": "Mean earnings in PPS",
+          "MED_E_EUR": "Median earnings in euro",
+          "MED_E_PPS": "Median earnings in PPS",
+          "D1_E_EUR": "First decile earnings in euro",
+          "D1_E_PPS": "First decile earnings in PPS",
+          "D9_E_EUR": "Ninth decile earnings in euro",
+          "D9_E_PPS": "Ninth decile earnings in PPS",
+          "MEAN_B_SAL_EUR": "Mean annual bonuses per employee in euro",
+          "MEAN_B_SAL_PPS": "Mean annual bonuses per employee in PPS"
+        }
+      }
+    },
+    "geo": {
+      "label": "Geopolitical entity (reporting)",
+      "category": { "index": { "DE": 0 }, "label": { "DE": "Germany" } }
+    },
+    "time": { "label": "Time", "category": { "index": {}, "label": {} } }
+  },
+  "extension": {
+    "lang": "EN",
+    "id": "EARN_SES_ANNUAL",
+    "agencyId": "ESTAT",
+    "version": "1.0",
+    "datastructure": { "id": "EARN_SES_ANNUAL", "agencyId": "ESTAT", "version": "22.0" },
+    "annotation": [
+      { "type": "CREATED", "date": "2014-07-09T11:21:53+0200" },
+      {
+        "type": "DISSEMINATION_DOI_XML",
+        "title": "<adms:identifier xmlns:adms=\"http://www.w3.org/ns/adms#\" xmlns:skos=\"http://www.w3.org/2004/02/skos/core.html\" xmlns:dct=\"http://purl.org/dc/terms/\" xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><adms:Identifier rdf:about=\"https://doi.org/10.2908/EARN_SES_ANNUAL\"><skos:notation rdf:datatype=\"http://purl.org/spar/datacite/doi\">10.2908/EARN_SES_ANNUAL</skos:notation><dct:creator rdf:resource=\"http://publications.europa.eu/resource/authority/corporate-body/ESTAT\"/><dct:issued rdf:datatype=\"http://www.w3.org/2001/XMLSchema#date\">2023-01-23</dct:issued></adms:Identifier></adms:identifier>"
+      },
+      { "type": "DISSEMINATION_OBJECT_TYPE", "title": "DATASET" },
+      { "type": "DISSEMINATION_TIMESTAMP_DATA", "date": "2026-02-09T23:00:00+0100" },
+      { "type": "DISSEMINATION_TIMESTAMP_GLOBAL", "date": "2026-02-09T23:00:00+0100" },
+      { "type": "DISSEMINATION_TIMESTAMP_PLANNED", "date": "2026-02-09T23:00:00+0100" },
+      {
+        "type": "ESMS_HTML",
+        "title": "Explanatory texts (metadata)",
+        "href": "https://ec.europa.eu/eurostat/cache/metadata/en/earn_ses_main_esms.htm"
+      },
+      {
+        "type": "ESMS_SDMX",
+        "title": "Explanatory texts (metadata)",
+        "href": "https://ec.europa.eu/eurostat/api/dissemination/files?file=metadata/earn_ses_main_esms.sdmx.zip"
+      },
+      { "type": "OBS_COUNT", "title": "6160543" },
+      { "type": "OBS_PERIOD_OVERALL_LATEST", "title": "2022" },
+      { "type": "OBS_PERIOD_OVERALL_OLDEST", "title": "2002" },
+      { "type": "SOURCE_INSTITUTIONS", "text": "Eurostat" },
+      { "type": "UPDATE_DATA", "date": "2026-02-09T23:00:00+0100" },
+      { "type": "UPDATE_STRUCTURE", "date": "2026-02-05T23:00:00+0100" }
+    ],
+    "positions-with-no-data": {
+      "freq": [0],
+      "nace_r2": [0, 1, 2, 3, 4],
+      "isco08": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+      "worktime": [0, 1, 2, 3, 4],
+      "age": [0, 1, 2, 3, 4, 5, 6, 7, 8],
+      "sex": [0, 1, 2],
+      "indic_se": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+      "geo": [0],
+      "time": []
+    }
+  }
+}

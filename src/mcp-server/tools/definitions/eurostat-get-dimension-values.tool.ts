@@ -16,7 +16,7 @@ import {
   newTableName,
 } from '@/services/canvas-accessor.js';
 import { getEurostatDataService } from '@/services/eurostat-data/eurostat-data-service.js';
-import { GEO_LEVEL_VALUES } from '@/services/eurostat-data/types.js';
+import { GEO_LEVEL_VALUES, type GeoLevel } from '@/services/eurostat-data/types.js';
 import { outageAnswer } from '@/services/eurostat-outage.js';
 
 /**
@@ -134,6 +134,20 @@ function readCursor(
 /** The refusal of a cursor that is malformed or belongs to another call. */
 const UNUSABLE_CURSOR =
   'Unusable cursor: it is malformed, or was issued for a different dataset_code, dimension, geo_level or filter.';
+
+/**
+ * Recovery for a `geo_level` that holds no value. `levels` are the ones the dataset
+ * lists, as the service's error reports them, so every level offered returns values;
+ * omitting `geo_level` is one of those offers only when `country` is among them.
+ */
+function geoLevelHint(datasetCode: string, failed: GeoLevel, levels: GeoLevel[]): string {
+  const missed = `Dataset "${datasetCode}" has no "geo" values at the "${failed}" level.`;
+  if (levels.length === 0) {
+    return `${missed} None of its "geo" codes carries a NUTS level, so no geo_level selects them. eurostat_get_dataset_info lists sample "geo" codes.`;
+  }
+  const omit = levels.includes('country') ? ' Omitting geo_level requests country values.' : '';
+  return `${missed} Choose geo_level from the levels it lists: ${levels.join(', ')}.${omit}`;
+}
 
 /** Select the count-limit schema before registering the tool. */
 export const createEurostatGetDimensionValues = (clampLimits: boolean) =>
@@ -264,7 +278,8 @@ export const createEurostatGetDimensionValues = (clampLimits: boolean) =>
         reason: 'no_results',
         code: JsonRpcErrorCode.NotFound,
         when: 'The dataset has no geo values at the effective geo_level.',
-        recovery: 'Choose a different geo_level. Omitted geo_level means country.',
+        recovery:
+          'Choose a geo_level the error names, each holding at least one code of this dataset; when it names none, eurostat_get_dataset_info lists sample geo codes.',
       },
       {
         reason: 'conflicting_params',
@@ -348,10 +363,13 @@ export const createEurostatGetDimensionValues = (clampLimits: boolean) =>
           });
         }
         if (reason === 'no_results') {
-          const effectiveGeoLevel = input.geo_level ?? 'country';
           throw ctx.fail('no_results', (err as Error).message, {
             recovery: {
-              hint: `Dataset "${input.dataset_code}" has no "geo" values at the "${effectiveGeoLevel}" level. Choose another geo_level (aggregate, nuts1, nuts2, or nuts3); omitting geo_level requests country values.`,
+              hint: geoLevelHint(
+                input.dataset_code,
+                input.geo_level ?? 'country',
+                (err as McpError).data?.availableGeoLevels as GeoLevel[],
+              ),
             },
           });
         }

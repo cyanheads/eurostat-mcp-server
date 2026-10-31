@@ -40,6 +40,7 @@ import {
 import { dropUnsetFilters } from '@/services/eurostat-filters.js';
 import { dataHostFor, isComextDataset } from '@/services/eurostat-hosts.js';
 import { isUpstreamOutage, upstreamOutage } from '@/services/eurostat-outage.js';
+import { oneDayRange } from '@/services/eurostat-periods.js';
 import {
   type BulkDownload,
   type BulkRow,
@@ -66,6 +67,16 @@ const MISSING_VALUE = ':';
 
 /** The header line's first field ends with this literal before the period columns begin. */
 const TIME_HEADER_SUFFIX = '\\TIME_PERIOD';
+
+/**
+ * The clause fault 150 closes with when the range selected no period, as opposed to
+ * naming a filter value: `TIME_PERIOD: >=2022-06-01 and <=2023-06-30.`, either bound
+ * alone included. Anchoring on the end of the sentence before it (`are not allowed:`)
+ * keeps a filter value that spells the clause (`GEO=TIME_PERIOD: >=2020`,
+ * `GEO=x: TIME_PERIOD: >=2020`) a filter fault. A changed clause falls back to the
+ * filter wording.
+ */
+const PERIOD_FAULT_CLAUSE = /allowed: TIME_PERIOD: [<>]=/;
 
 /** Minimal XML entity decoding — the five predefined entities SOAP fault strings use. */
 function decodeEntities(text: string): string {
@@ -125,6 +136,16 @@ export function classifyXmlBody(xml: string, datasetCode: string): never {
     );
   }
   if (code === '150') {
+    /**
+     * The fault's own clause stays out of this message: a one-day download asks for the
+     * day and the next, so the clause would show the caller a bound it never sent.
+     */
+    if (PERIOD_FAULT_CLAUSE.test(detail)) {
+      throw validationError(
+        `Eurostat rejected the period range for "${datasetCode}": it selects no period of the dataset (fault ${code}).`,
+        { reason: 'invalid_dimension', datasetCode, faultcode: code, periodRange: true },
+      );
+    }
     throw validationError(
       `Eurostat rejected a filter value. This fault also covers a period range outside the dataset's coverage. Eurostat fault ${code}: ${detail}`,
       { reason: 'invalid_dimension', datasetCode, faultcode: code },
@@ -348,7 +369,13 @@ export class EurostatBulkService {
   ): Promise<BulkDownload> {
     const { bulkTimeoutMs, bulkMaxBytes } = getServerConfig();
     const keyPath = buildKeyPath(dimensionOrder, filters);
-    const url = this.buildUrl(datasetCode, keyPath, sinceP, untilP);
+    /**
+     * Eurostat ignores a range of one day and answers with the whole series, and this
+     * endpoint ignores `time`. So one day is asked for as that day and the next, and
+     * {@link expandRows} drops the next before anything is counted.
+     */
+    const oneDay = oneDayRange({ since_period: sinceP, until_period: untilP });
+    const url = this.buildUrl(datasetCode, keyPath, oneDay?.date ?? sinceP, oneDay?.next ?? untilP);
     const fetchCtx = withExtra(ctx, { endpoint: 'sdmx-data', datasetCode });
 
     ctx.log.info('Starting SDMX bulk download', {
@@ -453,7 +480,7 @@ export class EurostatBulkService {
         url: url.toString(),
         valueText,
         rows: () =>
-          expandRows(iterator, remainder, header, stats, valueText, {
+          expandRows(iterator, remainder, header, stats, valueText, oneDay?.date, {
             datasetCode,
             maxBytes: bulkMaxBytes,
             normalizeDeadline,
@@ -688,7 +715,8 @@ function stripCr(line: string): string {
  * mid-line the trailing fragment is dropped rather than parsed into a row with
  * silently truncated fields.
  *
- * `valueText` adds the `obs_value_text` column holding a cell's text value.
+ * `valueText` adds the `obs_value_text` column holding a cell's text value. `onlyPeriod`
+ * keeps one period column and drops every other before it reaches a row or a counter.
  */
 async function* expandRows(
   chunks: AsyncGenerator<string>,
@@ -696,6 +724,7 @@ async function* expandRows(
   header: TsvHeader,
   stats: BulkStats,
   valueText: boolean,
+  onlyPeriod: string | undefined,
   failure: {
     datasetCode: string;
     maxBytes: number;
@@ -713,9 +742,10 @@ async function* expandRows(
     const cellCount = Math.min(fields.length - 1, header.periods.length);
 
     for (let i = 0; i < cellCount; i++) {
+      const period = header.periods[i] ?? '';
+      if (onlyPeriod !== undefined && period !== onlyPeriod) continue;
       const parsed = parseCell(fields[i + 1] ?? '');
       if (!parsed) continue;
-      const period = header.periods[i] ?? '';
       const row: BulkRow = {};
       for (let d = 0; d < header.dimensions.length; d++) {
         row[header.dimensions[d] as string] = keyParts[d]?.trim() ?? null;

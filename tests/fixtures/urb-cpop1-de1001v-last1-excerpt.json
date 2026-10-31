@@ -1,0 +1,103 @@
+{
+  "version": "2.0",
+  "class": "dataset",
+  "label": "Population on 1 January by age groups and sex - cities and greater cities",
+  "source": "ESTAT",
+  "updated": "2026-10-29T23:00:00+0100",
+  "value": {
+    "0": 11883495,
+    "1": 1271709,
+    "2": 554407,
+    "3": 273394,
+    "4": 57107,
+    "5": 67645,
+    "6": 10749635,
+    "7": 1965363,
+    "8": 98335
+  },
+  "status": {
+    "6": "e",
+    "7": "e",
+    "8": "e"
+  },
+  "id": ["freq", "indic_ur", "cities", "time"],
+  "size": [1, 1, 9, 1],
+  "dimension": {
+    "freq": {
+      "label": "Time frequency",
+      "category": {
+        "index": {
+          "A": 0
+        },
+        "label": {
+          "A": "Annual"
+        }
+      }
+    },
+    "indic_ur": {
+      "label": "Urban audit indicator",
+      "category": {
+        "index": {
+          "DE1001V": 0
+        },
+        "label": {
+          "DE1001V": "Population on the 1st of January, total"
+        }
+      }
+    },
+    "cities": {
+      "label": "Geopolitical entity (declaring)",
+      "category": {
+        "index": {
+          "BE": 0,
+          "BE001C": 1,
+          "BE002C": 2,
+          "BE003C": 3,
+          "DE027C": 4,
+          "DE063C": 5,
+          "PT": 6,
+          "PT001C": 7,
+          "SE015C": 8
+        },
+        "label": {
+          "BE": "Belgium",
+          "BE001C": "Bruxelles/Brussel (greater city)",
+          "BE002C": "Antwerpen (greater city)",
+          "BE003C": "Gent",
+          "DE027C": "Frankfurt (Oder)",
+          "DE063C": "Kempten (Allgäu)",
+          "PT": "Portugal",
+          "PT001C": "Lisboa (greater city)",
+          "SE015C": "Växjö"
+        }
+      }
+    },
+    "time": {
+      "label": "Time",
+      "category": {
+        "index": {
+          "2025": 0
+        },
+        "label": {
+          "2025": "2025"
+        }
+      }
+    }
+  },
+  "extension": {
+    "lang": "EN",
+    "id": "URB_CPOP1",
+    "agencyId": "ESTAT",
+    "version": "1.0",
+    "datastructure": {
+      "id": "URB_CPOP1",
+      "agencyId": "ESTAT",
+      "version": "29.1"
+    },
+    "status": {
+      "label": {
+        "e": "estimated"
+      }
+    }
+  }
+}

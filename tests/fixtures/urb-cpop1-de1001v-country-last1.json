@@ -1,0 +1,137 @@
+{
+  "version": "2.0",
+  "class": "dataset",
+  "label": "Population on 1 January by age groups and sex - cities and greater cities",
+  "source": "ESTAT",
+  "updated": "2026-10-29T23:00:00+0100",
+  "value": { "0": 11883495, "10": 58943464, "12": 1860565, "20": 10749635, "25": 10587708 },
+  "status": { "20": "e", "25": "e" },
+  "id": ["freq", "indic_ur", "cities", "time"],
+  "size": [1, 1, 30, 1],
+  "dimension": {
+    "freq": {
+      "label": "Time frequency",
+      "category": { "index": { "A": 0 }, "label": { "A": "Annual" } }
+    },
+    "indic_ur": {
+      "label": "Urban audit indicator",
+      "category": {
+        "index": { "DE1001V": 0 },
+        "label": { "DE1001V": "Population on the 1st of January, total" }
+      }
+    },
+    "cities": {
+      "label": "Geopolitical entity (declaring)",
+      "category": {
+        "index": {
+          "BE": 0,
+          "BG": 1,
+          "CZ": 2,
+          "DK": 3,
+          "DE": 4,
+          "EE": 5,
+          "IE": 6,
+          "EL": 7,
+          "ES": 8,
+          "FR": 9,
+          "IT": 10,
+          "CY": 11,
+          "LV": 12,
+          "LT": 13,
+          "LU": 14,
+          "HU": 15,
+          "MT": 16,
+          "NL": 17,
+          "AT": 18,
+          "PL": 19,
+          "PT": 20,
+          "RO": 21,
+          "SI": 22,
+          "SK": 23,
+          "FI": 24,
+          "SE": 25,
+          "NO": 26,
+          "CH": 27,
+          "UK": 28,
+          "TR": 29
+        },
+        "label": {
+          "BE": "Belgium",
+          "BG": "Bulgaria",
+          "CZ": "Czechia",
+          "DK": "Denmark",
+          "DE": "Germany",
+          "EE": "Estonia",
+          "IE": "Ireland",
+          "EL": "Greece",
+          "ES": "Spain",
+          "FR": "France",
+          "IT": "Italy",
+          "CY": "Cyprus",
+          "LV": "Latvia",
+          "LT": "Lithuania",
+          "LU": "Luxembourg",
+          "HU": "Hungary",
+          "MT": "Malta",
+          "NL": "Netherlands",
+          "AT": "Austria",
+          "PL": "Poland",
+          "PT": "Portugal",
+          "RO": "Romania",
+          "SI": "Slovenia",
+          "SK": "Slovakia",
+          "FI": "Finland",
+          "SE": "Sweden",
+          "NO": "Norway",
+          "CH": "Switzerland",
+          "UK": "United Kingdom",
+          "TR": "Türkiye"
+        }
+      }
+    },
+    "time": { "label": "Time", "category": { "index": { "2025": 0 }, "label": { "2025": "2025" } } }
+  },
+  "extension": {
+    "lang": "EN",
+    "id": "URB_CPOP1",
+    "agencyId": "ESTAT",
+    "version": "1.0",
+    "datastructure": { "id": "URB_CPOP1", "agencyId": "ESTAT", "version": "29.1" },
+    "annotation": [
+      { "type": "CREATED", "date": "2013-12-18T14:54:20+0100" },
+      {
+        "type": "DISSEMINATION_DOI_XML",
+        "title": "<adms:identifier xmlns:adms=\"http://www.w3.org/ns/adms#\" xmlns:skos=\"http://www.w3.org/2004/02/skos/core.html\" xmlns:dct=\"http://purl.org/dc/terms/\" xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><adms:Identifier rdf:about=\"https://doi.org/10.2908/URB_CPOP1\"><skos:notation rdf:datatype=\"http://purl.org/spar/datacite/doi\">10.2908/URB_CPOP1</skos:notation><dct:creator rdf:resource=\"http://publications.europa.eu/resource/authority/corporate-body/ESTAT\"/><dct:issued rdf:datatype=\"http://www.w3.org/2001/XMLSchema#date\">2023-01-19</dct:issued></adms:Identifier></adms:identifier>"
+      },
+      { "type": "DISSEMINATION_OBJECT_TYPE", "title": "DATASET" },
+      { "type": "DISSEMINATION_TIMESTAMP_DATA", "date": "2026-10-29T23:00:00+0100" },
+      { "type": "DISSEMINATION_TIMESTAMP_GLOBAL", "date": "2026-10-29T23:00:00+0100" },
+      { "type": "DISSEMINATION_TIMESTAMP_PLANNED", "date": "2026-10-29T23:00:00+0100" },
+      {
+        "type": "ESMS_HTML",
+        "title": "Explanatory texts (metadata)",
+        "href": "https://ec.europa.eu/eurostat/cache/metadata/en/urb_esms.htm"
+      },
+      {
+        "type": "ESMS_SDMX",
+        "title": "Explanatory texts (metadata)",
+        "href": "https://ec.europa.eu/eurostat/api/dissemination/files?file=metadata/urb_esms.sdmx.zip"
+      },
+      { "type": "OBS_COUNT", "title": "612759" },
+      { "type": "OBS_PERIOD_OVERALL_LATEST", "title": "2025" },
+      { "type": "OBS_PERIOD_OVERALL_OLDEST", "title": "1989" },
+      { "type": "SOURCE_INSTITUTIONS", "text": "Eurostat" },
+      { "type": "UPDATE_DATA", "date": "2026-10-29T23:00:00+0100" },
+      { "type": "UPDATE_STRUCTURE", "date": "2026-09-03T23:00:00+0200" }
+    ],
+    "status": { "label": { "e": "estimated" } },
+    "positions-with-no-data": {
+      "freq": [],
+      "indic_ur": [],
+      "cities": [
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 24, 26, 27, 28, 29
+      ],
+      "time": []
+    }
+  }
+}

@@ -1,0 +1,170 @@
+{
+  "version": "2.0",
+  "class": "dataset",
+  "label": "Gross domestic product (GDP) and main components (output, expenditure and income) - annual data",
+  "source": "ESTAT",
+  "updated": "2026-10-22T23:00:00+0200",
+  "value": {},
+  "id": ["freq", "unit", "na_item", "geo", "time"],
+  "size": [1, 1, 1, 40, 0],
+  "dimension": {
+    "freq": {
+      "label": "Time frequency",
+      "category": { "index": { "A": 0 }, "label": { "A": "Annual" } }
+    },
+    "unit": {
+      "label": "Unit of measure",
+      "category": {
+        "index": { "CP_MEUR": 0 },
+        "label": { "CP_MEUR": "Current prices, million euro" }
+      }
+    },
+    "na_item": {
+      "label": "National accounts indicator (ESA 2010)",
+      "category": {
+        "index": { "B1GQ": 0 },
+        "label": { "B1GQ": "Gross domestic product at market prices" }
+      }
+    },
+    "geo": {
+      "label": "Geopolitical entity (reporting)",
+      "category": {
+        "index": {
+          "BE": 0,
+          "BG": 1,
+          "CZ": 2,
+          "DK": 3,
+          "DE": 4,
+          "EE": 5,
+          "IE": 6,
+          "EL": 7,
+          "ES": 8,
+          "FR": 9,
+          "HR": 10,
+          "IT": 11,
+          "CY": 12,
+          "LV": 13,
+          "LT": 14,
+          "LU": 15,
+          "HU": 16,
+          "MT": 17,
+          "NL": 18,
+          "AT": 19,
+          "PL": 20,
+          "PT": 21,
+          "RO": 22,
+          "SI": 23,
+          "SK": 24,
+          "FI": 25,
+          "SE": 26,
+          "IS": 27,
+          "LI": 28,
+          "NO": 29,
+          "CH": 30,
+          "BA": 31,
+          "ME": 32,
+          "MD": 33,
+          "MK": 34,
+          "AL": 35,
+          "RS": 36,
+          "TR": 37,
+          "UA": 38,
+          "XK": 39
+        },
+        "label": {
+          "BE": "Belgium",
+          "BG": "Bulgaria",
+          "CZ": "Czechia",
+          "DK": "Denmark",
+          "DE": "Germany",
+          "EE": "Estonia",
+          "IE": "Ireland",
+          "EL": "Greece",
+          "ES": "Spain",
+          "FR": "France",
+          "HR": "Croatia",
+          "IT": "Italy",
+          "CY": "Cyprus",
+          "LV": "Latvia",
+          "LT": "Lithuania",
+          "LU": "Luxembourg",
+          "HU": "Hungary",
+          "MT": "Malta",
+          "NL": "Netherlands",
+          "AT": "Austria",
+          "PL": "Poland",
+          "PT": "Portugal",
+          "RO": "Romania",
+          "SI": "Slovenia",
+          "SK": "Slovakia",
+          "FI": "Finland",
+          "SE": "Sweden",
+          "IS": "Iceland",
+          "LI": "Liechtenstein",
+          "NO": "Norway",
+          "CH": "Switzerland",
+          "BA": "Bosnia and Herzegovina",
+          "ME": "Montenegro",
+          "MD": "Moldova",
+          "MK": "North Macedonia",
+          "AL": "Albania",
+          "RS": "Serbia",
+          "TR": "Türkiye",
+          "UA": "Ukraine",
+          "XK": "Kosovo*"
+        }
+      }
+    },
+    "time": { "label": "Time", "category": { "index": {}, "label": {} } }
+  },
+  "extension": {
+    "lang": "EN",
+    "id": "NAMA_10_GDP",
+    "agencyId": "ESTAT",
+    "version": "1.0",
+    "datastructure": { "id": "NAMA_10_GDP", "agencyId": "ESTAT", "version": "141.0" },
+    "annotation": [
+      { "type": "CREATED", "date": "2014-09-04T14:58:03+0200" },
+      {
+        "type": "DISSEMINATION_DOI_XML",
+        "title": "<adms:identifier xmlns:adms=\"http://www.w3.org/ns/adms#\" xmlns:skos=\"http://www.w3.org/2004/02/skos/core.html\" xmlns:dct=\"http://purl.org/dc/terms/\" xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><adms:Identifier rdf:about=\"https://doi.org/10.2908/NAMA_10_GDP\"><skos:notation rdf:datatype=\"http://purl.org/spar/datacite/doi\">10.2908/NAMA_10_GDP</skos:notation><dct:creator rdf:resource=\"http://publications.europa.eu/resource/authority/corporate-body/ESTAT\"/><dct:issued rdf:datatype=\"http://www.w3.org/2001/XMLSchema#date\">2023-01-19</dct:issued></adms:Identifier></adms:identifier>"
+      },
+      { "type": "DISSEMINATION_OBJECT_TYPE", "title": "DATASET" },
+      { "type": "DISSEMINATION_TIMESTAMP_DATA", "date": "2026-10-22T23:00:00+0200" },
+      { "type": "DISSEMINATION_TIMESTAMP_GLOBAL", "date": "2026-10-26T23:00:00+0100" },
+      { "type": "DISSEMINATION_TIMESTAMP_PLANNED", "date": "2026-10-26T23:00:00+0100" },
+      {
+        "type": "ESMS_HTML",
+        "title": "Explanatory texts (metadata)",
+        "href": "https://ec.europa.eu/eurostat/cache/metadata/en/nama_10_gdp_esms.htm"
+      },
+      {
+        "type": "ESMS_SDMX",
+        "title": "Explanatory texts (metadata)",
+        "href": "https://ec.europa.eu/eurostat/api/dissemination/files?file=metadata/nama_10_gdp_esms.sdmx.zip"
+      },
+      {
+        "type": "FOOTNOTE",
+        "title": "Footnote (metadata)",
+        "href": "https://ec.europa.eu/eurostat/cache/metadata/Annexes/nama_10_gdp_esms_an_Gross_domestic_product_(GDP)_a.xlsx"
+      },
+      { "type": "OBS_COUNT", "title": "1087862" },
+      { "type": "OBS_PERIOD_OVERALL_LATEST", "title": "2025" },
+      { "type": "OBS_PERIOD_OVERALL_OLDEST", "title": "1975" },
+      { "type": "SOURCE_INSTITUTIONS", "text": "Eurostat" },
+      { "type": "UPDATE_DATA", "date": "2026-10-22T23:00:00+0200" },
+      { "type": "UPDATE_FOOTNOTES", "date": "2026-10-26T15:00:35Z" },
+      { "type": "UPDATE_STRUCTURE", "date": "2026-10-20T23:00:00+0200" }
+    ],
+    "positions-with-no-data": {
+      "freq": [0],
+      "unit": [0],
+      "na_item": [0],
+      "geo": [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+        25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39
+      ],
+      "time": []
+    }
+  }
+}

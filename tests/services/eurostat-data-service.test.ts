@@ -834,6 +834,101 @@ describe('EurostatDataService — dataset-scoped SDMX metadata (#44)', () => {
     });
   });
 
+  describe('the levels a geo_level miss names (#87)', () => {
+    const captured = (name: string) =>
+      readFileSync(new URL(`../fixtures/dimension-values/${name}.xml`, import.meta.url), 'utf8');
+    /** Answer the two metadata reads with one captured dataflow and constraint pair. */
+    const serveCaptured = (dataset: string) =>
+      fetchMock.mockImplementation(async (input: string | URL) =>
+        xmlResponse(
+          captured(
+            `${dataset}-${new URL(String(input)).pathname.includes('/dataflow/') ? 'dataflow' : 'constraint'}`,
+          ),
+        ),
+      );
+
+    it.each([
+      {
+        dataset: 'nama_10_gdp',
+        fixture: 'nama-10-gdp',
+        level: 'nuts3',
+        failed: 'nuts3',
+        offered: ['aggregate', 'country'],
+      },
+      {
+        dataset: 'tgs00010',
+        fixture: 'tgs00010',
+        level: undefined,
+        failed: 'country',
+        offered: ['nuts2'],
+      },
+      {
+        dataset: 'tgs00010',
+        fixture: 'tgs00010',
+        level: 'aggregate',
+        failed: 'aggregate',
+        offered: ['nuts2'],
+      },
+    ] as const)(
+      'names $offered on $dataset at $failed, from the metadata read alone',
+      async ({ dataset, fixture, level, failed, offered }) => {
+        serveCaptured(fixture);
+        await expect(
+          svc().getDimensionValues(dataset, 'geo', level, createMockContext()),
+        ).rejects.toMatchObject({
+          data: {
+            reason: 'no_results',
+            datasetCode: dataset,
+            dimension: 'geo',
+            geoLevel: failed,
+            availableGeoLevels: offered,
+          },
+          message: `Dataset "${dataset}" has no "geo" values at the "${failed}" level. It lists "geo" values at: ${offered.join(', ')}.`,
+        });
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+      },
+    );
+
+    it('reads the levels from the constraint, in GEO_LEVEL_VALUES order', async () => {
+      fetchMock.mockImplementation(async (input: string | URL) =>
+        sdmxMetadataResponse(
+          input,
+          SDMX_CONSTRAINT_WITHOUT_COUNTRIES_XML.replace(
+            '<c:Value>EU27_2020</c:Value><c:Value>EA20</c:Value><c:Value>DE1</c:Value><c:Value>DE11</c:Value><c:Value>DE111</c:Value>',
+            '<c:Value>DE111</c:Value><c:Value>DE1</c:Value><c:Value>EA20</c:Value>',
+          ),
+        ),
+      );
+      await expect(
+        svc().getDimensionValues('earn_ses_annual', 'geo', 'nuts2', createMockContext()),
+      ).rejects.toMatchObject({
+        data: { availableGeoLevels: ['aggregate', 'nuts1', 'nuts3'] },
+        message:
+          'Dataset "earn_ses_annual" has no "geo" values at the "nuts2" level. It lists "geo" values at: aggregate, nuts1, nuts3.',
+      });
+    });
+
+    it('says so when no geo code carries a level', async () => {
+      fetchMock.mockImplementation(async (input: string | URL) =>
+        new URL(String(input)).pathname.includes('/dataflow/')
+          ? xmlResponse(
+              SDMX_DATAFLOW_XML.replaceAll('EARN_SES_ANNUAL', 'X').replaceAll(
+                /<c:Annotations><c:Annotation><c:AnnotationTitle>[^<]*<\/c:AnnotationTitle><c:AnnotationType>LEVEL<\/c:AnnotationType><\/c:Annotation><\/c:Annotations>/g,
+                '',
+              ),
+            )
+          : xmlResponse(SDMX_CONSTRAINT_XML),
+      );
+      await expect(
+        svc().getDimensionValues('x', 'geo', undefined, createMockContext()),
+      ).rejects.toMatchObject({
+        data: { reason: 'no_results', geoLevel: 'country', availableGeoLevels: [] },
+        message:
+          'Dataset "x" has no "geo" values at the "country" level. None of its "geo" codes carries a NUTS level.',
+      });
+    });
+  });
+
   it('preserves unknown datasets as not_found', async () => {
     fetchMock.mockImplementation(async () =>
       errorResponse(404, '<mes:ErrorMessage>Not found</mes:ErrorMessage>'),
@@ -2239,6 +2334,28 @@ describe('EurostatDataService — operation deadlines (#72)', () => {
         )
       : new Response(sdmxDataStructureXml());
 
+  it('expires a structure read at the deadline its caller passes, on one attempt', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(
+      (_input: string | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) =>
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+            once: true,
+          }),
+        ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const outcome = new EurostatDataService(mockConfig, mockStorage)
+      .getDimensionOrder('earn_ses_annual', createMockContext(), 5_000)
+      .catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(5_001);
+    expect(await outcome).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'retry_deadline_exceeded', deadlineMs: 5_000 },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it.each(routes)('expires during the initial %s request without retrying', async (route) => {
     vi.useFakeTimers();
     const requests: Request[] = [];
@@ -2653,7 +2770,7 @@ describe('EurostatDataService — no_results diagnosis from the envelope (#48)',
     const data = await emptyMatch('une-rt-m-geo-xx-last1', { geo: ['XX'] }, { lastN: 1 });
     expect(data.unmatchedValues).toEqual({ geo: ['XX'] });
     expect(data).not.toHaveProperty('matchedPeriods');
-    expect(data).not.toHaveProperty('outsideCoverage');
+    expect(data).not.toHaveProperty('emptyRange');
   });
 
   it('names an unmatched value beside a matched one, plus the valueless periods', async () => {
@@ -2711,7 +2828,7 @@ describe('EurostatDataService — no_results diagnosis from the envelope (#48)',
       .catch((e: unknown) => e);
     expect((err as McpError).data).toMatchObject({
       reason: 'no_results',
-      outsideCoverage: { oldest: '1975', latest: '2025' },
+      emptyRange: { kind: 'outside_coverage', coverage: { oldest: '1975', latest: '2025' } },
     });
     expect((err as McpError).data).not.toHaveProperty('matchedPeriods');
     expect((err as McpError).data).not.toHaveProperty('unmatchedValues');
@@ -2902,5 +3019,272 @@ describe('EurostatDataService — unmatched filter values on a successful query 
     );
     expect(res.obsCount).toBe(2);
     expect(res).not.toHaveProperty('unmatchedValues');
+  });
+});
+
+/** Every reply here is a live capture of the same filters and range the test sends. */
+describe('EurostatDataService — a period range against the reply in hand (#84, #88)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const NAMA = { unit: ['CP_MEUR'], na_item: ['B1GQ'], geo: ['DE'] };
+  const USD = { statinfo: ['AVG'], unit: ['NAC'], currency: ['USD'] };
+  const DS = {
+    reporter: ['DE'],
+    partner: ['FR'],
+    product: ['TOTAL'],
+    flow: ['1'],
+    indicators: ['VALUE_IN_EUROS'],
+  };
+
+  const send = (
+    dataset: string,
+    filters: Record<string, string[]>,
+    since: string | undefined,
+    until: string | undefined,
+    lastN?: number,
+  ) =>
+    new EurostatDataService(mockConfig, mockStorage).queryDataset(
+      dataset,
+      filters,
+      undefined,
+      since,
+      until,
+      lastN,
+      'EN',
+      50,
+      createMockContext(),
+    );
+  const reply = (body: JsonStatResponse) => fetchMock.mockResolvedValueOnce(okResponse(body));
+  const sentUrl = (): URL => new URL(String(fetchMock.mock.calls[0]?.[0]));
+  const emptyRangeOf = async (
+    dataset: string,
+    filters: Record<string, string[]>,
+    name: string,
+    since: string | undefined,
+    until: string | undefined,
+  ) => {
+    reply(fixture(name));
+    const err = await send(dataset, filters, since, until).catch((e: unknown) => e);
+    expect(err).toMatchObject({ data: { reason: 'no_results' } });
+    return ((err as McpError).data as { emptyRange?: unknown }).emptyRange;
+  };
+
+  describe('the bounds reaching Eurostat (#88)', () => {
+    for (const [since, until, date] of [
+      ['2022-06-15', '2022-06-15', '2022-06-15'],
+      ['2022-D166', '2022-D166', '2022-06-15'],
+      ['2022-06-15', '2022-D166', '2022-06-15'],
+      ['2022-06-30', '2022-06', '2022-06-30'],
+      ['2022', '2022-01-01', '2022-01-01'],
+    ] as const) {
+      it(`sends ${since} to ${until} as time=${date} alone`, async () => {
+        reply(fixture('ert-bil-eur-d-usd-2022-06-15'));
+        await send('ert_bil_eur_d', USD, since, until);
+        const { searchParams } = sentUrl();
+        expect(searchParams.getAll('time')).toEqual([date]);
+        expect(searchParams.has('sinceTimePeriod')).toBe(false);
+        expect(searchParams.has('untilTimePeriod')).toBe(false);
+      });
+    }
+
+    for (const [label, since, until] of [
+      ['two days', '2022-06-15', '2022-06-16'],
+      ['one month', '2022-06', '2022-06'],
+      ['one year', '2022', '2022'],
+      ['one week', '2022-W24', '2022-W24'],
+      ['a since bound alone', '2022-06-15', undefined],
+      ['an until bound alone', undefined, '2022-06-15'],
+    ] as const) {
+      it(`sends ${label} as the bounds, unchanged`, async () => {
+        reply(fixture('ert-bil-eur-d-usd-2022-06-15'));
+        await send('ert_bil_eur_d', USD, since, until);
+        const { searchParams } = sentUrl();
+        expect(searchParams.has('time')).toBe(false);
+        expect(searchParams.get('sinceTimePeriod')).toBe(since ?? null);
+        expect(searchParams.get('untilTimePeriod')).toBe(until ?? null);
+      });
+    }
+
+    it('returns the one observation of the day, without reporting time as a filter', async () => {
+      reply(fixture('ert-bil-eur-d-usd-2022-06-15'));
+      const res = await send('ert_bil_eur_d', USD, '2022-06-15', '2022-06-15');
+      expect(res.obsCount).toBe(1);
+      expect(res.timeRange).toEqual({ start: '2022-06-15', end: '2022-06-15' });
+      expect(res.appliedFilters).toEqual(USD);
+      expect(res).not.toHaveProperty('unmatchedValues');
+    });
+
+    it('does not read an empty day as an unmatched time value', async () => {
+      reply(fixture('ert-bil-eur-d-usd-no-period'));
+      const err = await send('ert_bil_eur_d', USD, '2022-06-18', '2022-06-18').catch(
+        (e: unknown) => e,
+      );
+      expect((err as McpError).data).toMatchObject({ reason: 'no_results' });
+      expect((err as McpError).data).not.toHaveProperty('unmatchedValues');
+    });
+  });
+
+  describe('periods a bound falls inside, on a success (#84)', () => {
+    it('reads the frequency from the freq index, which lists annual beside monthly periods', async () => {
+      reply(fixture('comext/ds-045409-de-fr-2023-06-to-2023-12'));
+      const res = await send('DS-045409', DS, '2023-06', '2023-12');
+      expect(res.observations.map((o) => o.dimensions.freq?.code)).toContain('M');
+      expect(res.periodCuts).toEqual([
+        { bounds: ['since_period'], frequency: 'annual', period: '2023' },
+      ]);
+    });
+
+    it('does not name a period past the coverage the reply reports', async () => {
+      reply(fixture('nama-10-gdp-de-2024-to-2031-06'));
+      const res = await send('nama_10_gdp', NAMA, '2024', '2031-06');
+      expect(res.obsCount).toBe(2);
+      expect(res).not.toHaveProperty('periodCuts');
+    });
+
+    it('carries nothing for bounds aligned to the frequency', async () => {
+      reply(fixture('nama-10-gdp-de-2022'));
+      expect(await send('nama_10_gdp', NAMA, '2022', '2022')).not.toHaveProperty('periodCuts');
+    });
+
+    it('carries nothing without bounds', async () => {
+      reply(fixture('nama-10-gdp-de-2022'));
+      expect(await send('nama_10_gdp', NAMA, undefined, undefined)).not.toHaveProperty(
+        'periodCuts',
+      );
+    });
+
+    it('carries nothing for last_n_periods', async () => {
+      reply(fixture('nama-10-gdp-de-2022'));
+      expect(await send('nama_10_gdp', NAMA, undefined, undefined, 1)).not.toHaveProperty(
+        'periodCuts',
+      );
+    });
+
+    it('carries nothing for a reply with no freq dimension', async () => {
+      const { freq: _freq, ...dimension } =
+        fixture('nama-10-gdp-de-2022-06-to-2024').dimension ?? {};
+      reply({ ...fixture('nama-10-gdp-de-2022-06-to-2024'), dimension });
+      const res = await send('nama_10_gdp', NAMA, '2022-06', '2024');
+      expect(res.obsCount).toBe(2);
+      expect(res).not.toHaveProperty('periodCuts');
+    });
+
+    it('survives coverage annotations it cannot read, deciding from the bounds alone', async () => {
+      const body = fixture('nama-10-gdp-de-2022-06-to-2024');
+      const annotation = body.extension?.annotation?.map((entry) =>
+        entry.type?.startsWith('OBS_PERIOD_OVERALL') ? { ...entry, title: 'n/a' } : entry,
+      );
+      reply({ ...body, extension: { ...body.extension, ...(annotation && { annotation }) } });
+      const res = await send('nama_10_gdp', NAMA, '2022-06', '2024');
+      expect(res.periodCuts).toEqual([
+        { bounds: ['since_period'], frequency: 'annual', period: '2022' },
+      ]);
+    });
+
+    it('makes no second request to decide any of it', async () => {
+      reply(fixture('nama-10-gdp-de-2022-06-to-2024'));
+      await send('nama_10_gdp', NAMA, '2022-06', '2024');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('a time dimension that comes back empty (#84)', () => {
+    const coverage = { oldest: '1975', latest: '2025' };
+
+    it('says outside coverage for a range that misses what the reply reports', async () => {
+      expect(
+        await emptyRangeOf('nama_10_gdp', NAMA, 'nama-10-gdp-de-no-period', '2030', '2031'),
+      ).toEqual({ kind: 'outside_coverage', coverage });
+    });
+
+    it('names the bounds that select a whole period', async () => {
+      expect(
+        await emptyRangeOf('nama_10_gdp', NAMA, 'nama-10-gdp-de-no-period', '2022-06', '2023-06'),
+      ).toEqual({
+        kind: 'no_whole_period',
+        coverage,
+        cuts: [
+          { bounds: ['since_period'], frequency: 'annual', period: '2022' },
+          { bounds: ['until_period'], frequency: 'annual', period: '2023' },
+        ],
+      });
+    });
+
+    it('says no published period for a weekend', async () => {
+      expect(
+        await emptyRangeOf(
+          'ert_bil_eur_d',
+          USD,
+          'ert-bil-eur-d-usd-no-period',
+          '2022-06-18',
+          '2022-06-19',
+        ),
+      ).toEqual({
+        kind: 'no_published_period',
+        coverage: { oldest: '1974-07-01', latest: '2026-10-31' },
+      });
+    });
+
+    it('says no published period for a survey gap', async () => {
+      expect(
+        await emptyRangeOf(
+          'earn_ses_annual',
+          { geo: ['DE'] },
+          'earn-ses-annual-de-2020',
+          '2020',
+          '2020',
+        ),
+      ).toEqual({ kind: 'no_published_period', coverage: { oldest: '2002', latest: '2022' } });
+    });
+
+    it('decides from the bounds alone on a host that reports no coverage', async () => {
+      expect(
+        await emptyRangeOf('DS-045409', DS, 'comext/ds-045409-de-fr-no-period', '2031', '2032'),
+      ).toEqual({ kind: 'no_published_period', coverage: {} });
+      expect(
+        await emptyRangeOf(
+          'DS-045409',
+          DS,
+          'comext/ds-045409-de-fr-no-period',
+          '2023-06-10',
+          '2023-06-20',
+        ),
+      ).toEqual({
+        kind: 'no_whole_period',
+        coverage: {},
+        cuts: [
+          { bounds: ['since_period', 'until_period'], frequency: 'monthly', period: '2023-06' },
+        ],
+      });
+    });
+
+    it('diagnoses a one-day request from its bounds, though it went out as time', async () => {
+      expect(
+        await emptyRangeOf(
+          'nama_10_gdp',
+          NAMA,
+          'nama-10-gdp-de-no-period',
+          '2022-06-15',
+          '2022-06-15',
+        ),
+      ).toEqual({
+        kind: 'no_whole_period',
+        coverage,
+        cuts: [{ bounds: ['since_period', 'until_period'], frequency: 'annual', period: '2022' }],
+      });
+    });
+
+    it('stays out of a time dimension that selected periods', async () => {
+      reply(fixture('nama-10-gdp-de-until-1980'));
+      const err = await send('nama_10_gdp', NAMA, undefined, '1980').catch((e: unknown) => e);
+      expect((err as McpError).data).not.toHaveProperty('emptyRange');
+    });
   });
 });

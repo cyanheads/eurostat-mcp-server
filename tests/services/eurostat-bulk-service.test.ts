@@ -339,6 +339,68 @@ describe('classifyXmlBody', () => {
       expect((err as McpError).data).toMatchObject({ reason: 'async_queued', retryable: false });
     }
   });
+
+  describe('fault 150, split on its TIME_PERIOD clause (#84)', () => {
+    /** Fault strings as both hosts send them, entity escapes included. */
+    const fault150 = (tail: string) => FAULT_150.replace('UNIT=NOTAUNIT.', tail);
+    const thrown = (xml: string, dataset = 'nama_10_gdp'): McpError => {
+      try {
+        classifyXmlBody(xml, dataset);
+      } catch (err) {
+        return err as McpError;
+      }
+      throw new Error('expected a throw');
+    };
+
+    for (const tail of [
+      'TIME_PERIOD: &gt;=2022-06-01 and &lt;=2023-06-30.',
+      'TIME_PERIOD: &gt;=2025-06-01.',
+      'TIME_PERIOD: &lt;=1975-06-30.',
+      'TIME_PERIOD: &gt;=2031-01-01 and &lt;=2032-12-31.',
+    ]) {
+      it(`reads "${tail}" as a period range`, () => {
+        const err = thrown(fault150(tail));
+        expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+        expect(err.data).toMatchObject({
+          reason: 'invalid_dimension',
+          periodRange: true,
+          faultcode: '150',
+        });
+        expect(err.message).toBe(
+          'Eurostat rejected the period range for "nama_10_gdp": it selects no period of the dataset (fault 150).',
+        );
+      });
+    }
+
+    it('keeps the requested days out of the message, since a one-day download sends the next day', () => {
+      expect(
+        thrown(fault150('TIME_PERIOD: &gt;=2022-06-15 and &lt;=2022-06-16.')).message,
+      ).not.toContain('2022-06-16');
+    });
+
+    for (const tail of [
+      'GEO=QQ.',
+      'GEO=QQ, UNIT=FAKE.',
+      'REPORTER=QQ.',
+      'GEO=TIME_PERIOD:.',
+      'GEO=TIME_PERIOD: &gt;=2020.',
+      'GEO=x: TIME_PERIOD: &gt;=2020.',
+      'GEO=QQ, UNIT=TIME_PERIOD: &lt;=2020.',
+    ]) {
+      it(`keeps "${tail}" a filter fault`, () => {
+        const err = thrown(fault150(tail));
+        expect(err.data).toMatchObject({ reason: 'invalid_dimension', faultcode: '150' });
+        expect(err.data).not.toHaveProperty('periodRange');
+        expect(err.message).toMatch(/^Eurostat rejected a filter value\. /);
+      });
+    }
+
+    it('keeps the wording of a filter fault whole', () => {
+      expect(thrown(fault150('GEO=QQ.')).message).toBe(
+        "Eurostat rejected a filter value. This fault also covers a period range outside the dataset's coverage. Eurostat fault 150: INVALID_QUERY_DIMENSION_VALUE: Query is invalid as per its structure's definition. The following values for dimension are not allowed: GEO=QQ.",
+      );
+    });
+  });
 });
 
 describe('bulkRowSchema', () => {
@@ -820,6 +882,125 @@ describe('EurostatBulkService — streaming', () => {
     const ctx = createMockContext();
     const dl = await svc.startDownload('nama_10_gdp', [], {}, undefined, undefined, ctx);
     expect(dl.url).toContain('/sdmx/2.1/data/nama_10_gdp?');
+  });
+});
+
+/**
+ * Eurostat ignores a range whose first and last day are the same day and answers with
+ * the whole series, so one day goes out as that day and the next. The bodies are live
+ * `ert_bil_eur_d` replies: 2022-06-15 and -16 are a Wednesday and a Thursday, 2022-06-19
+ * is a Sunday whose reply holds only Monday, and 2022-06-17 a Friday whose reply holds
+ * only itself.
+ */
+describe('EurostatBulkService — a one-day range (#88)', () => {
+  const HEAD = 'freq,statinfo,unit,currency\\TIME_PERIOD';
+  const WEDNESDAY_THURSDAY = `${HEAD}\t2022-06-15 \t2022-06-16 \r\nD,AVG,NAC,USD\t1.0431 \t1.0400 \r\n`;
+  const MONDAY_ONLY = `${HEAD}\t2022-06-20 \r\nD,AVG,NAC,USD\t1.0517 \r\n`;
+  const FRIDAY_ONLY = `${HEAD}\t2022-06-17 \r\nD,AVG,NAC,USD\t1.0486 \r\n`;
+
+  let svc: EurostatBulkService;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    svc = new EurostatBulkService(mockConfig, mockStorage);
+  });
+
+  const download = async (body: string, sinceP?: string, untilP?: string) => {
+    mockBody([utf8(body)]);
+    const dl = await svc.startDownload(
+      'ert_bil_eur_d',
+      [],
+      {},
+      sinceP,
+      untilP,
+      createMockContext(),
+    );
+    const rows = await collectRows(dl.rows());
+    return { rows, stats: dl.stats, url: new URL(dl.url) };
+  };
+
+  for (const [since, until, start, end] of [
+    ['2022-06-15', '2022-06-15', '2022-06-15', '2022-06-16'],
+    ['2022-D166', '2022-D166', '2022-06-15', '2022-06-16'],
+    ['2022-06-15', '2022-D166', '2022-06-15', '2022-06-16'],
+    ['2022-06-30', '2022-06', '2022-06-30', '2022-07-01'],
+    ['2022', '2022-01-01', '2022-01-01', '2022-01-02'],
+    ['2022-12-31', '2022', '2022-12-31', '2023-01-01'],
+  ] as const) {
+    it(`requests ${since} to ${until} as ${start} and ${end}`, async () => {
+      const { url } = await download(WEDNESDAY_THURSDAY, since, until);
+      expect(url.searchParams.get('startPeriod')).toBe(start);
+      expect(url.searchParams.get('endPeriod')).toBe(end);
+    });
+  }
+
+  for (const [label, since, until] of [
+    ['two days', '2022-06-15', '2022-06-16'],
+    ['one month', '2022-06', '2022-06'],
+    ['one year', '2022', '2022'],
+    ['one week', '2022-W24', '2022-W24'],
+  ] as const) {
+    it(`sends ${label} unchanged and keeps every column`, async () => {
+      const { rows, url } = await download(WEDNESDAY_THURSDAY, since, until);
+      expect(url.searchParams.get('startPeriod')).toBe(since);
+      expect(url.searchParams.get('endPeriod')).toBe(until);
+      expect(rows.map((row) => row.time)).toEqual(['2022-06-15', '2022-06-16']);
+    });
+  }
+
+  it('drops the next day from the rows and from every counter', async () => {
+    const { rows, stats } = await download(WEDNESDAY_THURSDAY, '2022-06-15', '2022-06-15');
+    expect(rows).toEqual([
+      expect.objectContaining({ time: '2022-06-15', currency: 'USD', obs_value: 1.0431 }),
+    ]);
+    expect(stats.rowCount).toBe(1);
+    expect(stats.periodsSeen).toEqual(['2022-06-15']);
+  });
+
+  it('does not count a missing cell in the dropped column', async () => {
+    const { stats } = await download(
+      WEDNESDAY_THURSDAY.replace('1.0400 ', ': '),
+      '2022-06-15',
+      '2022-06-15',
+    );
+    expect(stats.rowCount).toBe(1);
+    expect(stats.missingCount).toBe(0);
+  });
+
+  it('counts a missing cell in the kept column', async () => {
+    const { rows, stats } = await download(
+      WEDNESDAY_THURSDAY.replace('1.0431 ', ': '),
+      '2022-06-15',
+      '2022-06-15',
+    );
+    expect(rows).toEqual([expect.objectContaining({ time: '2022-06-15', obs_value: null })]);
+    expect(stats.missingCount).toBe(1);
+  });
+
+  it('keeps that day across every series of the table', async () => {
+    const { rows } = await download(
+      `${WEDNESDAY_THURSDAY}D,AVG,NAC,GBP\t0.8585 \t0.8590 \r\n`,
+      '2022-06-15',
+      '2022-06-15',
+    );
+    expect(rows.map((row) => [row.currency, row.time])).toEqual([
+      ['USD', '2022-06-15'],
+      ['GBP', '2022-06-15'],
+    ]);
+  });
+
+  it('holds the day alone when the next one is unpublished', async () => {
+    const { rows, stats } = await download(FRIDAY_ONLY, '2022-06-17', '2022-06-17');
+    expect(rows).toEqual([expect.objectContaining({ time: '2022-06-17', obs_value: 1.0486 })]);
+    expect(stats.periodsSeen).toEqual(['2022-06-17']);
+  });
+
+  it('yields no row when the reply holds only the next day', async () => {
+    const { rows, stats } = await download(MONDAY_ONLY, '2022-06-19', '2022-06-19');
+    expect(rows).toEqual([]);
+    expect(stats.rowCount).toBe(0);
+    expect(stats.missingCount).toBe(0);
+    expect(stats.periodsSeen).toEqual([]);
   });
 });
 

@@ -1,6 +1,7 @@
 /**
  * @fileoverview Local check of the period literals `since_period`/`until_period`
- * carry, run by both data tools before any request reaches Eurostat.
+ * carry, run by both data tools before any request reaches Eurostat, and the calendar
+ * reasoning over those bounds: which periods they exclude, and when they name one day.
  * @module services/eurostat-periods
  */
 
@@ -21,9 +22,9 @@ export const PERIOD_FORMS =
  * normalizePeriod} sends. The number after the letter may carry extra leading zeros
  * (`2020-Q01`, `2020-W001`) — the bulk endpoint reads those, the Statistics API
  * refuses them. Month and day in `YYYY-MM`/`YYYY-MM-DD` stay exactly two digits
- * (both endpoints refuse `2020-1`). Frequency is deliberately not checked — both
- * endpoints map a literal of another frequency (`2020-01` on annual data) onto the
- * dataset's own.
+ * (both endpoints refuse `2020-1`). Frequency is deliberately not checked: both
+ * endpoints read every form as a span of days and keep the periods wholly inside
+ * the range, per frequency (see {@link periodCuts}).
  */
 const PERIOD_SHAPE = /^(\d{4})(?:-(\d{2})(?:-(\d{2}))?|-(A)0{0,3}1|-([QSTMWD])(\d{1,4}))?$/i;
 
@@ -60,6 +61,8 @@ const MONTH_NAMES = [
 /** Characters of an offending value echoed back before it is cut short. */
 const ECHO_LIMIT = 40;
 
+const MS_PER_DAY = 86_400_000;
+
 const isLeapYear = (year: number): boolean =>
   (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
 
@@ -81,8 +84,14 @@ function isoWeeksInYear(year: number): number {
 function dayNumber(year: number, month: number, day: number): number {
   const date = new Date(0);
   date.setUTCFullYear(year, month - 1, day);
-  return date.getTime() / 86_400_000;
+  return date.getTime() / MS_PER_DAY;
 }
+
+/** The calendar date of a {@link dayNumber}, as `YYYY-MM-DD`. */
+const isoDate = (day: number): string => new Date(day * MS_PER_DAY).toISOString().slice(0, 10);
+
+/** Days since that week's Monday: 1970-01-01, day 0, was a Thursday. */
+const weekdayOffset = (day: number): number => (((day + 3) % 7) + 7) % 7;
 
 /** First and last day of months `from`–`to` of `year`, as {@link dayNumber}s. */
 const monthSpan = (year: number, from: number, to: number): [number, number] => [
@@ -93,8 +102,7 @@ const monthSpan = (year: number, from: number, to: number): [number, number] => 
 /** First and last day of ISO week `week`: week 1 is the one holding 4 January. */
 function isoWeekSpan(year: number, week: number): [number, number] {
   const jan4 = dayNumber(year, 1, 4);
-  const mondayOffset = (((jan4 + 3) % 7) + 7) % 7; // 1970-01-01, day 0, was a Thursday
-  const first = jan4 - mondayOffset + 7 * (week - 1);
+  const first = jan4 - weekdayOffset(jan4) + 7 * (week - 1);
   return [first, first + 6];
 }
 
@@ -110,6 +118,47 @@ const FREQUENCY_SPAN: Record<Frequency, (year: number, n: number) => [number, nu
     return [day, day];
   },
 };
+
+/**
+ * The frequencies a bound can fall inside a period of, finest first, with the months
+ * each period of a month-based frequency spans. A day has no inside.
+ */
+const DIVISIBLE_FREQUENCIES = [
+  { code: 'W', label: 'weekly' },
+  { code: 'M', label: 'monthly', months: 1 },
+  { code: 'Q', label: 'quarterly', months: 3 },
+  { code: 'T', label: 'trimester', months: 4 },
+  { code: 'S', label: 'semester', months: 6 },
+  { code: 'A', label: 'annual', months: 12 },
+] as const;
+
+type DivisibleFrequency = (typeof DIVISIBLE_FREQUENCIES)[number];
+
+/** The period of `frequency` holding calendar day `day`: its code and the days it spans. */
+function periodHolding(
+  day: number,
+  frequency: DivisibleFrequency,
+): { code: string; firstDay: number; lastDay: number } {
+  const fourDigits = (year: number) => String(year).padStart(4, '0');
+
+  if (frequency.code === 'W') {
+    const monday = day - weekdayOffset(day);
+    const thursday = monday + 3; // the day that decides an ISO week's year
+    const year = new Date(thursday * MS_PER_DAY).getUTCFullYear();
+    const week = Math.floor((thursday - dayNumber(year, 1, 1)) / 7) + 1;
+    const code = `${fourDigits(year)}-W${String(week).padStart(2, '0')}`;
+    return { code, firstDay: monday, lastDay: monday + 6 };
+  }
+
+  const date = new Date(day * MS_PER_DAY);
+  const year = date.getUTCFullYear();
+  const { code: letter, months } = frequency;
+  const n = Math.ceil((date.getUTCMonth() + 1) / months);
+  const [firstDay, lastDay] = monthSpan(year, (n - 1) * months + 1, n * months);
+  if (letter === 'A') return { code: fourDigits(year), firstDay, lastDay };
+  const number = letter === 'M' ? String(n).padStart(2, '0') : `${letter}${n}`;
+  return { code: `${fourDigits(year)}-${number}`, firstDay, lastDay };
+}
 
 /**
  * A checked period: the literal to send, and the first and last day it covers as
@@ -233,4 +282,174 @@ export function resolvePeriods(bounds: {
     ...(since && { since_period: since.period }),
     ...(until && { until_period: until.period }),
   };
+}
+
+/** The two period bounds, by the input that sets each. */
+export type PeriodBound = 'since_period' | 'until_period';
+
+/** A range as the bounds that set it, unset or `undefined` when a side is open. */
+export type PeriodRange = Partial<Record<PeriodBound, string | undefined>>;
+
+/** A dataset's overall coverage, each side absent when Eurostat does not report it. */
+export interface PeriodCoverage {
+  latest?: string;
+  oldest?: string;
+}
+
+/** A period a range excludes because a bound falls inside it. */
+export interface PeriodCut {
+  /**
+   * The bounds that fall inside it. Each one alone selects the period, except when
+   * both are listed: the range then sits inside the period, and only moving both does.
+   */
+  bounds: PeriodBound[];
+  frequency: DivisibleFrequency['label'];
+  /** Its code, which is also the literal that selects it. */
+  period: string;
+}
+
+/** Why a range selected no period of a dataset, for a reply whose `time` dimension is empty. */
+export type EmptyRange = { coverage: PeriodCoverage } & (
+  | { kind: 'no_published_period' | 'outside_coverage' }
+  | { cuts: PeriodCut[]; kind: 'no_whole_period' }
+);
+
+/** A literal's days, or `undefined` for an unset or unreadable one: these reads never fail. */
+function daysOf(literal: string | undefined): Period | undefined {
+  if (literal === undefined) return;
+  const period = normalizePeriod(literal);
+  return 'problem' in period ? undefined : period;
+}
+
+/** Whether a span of days lies wholly past or wholly before the reported coverage. */
+function missesCoverage(
+  span: { firstDay: number; lastDay: number },
+  coverage: PeriodCoverage,
+): boolean {
+  const oldest = daysOf(coverage.oldest);
+  const latest = daysOf(coverage.latest);
+  return (
+    (oldest !== undefined && span.lastDay < oldest.firstDay) ||
+    (latest !== undefined && span.firstDay > latest.lastDay)
+  );
+}
+
+/**
+ * The range a pair of bounds selects when it names exactly one calendar day, whatever
+ * forms the bounds take (`2022-06-15` twice, `2022-D166` beside `2022-06-15`, `2022`
+ * beside `2022-01-01`), with the day after it.
+ *
+ * Eurostat ignores such a range on both endpoints, at every frequency, and answers
+ * with the whole series as a success, so neither tool can send it as it stands.
+ */
+export function oneDayRange(range: PeriodRange): { date: string; next: string } | undefined {
+  const since = daysOf(range.since_period);
+  const until = daysOf(range.until_period);
+  if (!since || since.firstDay !== until?.lastDay) return;
+  return { date: isoDate(since.firstDay), next: isoDate(since.firstDay + 1) };
+}
+
+/** The frequency codes a list of period codes is written in; a code of no known shape adds none. */
+export function frequenciesOf(periods: readonly string[]): Set<string> {
+  const frequencies = new Set<string>();
+  for (const period of periods) {
+    const match = PERIOD_SHAPE.exec(period);
+    if (!match) continue;
+    const [, , month, day, , letter] = match;
+    frequencies.add(letter?.toUpperCase() ?? (day ? 'D' : month ? 'M' : 'A'));
+  }
+  return frequencies;
+}
+
+/**
+ * The periods a range excludes because a bound falls inside them, finest frequency
+ * first, for each of `frequencies` this module has a calendar span for.
+ *
+ * Both endpoints keep a period only when it lies wholly inside the range: its first
+ * day on or after `since_period`'s, its last day on or before `until_period`'s. So a
+ * `since_period` starting after a period does, or an `until_period` ending before it
+ * does, cuts that period out, a coarser bound included: 2022-01-01 falls inside
+ * `2021-W52`. A period known to lie outside `coverage` is not named.
+ *
+ * Reads only the bounds and the list it is handed, and skips what it cannot parse.
+ */
+export function periodCuts(
+  range: PeriodRange,
+  frequencies: Iterable<string>,
+  coverage: PeriodCoverage = {},
+): PeriodCut[] {
+  const since = daysOf(range.since_period);
+  const until = daysOf(range.until_period);
+
+  /** The code of the period a bound's own day lies in, when it is not that period's edge. */
+  const cutBy = (day: number | undefined, edge: 'firstDay' | 'lastDay', f: DivisibleFrequency) => {
+    if (day === undefined) return;
+    const period = periodHolding(day, f);
+    return period[edge] !== day && !missesCoverage(period, coverage) ? period.code : undefined;
+  };
+
+  const listed = new Set(frequencies);
+  return DIVISIBLE_FREQUENCIES.filter(({ code }) => listed.has(code)).flatMap((f) => {
+    const start = cutBy(since?.firstDay, 'firstDay', f);
+    const end = cutBy(until?.lastDay, 'lastDay', f);
+    const cut = (period: string, ...bounds: PeriodBound[]): PeriodCut => ({
+      bounds,
+      frequency: f.label,
+      period,
+    });
+    if (start && start === end) return [cut(start, 'since_period', 'until_period')];
+    return [
+      ...(start ? [cut(start, 'since_period')] : []),
+      ...(end ? [cut(end, 'until_period')] : []),
+    ];
+  });
+}
+
+/**
+ * Why a range selected no period, read from the reply in hand.
+ *
+ * Coverage comes first, then {@link periodCuts} at the finest frequency a bound falls
+ * inside. What is left overlaps the data with no bound inside a period: a weekend, a
+ * survey gap, or, on a host that reports no coverage, a range past the data.
+ *
+ * A selection made with no bound at all (a `filters.time` value) has nothing to cut.
+ */
+export function diagnoseEmptyRange(
+  range: PeriodRange,
+  frequencies: Iterable<string>,
+  coverage: PeriodCoverage,
+): EmptyRange {
+  const since = daysOf(range.since_period);
+  const until = daysOf(range.until_period);
+  const span = {
+    firstDay: since?.firstDay ?? Number.NEGATIVE_INFINITY,
+    lastDay: until?.lastDay ?? Number.POSITIVE_INFINITY,
+  };
+  if ((!since && !until) || missesCoverage(span, coverage)) {
+    return { kind: 'outside_coverage', coverage };
+  }
+
+  const cuts = periodCuts(range, frequencies, coverage);
+  const finest = cuts[0]?.frequency;
+  return finest
+    ? { kind: 'no_whole_period', coverage, cuts: cuts.filter((c) => c.frequency === finest) }
+    : { kind: 'no_published_period', coverage };
+}
+
+/** The bound or bounds to set to select a cut period: `since_period "2022"`. */
+export const cutSelector = ({ bounds, period }: PeriodCut): string =>
+  bounds.map((bound) => `${bound} "${period}"`).join(' and ');
+
+/**
+ * The success notice for `cuts`, quoting each bound as the caller wrote it. It says
+ * nothing about the period's data: the slice may hold none.
+ */
+export function cutNotice(cuts: PeriodCut[], sent: PeriodRange): string {
+  return cuts
+    .map((cut) => {
+      const both = cut.bounds.length > 1;
+      const named = cut.bounds.map((bound) => `${bound} "${sent[bound]}"`).join(' and ');
+      return `${named} ${both ? 'fall' : 'falls'} inside ${cut.frequency} period ${cut.period}, which Eurostat excludes: it keeps only periods wholly inside the range. ${cutSelector(cut)} ${both ? 'together include' : 'includes'} that period if this slice has it.`;
+    })
+    .join(' ');
 }

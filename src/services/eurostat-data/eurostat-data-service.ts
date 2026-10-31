@@ -29,6 +29,13 @@ import {
 import { dropUnsetFilters } from '@/services/eurostat-filters.js';
 import { dataHostFor, isComextDataset } from '@/services/eurostat-hosts.js';
 import { isUpstreamOutage, upstreamOutage } from '@/services/eurostat-outage.js';
+import {
+  diagnoseEmptyRange,
+  oneDayRange,
+  type PeriodCoverage,
+  type PeriodRange,
+  periodCuts,
+} from '@/services/eurostat-periods.js';
 import { awaitShared } from '@/services/shared-load.js';
 import {
   parseSdmxDatasetMetadata,
@@ -38,6 +45,7 @@ import {
 import {
   type DatasetMeta,
   type DimensionValuesResult,
+  GEO_LEVEL_VALUES,
   type GeoLevel,
   type JsonStatResponse,
   type NoResultsDiagnosis,
@@ -167,17 +175,26 @@ export function findUnmatchedValues(
 }
 
 /**
+ * The frequencies a reply carries. `freq`'s index lists every frequency in the slice,
+ * annual beside a `time` dimension that shows only months.
+ */
+const replyFrequencies = (data: JsonStatResponse): string[] =>
+  Object.keys(data.dimension?.freq?.category?.index ?? {});
+
+/**
  * Read an empty match's envelope for why it is empty, without another request.
  *
  * Three signals, which can co-occur: filter values absent from their dimension's
  * index; a `time` dimension of size 0, meaning the requested range selected no
- * period of the dataset; and, when every dimension matched at least one value,
- * the periods the reply selected — none of which carries a value for the slice.
+ * period of the dataset, which {@link diagnoseEmptyRange} explains; and, when every
+ * dimension matched at least one value, the periods the reply selected — none of
+ * which carries a value for the slice.
  */
 function diagnoseEmptyMatch(
   data: JsonStatResponse,
   sent: Record<string, string[]>,
-  annotation: (type: string) => string | undefined,
+  range: PeriodRange,
+  coverage: PeriodCoverage,
 ): NoResultsDiagnosis {
   const unmatchedValues = findUnmatchedValues(sent, data);
   const dims = data.id ?? [];
@@ -187,9 +204,7 @@ function diagnoseEmptyMatch(
   if (timeDim < 0) return diagnosis;
 
   if (sizes[timeDim] === 0) {
-    const oldest = annotation('OBS_PERIOD_OVERALL_OLDEST');
-    const latest = annotation('OBS_PERIOD_OVERALL_LATEST');
-    diagnosis.outsideCoverage = { ...(oldest && { oldest }), ...(latest && { latest }) };
+    diagnosis.emptyRange = diagnoseEmptyRange(range, replyFrequencies(data), coverage);
   } else if (sizes.length === dims.length && sizes.every((size) => size >= 1)) {
     diagnosis.matchedPeriods = Object.entries(data.dimension?.time?.category?.index ?? {})
       .sort(([, a], [, b]) => a - b)
@@ -808,9 +823,17 @@ export class EurostatDataService {
    * extraction limit (`earn_ses_annual`). Verified against live SDMX TSV headers
    * and JSON-stat `id` arrays: the header's comma-joined key field is exactly this
    * order.
+   *
+   * `deadlineMs` bounds the read across every attempt and backoff, in place of
+   * `EUROSTAT_REQUEST_TIMEOUT_MS`, for a caller that only wants the order if it comes
+   * quickly.
    */
-  async getDimensionOrder(datasetCode: string, ctx: Context): Promise<string[]> {
-    const xml = await this.fetchSdmxXml('datastructure', datasetCode, ctx, ctx.signal);
+  async getDimensionOrder(
+    datasetCode: string,
+    ctx: Context,
+    deadlineMs?: number,
+  ): Promise<string[]> {
+    const xml = await this.fetchSdmxXml('datastructure', datasetCode, ctx, ctx.signal, deadlineMs);
     const order = parseSdmx(datasetCode, () => parseSdmxDimensionOrder(xml));
     if (order.length === 0) {
       throw serviceUnavailable(
@@ -867,13 +890,21 @@ export class EurostatDataService {
       ? values.filter(({ code }) => metadata.geoLevelsByCode[code] === effectiveGeoLevel)
       : [...values];
     if (effectiveGeoLevel && filteredValues.length === 0) {
+      // Read from the constrained `values`: the dataset's codelist can hold codes it has no data for.
+      const listed = new Set(values.map(({ code }) => metadata.geoLevelsByCode[code]));
+      const availableGeoLevels = GEO_LEVEL_VALUES.filter((level) => listed.has(level));
       throw notFound(
-        `Dataset "${datasetCode}" has no "geo" values at the "${effectiveGeoLevel}" level. Choose a different geo_level or omit geo_level only when country values are wanted.`,
+        `Dataset "${datasetCode}" has no "geo" values at the "${effectiveGeoLevel}" level. ${
+          availableGeoLevels.length > 0
+            ? `It lists "geo" values at: ${availableGeoLevels.join(', ')}.`
+            : 'None of its "geo" codes carries a NUTS level.'
+        }`,
         {
           reason: 'no_results',
           datasetCode,
           dimension,
           geoLevel: effectiveGeoLevel,
+          availableGeoLevels,
         },
       );
     }
@@ -991,8 +1022,16 @@ export class EurostatDataService {
       params[dim] = values;
     }
     if (geoLevel) params.geoLevel = geoLevel;
-    if (sinceP && !lastN) params.sinceTimePeriod = sinceP;
-    if (untilP && !lastN) params.untilTimePeriod = untilP;
+    const range = { since_period: sinceP, until_period: untilP };
+    const oneDay = oneDayRange(range);
+    // Eurostat ignores a range of one day and answers with the whole series. `time` selects
+    // that day or nothing, and takes a calendar date only: `2022-D166` selects nothing.
+    if (oneDay) {
+      params.time = oneDay.date;
+    } else {
+      if (sinceP && !lastN) params.sinceTimePeriod = sinceP;
+      if (untilP && !lastN) params.untilTimePeriod = untilP;
+    }
     if (lastN) params.lastTimePeriod = String(lastN);
 
     const url = this.buildUrl(datasetCode, params);
@@ -1001,6 +1040,10 @@ export class EurostatDataService {
     // Totals describe the whole match and are counted from the response's cell keys, so the
     // decode cap below cannot shrink them.
     const { obsCount, missingObsCount, timeCodes, unpopulatedPeriods } = this.scanCells(data);
+
+    const oldest = this.extractAnnotation(data, 'OBS_PERIOD_OVERALL_OLDEST', 'title');
+    const latest = this.extractAnnotation(data, 'OBS_PERIOD_OVERALL_LATEST', 'title');
+    const coverage = { ...(oldest && { oldest }), ...(latest && { latest }) };
 
     // Emptiness is the cell count reaching zero — the same count reported below and the same
     // membership the decoder walks. Reading `value` alone instead would reject a slice whose
@@ -1018,9 +1061,7 @@ export class EurostatDataService {
           reason: 'no_results',
           datasetCode,
           filters: appliedFilters,
-          ...diagnoseEmptyMatch(data, appliedFilters, (type) =>
-            this.extractAnnotation(data, type, 'title'),
-          ),
+          ...diagnoseEmptyMatch(data, appliedFilters, range, coverage),
         },
       );
     }
@@ -1031,13 +1072,12 @@ export class EurostatDataService {
     // Compute timeRange from the actual time dimension values in the response.
     // Fall back to dataset-wide annotations only when no time dimension is present, and omit
     // a bound neither source reports — an unknown period is not an empty one.
-    const start =
-      timeCodes[0] ?? this.extractAnnotation(data, 'OBS_PERIOD_OVERALL_OLDEST', 'title');
-    const end =
-      timeCodes.at(-1) ?? this.extractAnnotation(data, 'OBS_PERIOD_OVERALL_LATEST', 'title');
+    const start = timeCodes[0] ?? oldest;
+    const end = timeCodes.at(-1) ?? latest;
     const timeRange = { ...(start && { start }), ...(end && { end }) };
 
     const dimensionsUsed = data.id ?? [];
+    const cuts = periodCuts(range, replyFrequencies(data), coverage);
 
     return {
       datasetCode,
@@ -1050,6 +1090,7 @@ export class EurostatDataService {
       appliedFilters,
       ...(unmatchedValues && { unmatchedValues }),
       ...(lastN && unpopulatedPeriods.length > 0 && { unpopulatedPeriods }),
+      ...(cuts.length > 0 && { periodCuts: cuts }),
       rows: () => this.iterateRows(data, dimensionsUsed, isComextDataset(datasetCode)),
     };
   }

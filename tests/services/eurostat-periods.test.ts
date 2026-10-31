@@ -9,7 +9,15 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { normalizePeriod, resolvePeriods } from '@/services/eurostat-periods.js';
+import {
+  cutNotice,
+  diagnoseEmptyRange,
+  frequenciesOf,
+  normalizePeriod,
+  oneDayRange,
+  periodCuts,
+  resolvePeriods,
+} from '@/services/eurostat-periods.js';
 
 describe('normalizePeriod', () => {
   for (const period of [
@@ -267,5 +275,432 @@ describe('resolvePeriods — empty ranges (#53)', () => {
         /^since_period "2020-Q03" starts after until_period "2020-06"/,
       ),
     });
+  });
+});
+
+/**
+ * The periods a bound excludes, read off 380 live probes of both endpoints: a period
+ * is kept when its first day is on or after `since`'s first day and its last day on or
+ * before `until`'s last day, with ISO week spans. The bulk rows of that matrix give
+ * each row below; the two endpoints agreed on all of them.
+ */
+describe('periodCuts: the bound-form by frequency matrix', () => {
+  type Row = [bound: string, role: 'since' | 'until', cut: Partial<Record<string, string>>];
+
+  const midYear: Row[] = [
+    ['2022', 'since', { W: '2021-W52' }],
+    ['2022', 'until', { W: '2022-W52' }],
+    ['2022-06', 'since', { A: '2022', S: '2022-S1', Q: '2022-Q2', W: '2022-W22' }],
+    ['2022-M06', 'since', { A: '2022', S: '2022-S1', Q: '2022-Q2', W: '2022-W22' }],
+    ['2022-06', 'until', { A: '2022', W: '2022-W26' }],
+    ['2022-M06', 'until', { A: '2022', W: '2022-W26' }],
+    ['2022-Q2', 'since', { A: '2022', S: '2022-S1', W: '2022-W13' }],
+    ['2022-Q2', 'until', { A: '2022', W: '2022-W26' }],
+    ['2022-S2', 'since', { A: '2022', W: '2022-W26' }],
+    ['2022-S2', 'until', { W: '2022-W52' }],
+    ['2022-T2', 'since', { A: '2022', S: '2022-S1', Q: '2022-Q2', W: '2022-W17' }],
+    ['2022-T2', 'until', { A: '2022', S: '2022-S2', Q: '2022-Q3', W: '2022-W35' }],
+  ];
+  const eitherRole: Array<[bound: string, cut: Row[2]]> = [
+    ['2022-06-15', { A: '2022', S: '2022-S1', Q: '2022-Q2', M: '2022-06', W: '2022-W24' }],
+    ['2022-D166', { A: '2022', S: '2022-S1', Q: '2022-Q2', M: '2022-06', W: '2022-W24' }],
+    ['2022-W23', { A: '2022', S: '2022-S1', Q: '2022-Q2', M: '2022-06' }],
+  ];
+  const aligned: Row[] = [
+    ['2022-01', 'since', { W: '2021-W52' }],
+    ['2022-01-01', 'since', { W: '2021-W52' }],
+    ['2022-D001', 'since', { W: '2021-W52' }],
+    ['2022-M01', 'since', { W: '2021-W52' }],
+    ['2022-Q1', 'since', { W: '2021-W52' }],
+    ['2022-S1', 'since', { W: '2021-W52' }],
+    ['2022-T1', 'since', { W: '2021-W52' }],
+    // ISO 2022-W01 starts on 3 January, so it falls inside everything that starts on the 1st.
+    ['2022-W01', 'since', { A: '2022', S: '2022-S1', Q: '2022-Q1', M: '2022-01' }],
+    ['2022-12', 'until', { W: '2022-W52' }],
+    ['2022-12-31', 'until', { W: '2022-W52' }],
+    ['2022-D365', 'until', { W: '2022-W52' }],
+    ['2022-M12', 'until', { W: '2022-W52' }],
+    ['2022-Q4', 'until', { W: '2022-W52' }],
+    ['2022-T3', 'until', { W: '2022-W52' }],
+    // ISO 2022-W52 ends on 1 January 2023: annual 2022 is kept and 2023 is the period cut.
+    ['2022-W52', 'until', { A: '2023', S: '2023-S1', Q: '2023-Q1', M: '2023-01' }],
+  ];
+
+  const rows: Row[] = [
+    ...midYear,
+    ...eitherRole.flatMap(([bound, cut]): Row[] => [
+      [bound, 'since', cut],
+      [bound, 'until', cut],
+    ]),
+    ...aligned,
+  ];
+
+  for (const [bound, role, cut] of rows) {
+    for (const frequency of ['A', 'S', 'Q', 'M', 'W', 'D']) {
+      const expected = cut[frequency];
+      it(`${role} ${bound} on ${frequency}: ${expected ?? 'none'}`, () => {
+        const cuts = periodCuts(
+          role === 'since' ? { since_period: bound } : { until_period: bound },
+          [frequency],
+        );
+        expect(cuts.map((c) => c.period)).toEqual(expected ? [expected] : []);
+      });
+    }
+  }
+
+  it('reads a trimester the way it reads the other month-based frequencies', () => {
+    expect(periodCuts({ since_period: '2022-06' }, ['T'])).toEqual([
+      { bounds: ['since_period'], frequency: 'trimester', period: '2022-T2' },
+    ]);
+    expect(periodCuts({ since_period: '2022-05' }, ['T'])).toEqual([]);
+    expect(periodCuts({ until_period: '2022-08' }, ['T'])).toEqual([]);
+  });
+
+  it('carries the ISO week year across a year boundary in both directions', () => {
+    // 2021-01-01 is a Friday in 2020-W53; 2024-12-30 is a Monday in 2025-W01.
+    expect(periodCuts({ since_period: '2021' }, ['W'])[0]?.period).toBe('2020-W53');
+    expect(periodCuts({ since_period: '2024-12-31' }, ['W'])[0]?.period).toBe('2025-W01');
+  });
+
+  it('counts days across a century, before the epoch included', () => {
+    expect(periodCuts({ since_period: '1900-03-01' }, ['M', 'A'])).toEqual([
+      { bounds: ['since_period'], frequency: 'annual', period: '1900' },
+    ]);
+    expect(periodCuts({ since_period: '1969-12-31' }, ['W'])[0]?.period).toBe('1970-W01');
+  });
+
+  it('names no period for a range with no bound', () => {
+    expect(periodCuts({}, ['A', 'M'])).toEqual([]);
+  });
+
+  it('lists the frequencies finest first, whatever order the reply gave them in', () => {
+    expect(
+      periodCuts({ since_period: '2022-06-15' }, ['A', 'M', 'W']).map((c) => c.frequency),
+    ).toEqual(['weekly', 'monthly', 'annual']);
+  });
+
+  it('marks a period both bounds fall inside as one cut carrying both', () => {
+    expect(periodCuts({ since_period: '2022-06', until_period: '2022-08' }, ['A'])).toEqual([
+      { bounds: ['since_period', 'until_period'], frequency: 'annual', period: '2022' },
+    ]);
+  });
+
+  it('keeps two cuts apart when each bound falls inside its own period', () => {
+    expect(periodCuts({ since_period: '2022-06', until_period: '2023-06' }, ['A'])).toEqual([
+      { bounds: ['since_period'], frequency: 'annual', period: '2022' },
+      { bounds: ['until_period'], frequency: 'annual', period: '2023' },
+    ]);
+  });
+
+  describe('coverage', () => {
+    const coverage = { oldest: '1975', latest: '2025' };
+
+    it('does not name a period lying wholly past or before the reported coverage', () => {
+      expect(periodCuts({ until_period: '2031-06' }, ['A'], coverage)).toEqual([]);
+      expect(periodCuts({ since_period: '1974-06' }, ['A'], coverage)).toEqual([]);
+    });
+
+    it('names a period at the edge of coverage', () => {
+      expect(periodCuts({ since_period: '2025-06' }, ['A'], coverage)[0]?.period).toBe('2025');
+      expect(periodCuts({ until_period: '1975-06' }, ['A'], coverage)[0]?.period).toBe('1975');
+    });
+
+    it('decides from the bound test alone when coverage is absent or half-reported', () => {
+      expect(periodCuts({ until_period: '2031-06' }, ['A'])[0]?.period).toBe('2031');
+      expect(periodCuts({ until_period: '2031-06' }, ['A'], { oldest: '1975' })[0]?.period).toBe(
+        '2031',
+      );
+      expect(periodCuts({ since_period: '1974-06' }, ['A'], { latest: '2025' })[0]?.period).toBe(
+        '1974',
+      );
+    });
+
+    it('compares coverage reported in another frequency by day', () => {
+      expect(
+        periodCuts({ until_period: '2026-S2' }, ['W'], { oldest: '2000-W01', latest: '2026-W32' }),
+      ).toEqual([]);
+      expect(
+        periodCuts({ since_period: '2026-08' }, ['Q'], { oldest: '1983-01', latest: '2026-08' }),
+      ).toEqual([{ bounds: ['since_period'], frequency: 'quarterly', period: '2026-Q3' }]);
+    });
+
+    it('treats a coverage value it cannot parse as unreported', () => {
+      expect(
+        periodCuts({ until_period: '2031-06' }, ['A'], { latest: 'not a period' })[0]?.period,
+      ).toBe('2031');
+    });
+  });
+
+  describe('input it cannot read', () => {
+    it('skips a bound it cannot parse', () => {
+      expect(periodCuts({ since_period: 'banana' }, ['A'])).toEqual([]);
+    });
+
+    it('skips a frequency code with no calendar span', () => {
+      expect(
+        periodCuts({ since_period: '2022-06' }, ['H', '', '__proto__', 'constructor', 'a']),
+      ).toEqual([]);
+    });
+
+    it('still reads the bound it can parse beside one it cannot', () => {
+      expect(periodCuts({ since_period: 'banana', until_period: '2022-06' }, ['A'])).toEqual([
+        { bounds: ['until_period'], frequency: 'annual', period: '2022' },
+      ]);
+    });
+  });
+});
+
+describe('oneDayRange', () => {
+  for (const [since, until, date, next] of [
+    ['2022-06-15', '2022-06-15', '2022-06-15', '2022-06-16'],
+    ['2022-D166', '2022-D166', '2022-06-15', '2022-06-16'],
+    ['2022-06-15', '2022-D166', '2022-06-15', '2022-06-16'],
+    ['2022-D166', '2022-06-15', '2022-06-15', '2022-06-16'],
+    ['2022-06-30', '2022-06', '2022-06-30', '2022-07-01'],
+    ['2022-06-30', '2022-Q2', '2022-06-30', '2022-07-01'],
+    ['2022', '2022-01-01', '2022-01-01', '2022-01-02'],
+    ['2022-07', '2022-07-01', '2022-07-01', '2022-07-02'],
+    ['2022-12-31', '2022', '2022-12-31', '2023-01-01'],
+    ['2024-02-28', '2024-D059', '2024-02-28', '2024-02-29'],
+    ['2023-02-28', '2023-D059', '2023-02-28', '2023-03-01'],
+    ['2024-D366', '2024-12-31', '2024-12-31', '2025-01-01'],
+    ['2022-W23', '2022-06-06', '2022-06-06', '2022-06-07'],
+    ['2022-06-12', '2022-W23', '2022-06-12', '2022-06-13'],
+    ['1900-03-01', '1900-03', undefined, undefined],
+    ['0099-12-31', '0099', '0099-12-31', '0100-01-01'],
+  ] as const) {
+    it(`${since} to ${until}: ${date ?? 'not one day'}`, () => {
+      expect(oneDayRange({ since_period: since, until_period: until })).toEqual(
+        date ? { date, next } : undefined,
+      );
+    });
+  }
+
+  for (const [label, range] of [
+    ['two consecutive days', { since_period: '2022-06-15', until_period: '2022-06-16' }],
+    ['one month', { since_period: '2022-06', until_period: '2022-06' }],
+    ['one year', { since_period: '2022', until_period: '2022' }],
+    ['one week', { since_period: '2022-W23', until_period: '2022-W23' }],
+    ['a since bound alone', { since_period: '2022-06-15' }],
+    ['an until bound alone', { until_period: '2022-06-15' }],
+    ['no bound', {}],
+    ['a bound it cannot parse', { since_period: 'banana', until_period: '2022-06-15' }],
+  ] as const) {
+    it(`is not one day for ${label}`, () => {
+      expect(oneDayRange(range)).toBeUndefined();
+    });
+  }
+});
+
+describe('frequenciesOf', () => {
+  it('reads each frequency from the shape of its period codes', () => {
+    expect(
+      [
+        ...frequenciesOf([
+          '2022',
+          '2022-S1',
+          '2022-T2',
+          '2022-Q3',
+          '2022-06',
+          '2022-W23',
+          '2022-06-15',
+        ]),
+      ].sort(),
+    ).toEqual(['A', 'D', 'M', 'Q', 'S', 'T', 'W']);
+  });
+
+  it('collapses repeats and reads the letter in either case', () => {
+    expect([...frequenciesOf(['2022-q1', '2022-Q2', '2022-M01'])].sort()).toEqual(['M', 'Q']);
+  });
+
+  it('skips the blank column of a header-only table and any code of no known shape', () => {
+    expect([...frequenciesOf(['', 'H1', '2022-H1', '2022-Z9'])]).toEqual([]);
+  });
+});
+
+/** The rule the tools state: every row below is an acceptance case of the three-way split. */
+describe('diagnoseEmptyRange', () => {
+  const coverage = { oldest: '1975', latest: '2025' };
+  const NONE = {};
+
+  describe('a range that misses the reported coverage', () => {
+    for (const [since, until] of [
+      ['2030', '2031'],
+      ['1960', '1970'],
+      ['2030', undefined],
+      [undefined, '1960'],
+      ['2030-06', '2031-06'],
+    ] as const) {
+      it(`${since ?? '…'} to ${until ?? '…'}`, () => {
+        expect(
+          diagnoseEmptyRange({ since_period: since, until_period: until }, ['A'], coverage),
+        ).toEqual({ kind: 'outside_coverage', coverage });
+      });
+    }
+
+    it('misses on the one side coverage reports', () => {
+      expect(diagnoseEmptyRange({ since_period: '2030' }, ['A'], { latest: '2025' }).kind).toBe(
+        'outside_coverage',
+      );
+    });
+
+    it('takes a selection made with no bound as outside coverage, as it always was', () => {
+      expect(diagnoseEmptyRange({}, ['A'], coverage)).toEqual({
+        kind: 'outside_coverage',
+        coverage,
+      });
+    });
+  });
+
+  describe('a bound that falls inside a period', () => {
+    for (const [label, since, until, frequencies, cover, expected] of [
+      [
+        'each bound alone selects one',
+        '2022-06',
+        '2023-06',
+        ['A'],
+        coverage,
+        [
+          { bounds: ['since_period'], frequency: 'annual', period: '2022' },
+          { bounds: ['until_period'], frequency: 'annual', period: '2023' },
+        ],
+      ],
+      [
+        'one bound falls inside',
+        '2020-06',
+        '2020',
+        ['A'],
+        coverage,
+        [{ bounds: ['since_period'], frequency: 'annual', period: '2020' }],
+      ],
+      [
+        'the last covered period',
+        '2025-06',
+        '2031',
+        ['A'],
+        coverage,
+        [{ bounds: ['since_period'], frequency: 'annual', period: '2025' }],
+      ],
+      [
+        'the first covered period, the other bound past it',
+        '1974-06',
+        '1975-06',
+        ['A'],
+        coverage,
+        [{ bounds: ['until_period'], frequency: 'annual', period: '1975' }],
+      ],
+      [
+        'neither bound alone selects one',
+        '2022-06',
+        '2022-06',
+        ['A'],
+        coverage,
+        [{ bounds: ['since_period', 'until_period'], frequency: 'annual', period: '2022' }],
+      ],
+      [
+        'one day on annual data',
+        '2022-06-15',
+        '2022-06-15',
+        ['A'],
+        coverage,
+        [{ bounds: ['since_period', 'until_period'], frequency: 'annual', period: '2022' }],
+      ],
+      [
+        'the finest of a mixed frequency, with no coverage',
+        '2023-06-10',
+        '2023-06-20',
+        ['A', 'M'],
+        NONE,
+        [{ bounds: ['since_period', 'until_period'], frequency: 'monthly', period: '2023-06' }],
+      ],
+      [
+        'the coarser frequency when the finer one holds whole periods',
+        '2023-06',
+        '2023-12',
+        ['A'],
+        NONE,
+        [{ bounds: ['since_period'], frequency: 'annual', period: '2023' }],
+      ],
+    ] as const) {
+      it(label, () => {
+        expect(
+          diagnoseEmptyRange({ since_period: since, until_period: until }, [...frequencies], cover),
+        ).toEqual({ kind: 'no_whole_period', coverage: cover, cuts: expected });
+      });
+    }
+  });
+
+  describe('a range that overlaps coverage with no bound inside a period', () => {
+    for (const [label, since, until, frequencies, cover] of [
+      [
+        'a weekend',
+        '2022-06-18',
+        '2022-06-19',
+        ['D'],
+        { oldest: '1974-07-01', latest: '2026-10-31' },
+      ],
+      ['a survey gap', '2020', '2020', ['A'], { oldest: '2002', latest: '2022' }],
+      ['past a dataset that reports no coverage', '2031', '2032', ['A', 'M'], NONE],
+      ['a frequency the reply never lists', '2022-06', '2022-06', [], coverage],
+    ] as const) {
+      it(label, () => {
+        expect(
+          diagnoseEmptyRange({ since_period: since, until_period: until }, [...frequencies], cover),
+        ).toEqual({ kind: 'no_published_period', coverage: cover });
+      });
+    }
+
+    it('takes a suppressed cut as no bound inside a period', () => {
+      expect(
+        diagnoseEmptyRange({ since_period: '1974-06', until_period: '1975' }, ['A'], coverage).kind,
+      ).toBe('no_published_period');
+    });
+  });
+});
+
+describe('cutNotice', () => {
+  it('states the pinned sentence, in the literals the caller sent', () => {
+    expect(
+      cutNotice([{ bounds: ['since_period'], frequency: 'annual', period: '2022' }], {
+        since_period: '2022-06',
+        until_period: '2024',
+      }),
+    ).toBe(
+      'since_period "2022-06" falls inside annual period 2022, which Eurostat excludes: it keeps only periods wholly inside the range. since_period "2022" includes that period if this slice has it.',
+    );
+  });
+
+  it('names the bound that fell inside for an until cut', () => {
+    expect(
+      cutNotice([{ bounds: ['until_period'], frequency: 'semester', period: '2023-S2' }], {
+        until_period: '2023-08',
+      }),
+    ).toBe(
+      'until_period "2023-08" falls inside semester period 2023-S2, which Eurostat excludes: it keeps only periods wholly inside the range. until_period "2023-S2" includes that period if this slice has it.',
+    );
+  });
+
+  it('needs both bounds moved when both fall inside the one period', () => {
+    expect(
+      cutNotice(
+        [{ bounds: ['since_period', 'until_period'], frequency: 'annual', period: '2023' }],
+        { since_period: '2023-06', until_period: '2023-08' },
+      ),
+    ).toBe(
+      'since_period "2023-06" and until_period "2023-08" fall inside annual period 2023, which Eurostat excludes: it keeps only periods wholly inside the range. since_period "2023" and until_period "2023" together include that period if this slice has it.',
+    );
+  });
+
+  it('gives each cut its own sentence', () => {
+    const notice = cutNotice(
+      [
+        { bounds: ['since_period'], frequency: 'monthly', period: '2023-06' },
+        { bounds: ['since_period'], frequency: 'annual', period: '2023' },
+      ],
+      { since_period: '2023-06-15' },
+    );
+    expect(notice.match(/falls inside/g)).toHaveLength(2);
+    expect(notice).toContain('monthly period 2023-06');
+    expect(notice).toContain('annual period 2023');
   });
 });

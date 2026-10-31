@@ -8,6 +8,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { clampReadLimit } from '@/mcp-server/tools/clamp-read-limit.js';
+import { hoistDimensions } from '@/mcp-server/tools/hoist-dimensions.js';
 import { dimensionsToNarrow, narrowingAdvice } from '@/mcp-server/tools/narrowing-advice.js';
 import {
   acquireCanvas,
@@ -19,11 +20,17 @@ import {
   bulkRowSchema,
   getEurostatBulkService,
 } from '@/services/eurostat-bulk/eurostat-bulk-service.js';
-import type { BulkRow } from '@/services/eurostat-bulk/types.js';
+import { type BulkRow, TIME_COLUMN } from '@/services/eurostat-bulk/types.js';
 import { getEurostatDataService } from '@/services/eurostat-data/eurostat-data-service.js';
 import { dropUnsetFilters } from '@/services/eurostat-filters.js';
 import { outageAnswer } from '@/services/eurostat-outage.js';
-import { PERIOD_FORMS, resolvePeriods } from '@/services/eurostat-periods.js';
+import {
+  cutNotice,
+  frequenciesOf,
+  PERIOD_FORMS,
+  periodCuts,
+  resolvePeriods,
+} from '@/services/eurostat-periods.js';
 
 /** Upper bound on rows echoed inline, whatever preview_limit asks for. */
 const PREVIEW_MAX = 500;
@@ -75,13 +82,13 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
         .string()
         .optional()
         .describe(
-          `Start of the period range, inclusive, sent as startPeriod. Accepted forms: ${PERIOD_FORMS} (e.g., "2020", "2023-Q1", "2024-01"). Extra leading zeros after the letter are dropped ("2020-W001" is sent as "2020-W01"), a day of the year is sent as three digits ("2026-D1" as "2026-D001"), YYYY-A1 is sent as YYYY, and a period of another frequency is mapped onto the dataset's own. A malformed or non-existent period (e.g., "2020-13") is rejected as invalid_period. The most effective way to shrink a bulk response: it removes period columns from the TSV rather than blanking their cells.`,
+          `Start of the period range, inclusive, sent as startPeriod. Accepted forms: ${PERIOD_FORMS} (e.g., "2020", "2023-Q1", "2024-01"). Extra leading zeros after the letter are dropped ("2020-W001" is sent as "2020-W01"), a day of the year is sent as three digits ("2026-D1" as "2026-D001"), and YYYY-A1 is sent as YYYY. Any form works on any dataset, read as a span of days, but Eurostat keeps only periods wholly inside the range, per frequency: "2022-06" on annual data excludes 2022, which starts before the bound, and a notice names that period when the TSV header shows its frequency. A range whose first and last day are the same day is requested as that day and the next, and the next day is dropped before anything is counted or staged. A malformed or non-existent period (e.g., "2020-13") is rejected as invalid_period. The most effective way to shrink a bulk response: it removes period columns from the TSV rather than blanking their cells.`,
         ),
       until_period: z
         .string()
         .optional()
         .describe(
-          'End of the period range, inclusive (e.g., "2024"), sent as endPeriod, in the same forms as since_period. Omit for data through the latest available period. The range must hold at least one day: a since_period that starts after until_period ends is rejected as invalid_period, while pairs of different frequencies are fine ("2020-06" to "2020").',
+          'End of the period range, inclusive (e.g., "2024"), sent as endPeriod, in the same forms as since_period. Omit for data through the latest available period. A bound that falls inside a period excludes it here too: "2023-06" on annual data excludes 2023, which ends after the bound. The range must hold at least one day: a since_period that starts after until_period ends is rejected as invalid_period, and bounds of different frequencies are compared by day.',
         ),
       preview_limit: (clampLimits
         ? z.number().multipleOf(1).min(1)
@@ -186,16 +193,20 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
             .describe(
               'Dimension filters sent to Eurostat. Blank values and dimensions left with no value are dropped.',
             ),
-          sincePeriod: z.string().optional().describe('startPeriod applied, if any.'),
-          untilPeriod: z.string().optional().describe('endPeriod applied, if any.'),
-          url: z.string().describe('The SDMX request URL, so the download can be reproduced.'),
+          sincePeriod: z.string().optional().describe('since_period applied, if any.'),
+          untilPeriod: z.string().optional().describe('until_period applied, if any.'),
+          url: z
+            .string()
+            .describe(
+              'The SDMX request URL, so the download can be reproduced. A one-day range goes out as that day and the next, so its endPeriod is a day past untilPeriod.',
+            ),
         })
         .describe('The bulk request as the server built it.'),
       notice: z
         .string()
         .optional()
         .describe(
-          'Guidance on every download: the staged table with the required eurostat_dataframe_describe then eurostat_dataframe_query sequence (or, without a canvas, what was returned inline and what was discarded), preceded by byte-budget disclosure when the budget stopped the transfer and by the inline-preview length when preview_limit returns fewer rows than were downloaded.',
+          'Guidance on every download: the staged table with the required eurostat_dataframe_describe then eurostat_dataframe_query sequence (or, without a canvas, what was returned inline and what was discarded), preceded by a period a bound falls inside when the TSV header shows that frequency, by byte-budget disclosure when the budget stopped the transfer, and by the inline-preview length when preview_limit returns fewer rows than were downloaded.',
         ),
     },
 
@@ -238,9 +249,9 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
       {
         reason: 'invalid_dimension',
         code: JsonRpcErrorCode.ValidationError,
-        when: 'A filter names a dimension the dataset does not have, or a value or period range Eurostat rejects (SDMX faultcode 150).',
+        when: 'A filter names a dimension the dataset does not have, or a value Eurostat rejects, or the period range selects no period of the dataset (SDMX faultcode 150): it misses the coverage, or holds no whole period. The fault covers all of these; its TIME_PERIOD clause tells the period range apart.',
         recovery:
-          'Check dimension codes with eurostat_get_dataset_info and their values with eurostat_get_dimension_values, and keep the period range inside the dataset coverage.',
+          'Check dimension codes with eurostat_get_dataset_info and their values with eurostat_get_dimension_values, and keep the period range inside the dataset coverage, holding a whole period.',
         thrownBy: 'service',
       },
       {
@@ -271,7 +282,7 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
         code: JsonRpcErrorCode.NotFound,
         when: 'The download completed but carried no populated observation cells. Nothing is staged, and no canvas is created or touched.',
         recovery:
-          "Verify the filter values with eurostat_get_dimension_values and keep since_period/until_period inside the series' coverage — a combination that exists in no cell and a range that misses the series both download as an empty table.",
+          "Verify the filter values with eurostat_get_dimension_values and keep since_period/until_period inside the series' coverage, holding a whole period — a combination that exists in no cell and a range that misses the series both download as an empty table.",
       },
       {
         reason: 'extraction_too_big',
@@ -308,11 +319,12 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
       const input = { ...request, preview_limit: previewLimit.value };
       const bulk = getEurostatBulkService();
       // Trimmed, checked, and rewritten to canonical form: this is both what is sent and
-      // what appliedQuery echoes.
-      const periods = resolvePeriods({
+      // what appliedQuery echoes. The period notice quotes the literals as written.
+      const written = {
         since_period: input.since_period?.trim() || undefined,
         until_period: input.until_period?.trim() || undefined,
-      });
+      };
+      const periods = resolvePeriods(written);
       if (!periods.ok) {
         throw ctx.fail('invalid_period', periods.message);
       }
@@ -391,7 +403,7 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
               recovery: {
                 hint: `Eurostat returned a table with no populated cells for "${input.dataset_code}". Verify the filter values with eurostat_get_dimension_values — a combination present in no cell downloads as an empty body.${
                   range
-                    ? ` Also check that ${range} overlaps the series: a range outside the series' own coverage downloads as an empty table too.`
+                    ? ` Also check that ${range} overlaps the series and holds a whole period of it: Eurostat keeps only periods wholly inside the range, so a range outside the series' own coverage or inside one period downloads as an empty table too.`
                     : ''
                 }`,
               },
@@ -470,6 +482,15 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
        */
       ctx.enrich.total(stats.rowCount);
       const notices: string[] = previewLimit.notice ? [previewLimit.notice] : [];
+      if (sinceP || untilP) {
+        // The header is the only frequency signal: it shows a frequency only when a period
+        // of it is in range, so one it hides gets no notice. No coverage reaches the TSV.
+        const cuts = periodCuts(
+          { since_period: sinceP, until_period: untilP },
+          frequenciesOf(download.header.periods),
+        );
+        if (cuts.length > 0) notices.push(cutNotice(cuts, written));
+      }
       if (stats.budgetExceeded) {
         notices.push(
           `The byte budget stopped this transfer after ${stats.bytesRead.toLocaleString()} bytes, so these ${stats.rowCount.toLocaleString()} observations are the start of "${input.dataset_code}" and not all of it. Add dimension filters or a since_period/until_period range to fit the dataset inside the budget, or raise EUROSTAT_BULK_MAX_BYTES.`,
@@ -538,9 +559,18 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
           : '**Staged:** nothing — this deployment runs without a dataframe canvas, so only the rows below are retained',
       );
       lines.push('', `## First ${result.observations.length} observations`);
+      // dimensionsUsed leaves out the period column, which hoists like any other dimension.
+      // The value and flag columns are not candidates, so they stay on every row.
+      const { header, hoisted } = hoistDimensions(
+        result.observations,
+        [...result.dimensionsUsed, TIME_COLUMN],
+        (row, col) => (row[col] == null ? undefined : `${col}=${row[col]}`),
+      );
+      if (header) lines.push(header, '');
       for (const row of result.observations) {
         lines.push(
           Object.entries(row)
+            .filter(([col]) => !hoisted.has(col))
             .map(([col, value]) => `${col}=${value === null ? 'NULL' : value}`)
             .join(' | '),
         );
@@ -604,7 +634,11 @@ function mapBulkFailure(
       return {
         reason,
         message,
-        hint: `Check the dimension codes for "${datasetCode}" with eurostat_get_dataset_info and their values with eurostat_get_dimension_values, and keep since_period/until_period inside the dataset's coverage.`,
+        // The fault carries no frequency and no coverage, so this states the rule and names no bound.
+        hint:
+          data?.periodRange === true
+            ? `Eurostat keeps only periods wholly inside the range, so a bound that falls inside a period excludes it, and a range outside the dataset's coverage selects nothing. List the periods "${datasetCode}" publishes with eurostat_get_dimension_values, dimension "time", then set since_period/until_period on them.`
+            : `Check the dimension codes for "${datasetCode}" with eurostat_get_dataset_info and their values with eurostat_get_dimension_values, and keep since_period/until_period inside the dataset's coverage.`,
       };
     case 'filter_arity':
       return {

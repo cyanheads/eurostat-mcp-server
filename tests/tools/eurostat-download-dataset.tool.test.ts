@@ -6,6 +6,8 @@
  * @module tests/tools/eurostat-download-dataset.tool.test
  */
 
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
@@ -216,6 +218,25 @@ describe('eurostatDownloadDataset — with a canvas', () => {
     });
     const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
     expect(text).toMatch(/eurostat_dataframe_describe.*eurostat_dataframe_query/is);
+  });
+
+  it('counts the rows shown, not the download, in the hoist header of a staged result (#86)', async () => {
+    mockDownload(stubDownload(makeRows(4)));
+
+    const result = await runToolContract(eurostatDownloadDataset, {
+      dataset_code: 'nama_10_gdp',
+      preview_limit: 3,
+    });
+
+    expect(result.structuredContent).toMatchObject({
+      rowCount: 12,
+      stagedRowCount: 12,
+      tableName: expect.stringMatching(/^df_[0-9a-f]{8}$/),
+    });
+    const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+    expect(text.split('\n')).toContain(
+      '**Same in all 3 rows shown:** freq=A | unit=CP_MEUR | na_item=B1G | geo=G0',
+    );
   });
 
   it('returns a preview that is a prefix of the staged table, not a sample', async () => {
@@ -782,6 +803,259 @@ const unmockedFetch = async (input: unknown): Promise<Response> => {
   throw new Error(`Unmocked fetch: ${String(input)}`);
 };
 
+// ---------------------------------------------------------------------------
+// Single-valued dimension columns in content[] (#86). The rebuild parses the rendered
+// text back and compares it with structuredContent: format-parity's synthetic row
+// never reaches the hoisted path. hoistDimensions is tabled in the query tool's tests.
+// ---------------------------------------------------------------------------
+
+describe('eurostatDownloadDataset — single-valued dimension columns in content[] (#86)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(getEurostatBulkService).mockReturnValue(
+      new EurostatBulkService({} as never, {} as never),
+    );
+    setCanvas(undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const MEASURES = ['obs_value', 'obs_flag', 'obs_flag_label', 'conf_status', 'conf_status_label'];
+  const DS_MEASURES = ['obs_value', 'obs_value_text', ...MEASURES.slice(1)];
+
+  const parseColumns = (columns: string): Array<readonly [string, string]> =>
+    columns
+      .split(' | ')
+      .filter((cell) => cell !== '')
+      .map((cell) => {
+        const equals = cell.indexOf('=');
+        return [cell.slice(0, equals), cell.slice(equals + 1)];
+      });
+
+  const headerColumns = (text: string): string | undefined =>
+    text
+      .split('\n')
+      .map((line) => /^\*\*Same in all \d+ rows shown:\*\* (.*)$/.exec(line))
+      .find((match) => match)?.[1];
+
+  const rowLines = (text: string) =>
+    text.split('\n').filter((line) => /(^| \| )obs_value=/.test(line));
+
+  /** Every column of every row, read back from the header and that row's line alone. */
+  function rebuild(text: string): BulkRow[] {
+    const shared = parseColumns(headerColumns(text) ?? '');
+    return rowLines(text).map((line) =>
+      Object.fromEntries(
+        [...shared, ...parseColumns(line)].map(([column, value]) => [
+          column,
+          value === 'NULL' ? null : column === 'obs_value' ? Number(value) : value,
+        ]),
+      ),
+    );
+  }
+
+  /** The row section: what follows the `## First N observations` heading. */
+  const rowSection = (text: string) => text.slice(text.indexOf('observations\n') + 13);
+
+  const payload = (observations: BulkRow[]) => ({
+    datasetCode: 'nama_10_gdp',
+    dimensionsUsed: DIMENSIONS,
+    rowCount: observations.length,
+    missingCount: 0,
+    periodRange: { start: '2022', end: '2023' },
+    bytesRead: 4096,
+    compressed: false,
+    budgetExceeded: false,
+    observations,
+  });
+
+  describe('what stays as it was', () => {
+    it('renders a single row with every column on it', () => {
+      expect(rowSection(renderedText(payload([row('AT', '2022', 402767.1)])))).toBe(
+        'freq=A | unit=CP_MEUR | na_item=B1G | geo=AT | time=2022 | obs_value=402767.1 | obs_flag=NULL | obs_flag_label=NULL | conf_status=NULL | conf_status_label=NULL',
+      );
+    });
+
+    it('renders rows sharing no dimension column with every column on each row', () => {
+      const text = renderedText(
+        payload([
+          row('AT', '2022', 1),
+          { ...row('DE', '2023', 2), freq: 'Q', unit: 'PC_GDP', na_item: 'B1GQ' },
+        ]),
+      );
+      expect(rowSection(text)).toBe(
+        'freq=A | unit=CP_MEUR | na_item=B1G | geo=AT | time=2022 | obs_value=1 | obs_flag=NULL | obs_flag_label=NULL | conf_status=NULL | conf_status_label=NULL\nfreq=Q | unit=PC_GDP | na_item=B1GQ | geo=DE | time=2023 | obs_value=2 | obs_flag=NULL | obs_flag_label=NULL | conf_status=NULL | conf_status_label=NULL',
+      );
+    });
+
+    it('renders an empty preview with no header', () => {
+      expect(renderedText(payload([]))).not.toContain('rows shown');
+    });
+  });
+
+  const fixture = (name: string) =>
+    readFileSync(new URL(`../fixtures/${name}`, import.meta.url), 'utf8');
+
+  const REAL_DOWNLOADS = [
+    {
+      name: 'DS-059358, text values and confidential cells over one period',
+      body: () => fixture('comext/ds-059358-de-2022.tsv'),
+      datasetCode: 'DS-059358',
+      count: 58,
+      hoisted: ['freq', 'reporter', 'time'],
+      columns: ['product', 'indicators', ...DS_MEASURES],
+      sha256: 'a36fc6ca21bfd588d8bbdb9afdc594c8774458480ba47fa023811dcbc81a25a5',
+    },
+    {
+      name: 'DS-045409, products and months varying',
+      body: () => fixture('comext/ds-045409-de-us-m-2026-06-07.tsv'),
+      datasetCode: 'DS-045409',
+      count: 6,
+      hoisted: ['freq', 'reporter', 'partner', 'flow', 'indicators'],
+      columns: ['product', 'time', ...DS_MEASURES],
+      sha256: '9cbcd377199c7c6518de4ab10234448c02c65d9730bac97434e2e150f0878388',
+    },
+    {
+      name: 'nama_10_gdp, a flagged provisional value',
+      // Captured whole, CRLF line ends and padded cells included.
+      body: () =>
+        'freq,unit,na_item,geo\\TIME_PERIOD\t2022 \t2023 \r\nA,CP_MEUR,B1GQ,DE\t4010630.0 \t4254930.0 p\r\n',
+      datasetCode: 'nama_10_gdp',
+      count: 2,
+      hoisted: ['freq', 'unit', 'na_item', 'geo'],
+      columns: ['time', ...MEASURES],
+      sha256: '41ee8044906b1f2246323a2ef2c980d83577bd92471aa2597ca4133b399061cd',
+    },
+  ];
+
+  for (const { name, body, datasetCode, count, hoisted, columns, sha256 } of REAL_DOWNLOADS) {
+    describe(name, () => {
+      const call = async () => {
+        fetchMock.mockImplementation(async () => new Response(body(), { status: 200 }));
+        const result = await runToolContract(eurostatDownloadDataset, {
+          dataset_code: datasetCode,
+          preview_limit: 500,
+        });
+        expect(result.isError).not.toBe(true);
+        const structured = result.structuredContent as { observations: BulkRow[] };
+        expect(structured.observations).toHaveLength(count);
+        const text = result.content.map((b) => ('text' in b ? b.text : '')).join('\n');
+        return { structured, text };
+      };
+
+      it('rebuilds every row from the header and its line', async () => {
+        const { structured, text } = await call();
+        expect(rebuild(text)).toStrictEqual(structured.observations);
+        expect(rebuild(renderedText(structured as never))).toStrictEqual(structured.observations);
+      });
+
+      it('lists the single-valued dimension columns once and keeps the rest on each row', async () => {
+        const { text } = await call();
+        expect(parseColumns(headerColumns(text) ?? '').map(([column]) => column)).toEqual(hoisted);
+        expect(text).toContain(`**Same in all ${count} rows shown:**`);
+        expect(rowLines(text)).toHaveLength(count);
+        for (const line of rowLines(text)) {
+          expect(parseColumns(line).map(([column]) => column)).toEqual(columns);
+        }
+      });
+
+      it('leaves structuredContent untouched', async () => {
+        const { structured } = await call();
+        const digest = createHash('sha256').update(JSON.stringify(structured.observations));
+        expect(digest.digest('hex')).toBe(sha256);
+      });
+    });
+  }
+
+  it('hoists a dimension the preview shows one value of, stating it only of the rows shown', async () => {
+    fetchMock.mockImplementation(
+      async () => new Response(fixture('comext/ds-059358-de-2022.tsv'), { status: 200 }),
+    );
+    const call = async (preview_limit: number) => {
+      const result = await runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'DS-059358',
+        preview_limit,
+      });
+      return result.content.map((b) => ('text' in b ? b.text : '')).join('\n');
+    };
+
+    const whole = await call(500);
+    expect(headerColumns(whole)).not.toContain('product=');
+
+    const preview = await call(3);
+    expect(preview).toContain('## First 3 observations');
+    const named = preview.split('\n').filter((line) => line.includes('product=20143420'));
+    expect(named).toHaveLength(1);
+    expect(named[0]).toMatch(/^\*\*Same in all 3 rows shown:\*\* .*product=20143420/);
+  });
+
+  it('hoists a constant time column, which dimensionsUsed does not list', () => {
+    const text = renderedText(payload([row('AT', '2022', 1), row('DE', '2022', 2)]));
+    expect(headerColumns(text)).toBe('freq=A | unit=CP_MEUR | na_item=B1G | time=2022');
+    expect(rowLines(text)[0]).toMatch(/^geo=AT \| obs_value=1 \| /);
+  });
+
+  it('keeps the value and flag columns on every row, however constant', () => {
+    const flagged = {
+      ...row('AT', '2022', 7, 'p'),
+      conf_status: 'C',
+      conf_status_label: 'confidential',
+    };
+    const text = renderedText(payload([flagged, { ...flagged, geo: 'DE' }]));
+    expect(headerColumns(text)).toBe('freq=A | unit=CP_MEUR | na_item=B1G | time=2022');
+    for (const line of rowLines(text)) {
+      expect(line).toContain(
+        ' | obs_value=7 | obs_flag=p | obs_flag_label=provisional | conf_status=C | conf_status_label=confidential',
+      );
+    }
+  });
+
+  it('keeps a dimension column on the rows when a later row carries null', () => {
+    const rows = [
+      row('AT', '2022', 1),
+      row('DE', '2022', 2),
+      { ...row('FR', '2022', 3), unit: null },
+    ];
+    const text = renderedText(payload(rows));
+    expect(headerColumns(text)).toBe('freq=A | na_item=B1G | time=2022');
+    expect(rebuild(text)).toStrictEqual(rows);
+  });
+
+  it('keeps a dimension column on the rows when a later row lacks it', () => {
+    const { unit: _, ...lacking } = row('FR', '2022', 3);
+    const rows = [row('AT', '2022', 1), row('DE', '2022', 2), lacking];
+    const text = renderedText(payload(rows));
+    expect(headerColumns(text)).toBe('freq=A | na_item=B1G | time=2022');
+    expect(rebuild(text)).toStrictEqual(rows);
+  });
+
+  it('never states a dimension column that is null on every row', () => {
+    const rows = [
+      { ...row('AT', '2022', 1), unit: null },
+      { ...row('DE', '2022', 2), unit: null },
+    ];
+    const text = renderedText(payload(rows));
+    expect(headerColumns(text)).toBe('freq=A | na_item=B1G | time=2022');
+    expect(rebuild(text)).toStrictEqual(rows);
+  });
+
+  it('states rows shown on a download the byte budget cut short', () => {
+    const text = renderedText({
+      ...payload([row('AT', '2022', 1), row('AT', '2023', 2)]),
+      budgetExceeded: true,
+      rowCount: 900,
+    });
+    expect(text).toContain(
+      '**Same in all 2 rows shown:** freq=A | unit=CP_MEUR | na_item=B1G | geo=AT',
+    );
+  });
+});
+
 describe('eurostatDownloadDataset — period inputs and SDMX faults (real bulk service)', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
@@ -1300,6 +1574,66 @@ describe('eurostatDownloadDataset — period inputs and SDMX faults (real bulk s
       },
     });
   });
+
+  describe('the structure read behind an extraction_too_big (#85)', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      // Far past the deadline on both, so neither default stall timeout can end a read for it.
+      vi.spyOn(serverConfig, 'getServerConfig').mockReturnValue({
+        ...serverConfig.getServerConfig(),
+        requestTimeoutMs: 600_000,
+        metadataTimeoutMs: 600_000,
+      });
+      vi.mocked(getEurostatDataService).mockReturnValue(
+        new EurostatDataService({} as never, {} as never),
+      );
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+
+    it('gives up on a read that never answers at 5 s, keeping the refusal', async () => {
+      const refusal = readFileSync(
+        new URL('../fixtures/comext/ds-045409-fault-413.xml', import.meta.url),
+        'utf8',
+      );
+      fetchMock.mockImplementation(async (input: unknown, init?: RequestInit) =>
+        new URL(String(input)).pathname.includes('/sdmx/2.1/datastructure/')
+          ? new Promise<Response>((_resolve, reject) => {
+              init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+                once: true,
+              });
+            })
+          : new Response(refusal, { status: 413 }),
+      );
+      let settled = false;
+      const pending = runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'earn_ses_annual',
+      }).finally(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(true);
+
+      const result = await pending;
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          data: {
+            reason: 'extraction_too_big',
+            recovery: {
+              hint: expect.stringContaining(
+                'Add dimension filters — eurostat_get_dataset_info lists the dimensions of "earn_ses_annual"',
+              ),
+            },
+          },
+        },
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1630,5 +1964,354 @@ describe('eurostatDownloadDataset — enrichment trailer', () => {
     const render = eurostatDownloadDataset.enrichmentTrailer?.appliedQuery?.render;
     const text = render?.({ filters: {}, url: 'https://example.invalid/x' } as never);
     expect(text).toContain('whole dataset');
+  });
+});
+
+/** Every TSV and fault below is a live reply to the bounds its test sends. */
+describe('eurostatDownloadDataset — what Eurostat keeps of a period range (#84, #88)', () => {
+  const NAMA_2023_2024 =
+    'freq,unit,na_item,geo\\TIME_PERIOD\t2023 \t2024 \r\nA,CP_MEUR,B1GQ,DE\t4254930.0 p\t4386940.0 p\r\n';
+  const NAMA_2022_2023 =
+    'freq,unit,na_item,geo\\TIME_PERIOD\t2022 \t2023 \r\nA,CP_MEUR,B1GQ,DE\t4010630.0 \t4254930.0 p\r\n';
+  const NAMA_2024_2025 =
+    'freq,unit,na_item,geo\\TIME_PERIOD\t2024 \t2025 \r\nA,CP_MEUR,B1GQ,DE\t4386940.0 p\t4529710.0 p\r\n';
+  const NRG_FROM_S2 =
+    'freq,siec,nrg_cons,unit,tax,currency,geo\\TIME_PERIOD\t2022-S2 \t2023-S1 \t2023-S2 \r\nS,E7000,KWH2500-4999,KWH,I_TAX,EUR,DE\t0.3357 \t0.4125 \t0.4020 \r\n';
+  const NRG_FROM_S1 =
+    'freq,siec,nrg_cons,unit,tax,currency,geo\\TIME_PERIOD\t2022-S1 \t2022-S2 \t2023-S1 \t2023-S2 \r\nS,E7000,KWH2500-4999,KWH,I_TAX,EUR,DE\t0.3279 \t0.3357 \t0.4125 \t0.4020 \r\n';
+  const DS_HEADER_ONLY = 'freq,reporter,partner,product,flow,indicators\\TIME_PERIOD\t\r\n';
+  const RATES = 'freq,statinfo,unit,currency\\TIME_PERIOD';
+  const WEDNESDAY_THURSDAY = `${RATES}\t2022-06-15 \t2022-06-16 \r\nD,AVG,NAC,USD\t1.0431 \t1.0400 \r\n`;
+  const MONDAY_ONLY = `${RATES}\t2022-06-20 \r\nD,AVG,NAC,USD\t1.0517 \r\n`;
+
+  const tsv = (name: string) =>
+    readFileSync(new URL(`../fixtures/${name}.tsv`, import.meta.url), 'utf8');
+  const fault150 = (tail: string) =>
+    soapFault(
+      '150',
+      `INVALID_QUERY_DIMENSION_VALUE: Query is invalid as per its structure&apos;s definition. The following values for dimension are not allowed: ${tail}`,
+    );
+  const inside = (literal: string, label: string, period: string, bound = 'since_period') =>
+    `${bound} "${literal}" falls inside ${label} period ${period}, which Eurostat excludes: it keeps only periods wholly inside the range. ${bound} "${period}" includes that period if this slice has it.`;
+
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(getEurostatBulkService).mockReturnValue(
+      new EurostatBulkService({} as never, {} as never),
+    );
+    setCanvas(undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const download = (
+    body: string,
+    dataset_code: string,
+    since_period: string,
+    until_period: string,
+    status = 200,
+  ) => {
+    fetchMock.mockImplementationOnce(async () => new Response(body, { status }));
+    return runToolContract(eurostatDownloadDataset, { dataset_code, since_period, until_period });
+  };
+  const requested = (): URL => new URL(String(fetchMock.mock.calls[0]?.[0]));
+  const text = (result: { content: Array<{ type: string; text?: string }> }) =>
+    result.content.map((block) => block.text ?? '').join('\n');
+  const noticeOf = (result: { structuredContent?: unknown }) =>
+    (result.structuredContent as { notice?: string }).notice ?? '';
+  const failureOf = (result: { structuredContent?: unknown }) => {
+    const { error } = result.structuredContent as {
+      error: { data: { reason: string; recovery: { hint: string } }; message: string };
+    };
+    return { hint: error.data.recovery.hint, message: error.message, reason: error.data.reason };
+  };
+
+  describe('a bound that falls inside a period, on a success', () => {
+    for (const [label, body, dataset, since, until, rowCount, notice] of [
+      [
+        'annual data (step 1)',
+        NAMA_2023_2024,
+        'nama_10_gdp',
+        '2022-06',
+        '2024',
+        2,
+        inside('2022-06', 'annual', '2022'),
+      ],
+      [
+        'semester data (step 4)',
+        NRG_FROM_S2,
+        'nrg_pc_204',
+        '2022-06',
+        '2023',
+        3,
+        inside('2022-06', 'semester', '2022-S1'),
+      ],
+      [
+        'a coarser bound on weekly data',
+        tsv('demo-r-mwk-ts-de-2022-to-2023'),
+        'demo_r_mwk_ts',
+        '2022',
+        '2023',
+        104,
+        inside('2022', 'weekly', '2021-W52'),
+      ],
+      [
+        'annual only on mixed frequencies',
+        tsv('comext/ds-045409-de-fr-2023-06-to-2024'),
+        'DS-045409',
+        '2023-06',
+        '2024',
+        40,
+        inside('2023-06', 'annual', '2023'),
+      ],
+    ] as const) {
+      it(`names it on ${label}, on both surfaces and with the same rows`, async () => {
+        const result = await download(body, dataset, since, until);
+        expect(result.isError).not.toBe(true);
+        expect(result.structuredContent).toMatchObject({ rowCount });
+        expect(noticeOf(result)).toContain(notice);
+        expect(text(result)).toContain(notice);
+        expect(requested().searchParams.get('startPeriod')).toBe(since);
+        expect(requested().searchParams.get('endPeriod')).toBe(until);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      });
+    }
+
+    for (const [label, body, dataset, since, until] of [
+      ['a year on annual data', NAMA_2022_2023, 'nama_10_gdp', '2022', '2023'],
+      ['a month starting a semester', NRG_FROM_S1, 'nrg_pc_204', '2022-01', '2023'],
+      [
+        'an annual period the header hides',
+        tsv('comext/ds-045409-de-fr-2023-06-to-2023-12'),
+        'DS-045409',
+        '2023-06',
+        '2023-12',
+      ],
+    ] as const) {
+      it(`stays silent for ${label}`, async () => {
+        const result = await download(body, dataset, since, until);
+        expect(result.isError).not.toBe(true);
+        expect(noticeOf(result)).not.toContain('falls inside');
+        expect(text(result)).not.toContain('falls inside');
+      });
+    }
+
+    it('decides from the bound alone, the TSV reporting no coverage', async () => {
+      const result = await download(NAMA_2024_2025, 'nama_10_gdp', '2024', '2031-06');
+      expect(noticeOf(result)).toContain(inside('2031-06', 'annual', '2031', 'until_period'));
+    });
+
+    it('stays silent with no bound', async () => {
+      fetchMock.mockImplementationOnce(async () => new Response(NAMA_2022_2023, { status: 200 }));
+      const result = await runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'nama_10_gdp',
+      });
+      expect(noticeOf(result)).not.toContain('falls inside');
+    });
+
+    it('quotes the literal as the caller sent it, trimmed', async () => {
+      const result = await download(NAMA_2023_2024, 'nama_10_gdp', ' 2022-Q02 ', '2024');
+      expect(requested().searchParams.get('startPeriod')).toBe('2022-Q2');
+      expect(noticeOf(result)).toContain(inside('2022-Q02', 'annual', '2022'));
+    });
+
+    it('keeps the staging sentences beside the notice', async () => {
+      const result = await download(NAMA_2023_2024, 'nama_10_gdp', '2022-06', '2024');
+      expect(noticeOf(result)).toContain('without a dataframe canvas');
+    });
+  });
+
+  describe('fault 150 on the period range', () => {
+    const RANGE_HINT =
+      'Eurostat keeps only periods wholly inside the range, so a bound that falls inside a period excludes it, and a range outside the dataset\'s coverage selects nothing. List the periods "nama_10_gdp" publishes with eurostat_get_dimension_values, dimension "time", then set since_period/until_period on them.';
+
+    for (const [label, tail, since, until] of [
+      [
+        'both bounds (step 3)',
+        'TIME_PERIOD: &gt;=2022-06-01 and &lt;=2023-06-30.',
+        '2022-06',
+        '2023-06',
+      ],
+      [
+        'a range past coverage',
+        'TIME_PERIOD: &gt;=2030-01-01 and &lt;=2031-12-31.',
+        '2030',
+        '2031',
+      ],
+    ] as const) {
+      it(`keeps invalid_dimension, about the range: ${label}`, async () => {
+        const result = await download(fault150(tail), 'nama_10_gdp', since, until, 400);
+        const failure = failureOf(result);
+        expect(failure.reason).toBe('invalid_dimension');
+        expect(failure.message).toBe(
+          'Eurostat rejected the period range for "nama_10_gdp": it selects no period of the dataset (fault 150).',
+        );
+        expect(failure.hint).toBe(RANGE_HINT);
+        expect(text(result)).toContain(failure.hint);
+      });
+    }
+
+    for (const tail of ['GEO=QQ.', 'GEO=QQ, UNIT=FAKE.', 'REPORTER=QQ.', 'GEO=TIME_PERIOD:.']) {
+      it(`keeps the filter hint for ${tail}`, async () => {
+        const failure = failureOf(
+          await download(fault150(tail), 'nama_10_gdp', '2022', '2023', 400),
+        );
+        expect(failure.reason).toBe('invalid_dimension');
+        expect(failure.hint).toBe(
+          'Check the dimension codes for "nama_10_gdp" with eurostat_get_dataset_info and their values with eurostat_get_dimension_values, and keep since_period/until_period inside the dataset\'s coverage.',
+        );
+      });
+    }
+
+    it('never shows a one-day caller the next day it did not send', async () => {
+      const result = await download(
+        fault150('TIME_PERIOD: &gt;=2022-06-15 and &lt;=2022-06-16.'),
+        'nama_10_gdp',
+        '2022-06-15',
+        '2022-06-15',
+        400,
+      );
+      const failure = failureOf(result);
+      expect(failure.reason).toBe('invalid_dimension');
+      expect(failure.hint).toBe(RANGE_HINT);
+      expect(`${failure.message} ${failure.hint} ${text(result)}`).not.toContain('2022-06-16');
+    });
+
+    it('treats a Saturday the same way, its Sunday published nothing either', async () => {
+      const failure = failureOf(
+        await download(
+          fault150('TIME_PERIOD: &gt;=2022-06-18 and &lt;=2022-06-19.'),
+          'ert_bil_eur_d',
+          '2022-06-18',
+          '2022-06-18',
+          400,
+        ),
+      );
+      expect(failure.reason).toBe('invalid_dimension');
+      expect(failure.message).toContain('selects no period');
+    });
+  });
+
+  describe('a table with no rows', () => {
+    it('fails a header-only table as no_results, with the rule in its hint', async () => {
+      const result = await download(DS_HEADER_ONLY, 'DS-045409', '2023-06', '2023-12');
+      const failure = failureOf(result);
+      expect(failure.reason).toBe('no_results');
+      expect(failure.hint).toContain('Eurostat keeps only periods wholly inside the range');
+      expect(failure.hint).toContain('since_period "2023-06" and until_period "2023-12"');
+      expect(text(result)).toContain('Eurostat keeps only periods wholly inside the range');
+    });
+
+    it('fails a one-day download whose reply holds only the next day the same way', async () => {
+      const result = await download(MONDAY_ONLY, 'ert_bil_eur_d', '2022-06-19', '2022-06-19');
+      const failure = failureOf(result);
+      expect(failure.reason).toBe('no_results');
+      expect(failure.hint).toContain('since_period "2022-06-19" and until_period "2022-06-19"');
+      expect(`${failure.message} ${failure.hint}`).not.toContain('2022-06-20');
+    });
+  });
+
+  describe('a one-day range', () => {
+    for (const [since, until] of [
+      ['2022-06-15', '2022-06-15'],
+      ['2022-D166', '2022-D166'],
+      ['2022-06-15', '2022-D166'],
+    ] as const) {
+      it(`returns the one row for ${since} to ${until} (#88 step 2)`, async () => {
+        const result = await download(WEDNESDAY_THURSDAY, 'ert_bil_eur_d', since, until);
+        expect(requested().searchParams.get('startPeriod')).toBe('2022-06-15');
+        expect(requested().searchParams.get('endPeriod')).toBe('2022-06-16');
+        expect(result.structuredContent).toMatchObject({
+          rowCount: 1,
+          missingCount: 0,
+          totalCount: 1,
+          periodRange: { start: '2022-06-15', end: '2022-06-15' },
+        });
+        const { observations } = result.structuredContent as {
+          observations: Array<{ time: string }>;
+        };
+        expect(observations.map((row) => row.time)).toEqual(['2022-06-15']);
+        expect(text(result)).toContain('**Observations:** 1 (0 missing)');
+        expect(text(result)).not.toMatch(/time=2022-06-16/);
+      });
+    }
+
+    it('echoes the bounds as the caller set them, and the request as it went out', async () => {
+      const result = await download(WEDNESDAY_THURSDAY, 'ert_bil_eur_d', '2022-D166', '2022-06-15');
+      const { appliedQuery } = result.structuredContent as {
+        appliedQuery: { sincePeriod: string; untilPeriod: string; url: string };
+      };
+      expect(appliedQuery.sincePeriod).toBe('2022-D166');
+      expect(appliedQuery.untilPeriod).toBe('2022-06-15');
+      expect(appliedQuery.url).toContain('endPeriod=2022-06-16');
+    });
+
+    it('leaves two consecutive days as the bounds (#88 step 4)', async () => {
+      const result = await download(
+        WEDNESDAY_THURSDAY,
+        'ert_bil_eur_d',
+        '2022-06-15',
+        '2022-06-16',
+      );
+      expect(requested().searchParams.get('startPeriod')).toBe('2022-06-15');
+      expect(requested().searchParams.get('endPeriod')).toBe('2022-06-16');
+      expect(result.structuredContent).toMatchObject({ rowCount: 2 });
+    });
+
+    it('stages the day alone', async () => {
+      const { canvas, teardown } = withRealCanvas();
+      try {
+        setCanvas(canvas);
+        fetchMock.mockImplementationOnce(
+          async () => new Response(WEDNESDAY_THURSDAY, { status: 200 }),
+        );
+        const ctx = createMockContext({
+          errors: eurostatDownloadDataset.errors,
+          tenantId: 'default',
+        });
+        const result = await eurostatDownloadDataset.handler(
+          eurostatDownloadDataset.input.parse({
+            dataset_code: 'ert_bil_eur_d',
+            since_period: '2022-06-15',
+            until_period: '2022-06-15',
+          }),
+          ctx,
+        );
+        expect(result.stagedRowCount).toBe(1);
+        const instance = await canvas.acquire(result.canvasId, ctx);
+        const staged = await instance.query(
+          `SELECT time, obs_value FROM ${result.tableName} ORDER BY time`,
+        );
+        expect(staged.rows).toEqual([{ time: '2022-06-15', obs_value: 1.0431 }]);
+      } finally {
+        await teardown();
+      }
+    });
+  });
+
+  describe('the descriptions', () => {
+    const since = eurostatDownloadDataset.input.shape.since_period.description ?? '';
+    const until = eurostatDownloadDataset.input.shape.until_period.description ?? '';
+
+    it('state the wholly-inside rule', () => {
+      expect(since).toContain('Eurostat keeps only periods wholly inside the range');
+      expect(until).toContain('falls inside a period');
+    });
+
+    it('state how a one-day range is sent', () => {
+      expect(since).toMatch(/same day is requested as that day and the next/);
+    });
+
+    it('claim no mapping and offer no range that holds nothing as a working example', () => {
+      for (const description of [since, until]) {
+        expect(description).not.toMatch(/mapped onto/);
+        expect(description).not.toMatch(/"2020-06" to "2020"/);
+      }
+    });
   });
 });

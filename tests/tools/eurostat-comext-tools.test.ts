@@ -207,9 +207,8 @@ describe('eurostat_query_dataset on DS-* codes (#46)', () => {
     expect(at('20143430', 'QNTUNIT')).toMatchObject({ value: null, valueText: 'KG' });
     expect(at('20143430', 'PVALFLAG')).toMatchObject({ value: null, confStatus: { code: 'C' } });
     expect(at('20143430', 'EXPVAL')).toMatchObject({ value: 32868973 });
-    expect(text(result)).toMatch(
-      /indicators=QNTUNIT \(Quantity unit\) \| time=2022 \(2022\) → N\/A \[valueText "KG"\]/,
-    );
+    expect(text(result)).toMatch(/indicators=QNTUNIT \(Quantity unit\) → N\/A \[valueText "KG"\]/);
+    expect(text(result)).toMatch(/^\*\*Same in all \d+ rows shown:\*\* .*\| time=2022 \(2022\)$/m);
     expect(text(result)).toMatch(/indicators=PVALFLAG .*→ N\/A \[CONF_STATUS C: confidential\]/);
   });
 
@@ -375,9 +374,8 @@ describe('eurostat_download_dataset on DS-* codes and fault 413 (#46)', () => {
       obs_value: null,
       obs_value_text: 'KG',
     });
-    expect(text(result)).toContain(
-      'indicators=QNTUNIT | time=2022 | obs_value=NULL | obs_value_text=KG',
-    );
+    expect(text(result)).toContain('indicators=QNTUNIT | obs_value=NULL | obs_value_text=KG');
+    expect(text(result)).toMatch(/^\*\*Same in all \d+ rows shown:\*\* .*\| time=2022$/m);
     const instance = await canvas.acquire(canvasId, createMockContext({ tenantId: 'default' }));
     const counts = await instance.query(
       `SELECT count(*) FILTER (WHERE obs_value_text = 'KG') AS kg, count(*) FILTER (WHERE conf_status = 'C') AS c, count(*) FILTER (WHERE obs_value IS NOT NULL) AS numbers FROM ${tableName}`,
