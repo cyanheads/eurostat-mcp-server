@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.11.2](changelog/0.11.x/0.11.2.md) — 2026-11-02
+
+eurostat_query_dataset and eurostat_download_dataset report absentCellCount, the periods a series lacks; the dataset resource's errors carry recovery hints; a search no_match names the query words that match no catalogue entry; the download's periodRange spans observations only; an HTTP 501 gets its own hint.
+
 ## [0.11.1](changelog/0.11.x/0.11.1.md) — 2026-10-31
 
 Period bounds that fall inside a period now say so, one-day ranges select that day instead of the whole series, a query whose geo_level selects nothing names it as the likely cause, the dimension-values hint offers only levels the dataset lists, and result rows stop repeating single-valued dimensions.

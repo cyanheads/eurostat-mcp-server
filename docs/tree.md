@@ -1,6 +1,6 @@
 # eurostat-mcp-server - Directory Structure
 
-Generated on: 2026-10-31 20:40:39
+Generated on: 2026-11-03 03:52:29
 
 ```text
 eurostat-mcp-server/
@@ -238,6 +238,8 @@ eurostat-mcp-server/
 │   │   ├── nama-10-gdp-de-2022-06-to-2024.json
 │   │   ├── nama-10-gdp-de-2022.json
 │   │   ├── nama-10-gdp-de-2024-to-2031-06.json
+│   │   ├── nama-10-gdp-de-fr-1975-to-1995.json
+│   │   ├── nama-10-gdp-de-fr-1975-to-1995.tsv
 │   │   ├── nama-10-gdp-de-no-period.json
 │   │   ├── nama-10-gdp-de-since-2030.json
 │   │   ├── nama-10-gdp-de-until-1980.json
