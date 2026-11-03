@@ -226,7 +226,12 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
       missingObsCount: z
         .number()
         .describe(
-          'Number of matched observations carrying no numeric value, counted across everything matched rather than only the returned rows. Covers both unavailable and withheld cells — a slice can be wholly confidential, so this equalling obsCount does not mean the data is absent.',
+          'Number of matched observations carrying no numeric value, counted across everything matched rather than only the returned rows. Covers both unavailable and withheld cells — a slice can be wholly confidential, so this equalling obsCount does not mean the data is absent. A missing observation is a cell Eurostat publishes without a number (with a flag, a confidentiality marker, or text); a period of a frequency the series carries in which it has no cell at all is an absent cell, counted in absentCellCount instead.',
+        ),
+      absentCellCount: z
+        .number()
+        .describe(
+          'Periods the matched series lack: for each series (one combination of the non-time dimensions) with at least one cell in the match, the periods of a frequency it carries in which Eurostat publishes no cell for it, with no value and no flag. Absent cells are not observations, so obsCount, missingObsCount, observations and staged rows leave them out. A series lacks no period of a frequency it does not carry: an annual series beside a monthly one lacks no months. 0 when every series has a cell in every period of its frequencies.',
         ),
       unmatchedValues: z
         .record(z.string(), z.array(z.string()))
@@ -253,7 +258,7 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
         .string()
         .optional()
         .describe(
-          'Composed guidance for a period a bound falls inside, which Eurostat excludes, unmatched filter values, selected last_n_periods positions with no populated cells, inline previews, staging and unavailable explicit staging. Period gaps list up to the newest 24 periods with an omitted count; staged matches give the describe-then-query sequence. Omitted when none of these disclosures applies.',
+          'Composed guidance for a period a bound falls inside, which Eurostat excludes, unmatched filter values, selected last_n_periods positions with no populated cells, absent cells (periods a series lacks, with how many series lack any), inline previews, staging and unavailable explicit staging. Period gaps list up to the newest 24 periods with an omitted count; staged matches give the describe-then-query sequence. Omitted when none of these disclosures applies.',
         ),
     },
 
@@ -456,7 +461,8 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
 
       // The service bounds `observations` to the requested preview, so its length says nothing
       // about match size. `obsCount` is the full total and is what truncation turns on.
-      const { appliedFilters, periodCuts, rows, unpopulatedPeriods, ...queryResult } = result;
+      const { absentSeries, appliedFilters, periodCuts, rows, unpopulatedPeriods, ...queryResult } =
+        result;
       const truncated = result.obsCount > OBS_CAP;
 
       /**
@@ -499,6 +505,7 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
         obsCount: result.obsCount,
         truncated,
         missingObsCount: result.missingObsCount,
+        absentCellCount: result.absentCellCount,
         ...(staged && { canvasId: staged.canvasId, tableName: staged.tableName }),
       });
 
@@ -522,6 +529,11 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
         const omitted = unpopulatedPeriods.length - listed.length;
         notices.push(
           `${countOf(unpopulatedPeriods.length, 'selected period')} (${listed.join(', ')}${omitted ? `; ${countOf(omitted, 'earlier period')} omitted` : ''}) ${unpopulatedPeriods.length === 1 ? 'carries' : 'carry'} no populated cells anywhere in this match. last_n_periods counts dataset time positions, not periods with populated cells for this slice; preview_limit does not select periods. Increase last_n_periods, or replace last_n_periods with until_period ending at a period this slice has published.`,
+        );
+      }
+      if (absentSeries) {
+        notices.push(
+          `${countOf(result.absentCellCount, 'absent cell')} in ${absentSeries.affected.toLocaleString()} of ${absentSeries.total.toLocaleString()} series: periods a series lacks at a frequency it carries (no value, no flag). They are not observations: obsCount, missingObsCount, the rows and any staged table leave them out, so a per-period total across series covers only the series present.`,
         );
       }
       if (input.stage && !availableCanvas) {
@@ -566,7 +578,7 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
           : ' — the match crossed the 5,000-row staging threshold. Add dimension filters or a period range to reduce the match.';
       const lines: string[] = [
         `# ${result.datasetLabel} (\`${result.datasetCode}\`)`,
-        `**Observations:** ${result.obsCount} (${result.missingObsCount} missing) | **Period:** ${period}`,
+        `**Observations:** ${result.obsCount} (${result.missingObsCount} missing) | **Period:** ${period} | **Absent cells:** ${result.absentCellCount}`,
         `**Truncated:** ${result.truncated}${truncationNote}`,
         `**Dimensions:** ${result.dimensionsUsed.join(', ')}`,
       ];

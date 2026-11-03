@@ -12,6 +12,7 @@
  * @module tests/services/eurostat-bulk-service.test
  */
 
+import { readFileSync } from 'node:fs';
 import { gzipSync } from 'node:zlib';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
@@ -37,6 +38,7 @@ import {
   parseHeader,
 } from '@/services/eurostat-bulk/eurostat-bulk-service.js';
 import type { BulkRow, BulkStats, TsvHeader } from '@/services/eurostat-bulk/types.js';
+import { comextFixture } from '../helpers/comext-fixtures.js';
 
 const mockConfig = {} as never;
 const mockStorage = {} as never;
@@ -977,6 +979,42 @@ describe('EurostatBulkService — a one-day range (#88)', () => {
     expect(stats.missingCount).toBe(1);
   });
 
+  it('keeps an unflagged ":" in the kept column as its row, with no period carrying an observation (#93)', async () => {
+    const { rows, stats } = await download(
+      WEDNESDAY_THURSDAY.replace('1.0431 ', ': '),
+      '2022-06-15',
+      '2022-06-15',
+    );
+    expect(rows).toEqual([
+      expect.objectContaining({ time: '2022-06-15', obs_value: null, obs_flag: null }),
+    ]);
+    expect(stats).toMatchObject({ rowCount: 1, missingCount: 1 });
+    expect(stats.periodsSeen).toEqual([]);
+  });
+
+  it('counts an unflagged ":" only against the kept column (#90)', async () => {
+    // The kept day is unflagged and the dropped day carries a value; then the reverse.
+    const keptMissing = await download(
+      WEDNESDAY_THURSDAY.replace('1.0431 ', ': '),
+      '2022-06-15',
+      '2022-06-15',
+    );
+    expect(keptMissing.stats.absentCellCount).toBe(0);
+    const droppedMissing = await download(
+      WEDNESDAY_THURSDAY.replace('1.0400 ', ': '),
+      '2022-06-15',
+      '2022-06-15',
+    );
+    expect(droppedMissing.stats.absentCellCount).toBe(0);
+    // Both days kept: the Thursday is a day the daily series lacks.
+    const bothKept = await download(
+      WEDNESDAY_THURSDAY.replace('1.0400 ', ': '),
+      '2022-06-15',
+      '2022-06-16',
+    );
+    expect(bothKept.stats.absentCellCount).toBe(1);
+  });
+
   it('keeps that day across every series of the table', async () => {
     const { rows } = await download(
       `${WEDNESDAY_THURSDAY}D,AVG,NAC,GBP\t0.8585 \t0.8590 \r\n`,
@@ -1001,6 +1039,250 @@ describe('EurostatBulkService — a one-day range (#88)', () => {
     expect(stats.rowCount).toBe(0);
     expect(stats.missingCount).toBe(0);
     expect(stats.periodsSeen).toEqual([]);
+  });
+});
+
+/**
+ * An unflagged `:` (no flag, no status, no text) is a period the series lacks: the
+ * Statistics API has no cell there. The recorded body is `nama_10_gdp` DE+FR, CP_MEUR,
+ * B1GQ, 1975–1995, where Germany starts in 1991 and its 16 earlier cells are bare `:`.
+ */
+describe('EurostatBulkService — unflagged ":" cells (#90, #93)', () => {
+  const NAMA_DE_FR = readFileSync(
+    new URL('../fixtures/nama-10-gdp-de-fr-1975-to-1995.tsv', import.meta.url),
+    'utf8',
+  );
+  const [NAMA_HEADER = '', DE_LINE = '', FR_LINE = ''] = NAMA_DE_FR.split('\n');
+  const NAMA_DE = `${NAMA_HEADER}\n${DE_LINE}\n`;
+  /** `DS-045409`, annual beside monthly with `freq` unfiltered: each series pads the other's periods. */
+  const MIXED = comextFixture('ds-045409-de-fr-2023-06-to-2024.tsv');
+  const YEARS = Array.from({ length: 21 }, (_, i) => String(1975 + i));
+
+  let svc: EurostatBulkService;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    svc = new EurostatBulkService(mockConfig, mockStorage);
+  });
+
+  const downloadOf = async (body: string | Uint8Array[], dataset = 'nama_10_gdp') => {
+    mockBody(typeof body === 'string' ? [utf8(body)] : body);
+    return drain(svc, dataset);
+  };
+
+  describe('what the rows already are (characterization)', () => {
+    it('stages each unflagged ":" as a null row with no flag and no status', async () => {
+      const { rows, stats } = await downloadOf(NAMA_DE_FR);
+      expect(stats).toMatchObject({ rowCount: 42, missingCount: 16, budgetExceeded: false });
+      expect(rows.filter((row) => row.geo === 'DE').map((row) => row.time)).toEqual(YEARS);
+      expect(rows.filter((row) => row.obs_value === null)).toEqual(
+        YEARS.slice(0, 16).map((time) => ({
+          freq: 'A',
+          unit: 'CP_MEUR',
+          na_item: 'B1GQ',
+          geo: 'DE',
+          time,
+          obs_value: null,
+          obs_flag: null,
+          obs_flag_label: null,
+          conf_status: null,
+          conf_status_label: null,
+        })),
+      );
+      expect(rows.find((row) => row.geo === 'DE' && row.time === '1991')).toMatchObject({
+        obs_value: 1517932.9,
+      });
+      expect(rows.find((row) => row.geo === 'FR' && row.time === '1975')).toMatchObject({
+        obs_value: 288049.5,
+      });
+    });
+
+    it('stages the cross-frequency padding of a mixed-frequency slice as null rows', async () => {
+      const { rows, stats } = await downloadOf(MIXED, 'DS-045409');
+      expect(stats).toMatchObject({ rowCount: 40, missingCount: 20 });
+      expect(
+        rows.filter((row) => row.obs_value === null).map((row) => `${row.freq}:${row.time}`),
+      ).toEqual([
+        ...['06', '07', '08', '09', '10', '11', '12'].map((m) => `A:2023-${m}`),
+        ...Array.from({ length: 12 }, (_, i) => `A:2024-${String(i + 1).padStart(2, '0')}`),
+        'M:2024',
+      ]);
+    });
+  });
+
+  describe('absentCellCount (#90)', () => {
+    it('counts the unflagged ":" cells of a series in periods of its own frequency', async () => {
+      const { stats } = await downloadOf(NAMA_DE_FR);
+      expect(stats.absentCellCount).toBe(16);
+      expect(stats).toMatchObject({ rowCount: 42, missingCount: 16 });
+    });
+
+    it('counts none of the cross-frequency padding of a mixed-frequency slice', async () => {
+      const { stats } = await downloadOf(MIXED, 'DS-045409');
+      expect(stats.absentCellCount).toBe(0);
+      expect(stats.rowCount).toBe(40);
+    });
+
+    it('counts a gap in a period of the series’ own frequency on a mixed-frequency slice', async () => {
+      // 2023-07 of the monthly series made unflagged: a month the monthly series lacks.
+      const { stats } = await downloadOf(MIXED.replace('\t6156409286\t', '\t:\t'), 'DS-045409');
+      expect(stats.absentCellCount).toBe(1);
+      expect(stats).toMatchObject({ rowCount: 40, missingCount: 21 });
+    });
+
+    it('never counts a flagged ":" — ": u", ": @C" and ": m" are observations', async () => {
+      const { stats } = await downloadOf(
+        'freq,geo\\TIME_PERIOD\t2019 \t2020 \t2021 \t2022 \t2023 \r\nA,AT\t: u\t: @C\t1.0 \t: m\t: \r\n',
+      );
+      expect(stats.absentCellCount).toBe(1);
+      expect(stats).toMatchObject({ rowCount: 5, missingCount: 4 });
+    });
+
+    it('counts a line that carries only flagged ":" cells beside its unflagged ones', async () => {
+      const { stats } = await downloadOf(
+        'freq,geo\\TIME_PERIOD\t2022 \t2023 \r\nA,IE\t: @C\t: \r\n',
+      );
+      expect(stats.absentCellCount).toBe(1);
+    });
+
+    it('never counts a text value — ":C" and "KG" are observations', async () => {
+      const { stats } = await downloadOf(
+        'freq,reporter,product,indicators\\TIME_PERIOD\t2021 \t2022 \t2023 \r\n' +
+          'A,DE,P1,QNTUNIT\tKG\t: \t:C\r\n' +
+          'A,DE,P1,PVALFLAG\t:C\t:C\t: \r\n',
+        'DS-059358',
+      );
+      expect(stats.absentCellCount).toBe(2);
+      expect(stats.missingCount).toBe(6);
+    });
+
+    it('counts nothing on the recorded PRODCOM body, whose null cells are all text', async () => {
+      const { stats } = await downloadOf(comextFixture('ds-059358-de-2022.tsv'), 'DS-059358');
+      expect(stats.missingCount).toBeGreaterThan(0);
+      expect(stats.absentCellCount).toBe(0);
+    });
+
+    it('counts nothing for a line whose every cell is an unflagged ":"', async () => {
+      const { stats } = await downloadOf(
+        'freq,geo\\TIME_PERIOD\t2022 \t2023 \r\nA,AT\t: \t: \r\nA,BE\t1.0 \t: \r\n',
+      );
+      expect(stats.absentCellCount).toBe(1);
+      expect(stats).toMatchObject({ rowCount: 4, missingCount: 3 });
+    });
+
+    it('counts across a line split between chunks, delivered a byte at a time', async () => {
+      const { stats } = await downloadOf([...utf8(NAMA_DE_FR)].map((b) => Uint8Array.of(b)));
+      expect(stats.absentCellCount).toBe(16);
+      expect(stats.rowCount).toBe(42);
+    });
+
+    it('counts the last line of a body that ends without a newline', async () => {
+      const { stats } = await downloadOf(`${NAMA_HEADER}\n${FR_LINE}\n${DE_LINE}`);
+      expect(stats.absentCellCount).toBe(16);
+    });
+
+    it('counts no unflagged ":" in a column whose period code has no known shape', async () => {
+      // 2024-H1 carries a value and 2024-H2 is bare: neither shape is known, so the line
+      // carries no frequency 2024-H2 could be a lacked period of. 2025 is a lacked year.
+      const { stats } = await downloadOf(
+        'freq,geo\\TIME_PERIOD\t2024 \t2024-H1 \t2024-H2 \t2025 \r\nA,DE\t1.0 \t2.0 \t: \t: \r\n',
+      );
+      expect(stats.absentCellCount).toBe(1);
+      expect(stats).toMatchObject({ rowCount: 4, missingCount: 2 });
+      expect(stats.periodsSeen).toEqual(['2024', '2024-H1']);
+    });
+  });
+
+  describe('periodsSeen holds only periods carrying an observation (#93)', () => {
+    it('leaves the unflagged ":" periods out of the range', async () => {
+      const { stats } = await downloadOf(NAMA_DE);
+      expect(stats.periodsSeen).toEqual(['1991', '1992', '1993', '1994', '1995']);
+      expect(stats).toMatchObject({ rowCount: 21, missingCount: 16, absentCellCount: 16 });
+    });
+
+    it('keeps every period another series carries', async () => {
+      const { stats } = await downloadOf(NAMA_DE_FR);
+      expect(stats.periodsSeen).toEqual(YEARS);
+    });
+
+    it('lets a flagged ":" at either edge set the bound', async () => {
+      const { stats } = await downloadOf(
+        'freq,geo\\TIME_PERIOD\t2019 \t2020 \t2021 \t2022 \t2023 \r\nA,AT\t: u\t: @C\t1.0 \t: m\t: \r\n',
+      );
+      expect(stats.periodsSeen).toEqual(['2019', '2020', '2021', '2022']);
+    });
+
+    it('lets a text value set the bound', async () => {
+      const { stats } = await downloadOf(
+        'freq,reporter,product,indicators\\TIME_PERIOD\t2021 \t2022 \t2023 \r\nA,DE,P1,QNTUNIT\tKG\t:C\t: \r\n',
+        'DS-059358',
+      );
+      expect(stats.periodsSeen).toEqual(['2021', '2022']);
+    });
+
+    it('stays empty when every row is an unflagged ":"', async () => {
+      const { rows, stats } = await downloadOf('freq,geo\\TIME_PERIOD\t2022 \r\nA,AT\t: \r\n');
+      expect(rows).toHaveLength(1);
+      expect(stats.periodsSeen).toEqual([]);
+    });
+  });
+
+  describe('a transfer the byte budget cut short', () => {
+    const original = process.env.EUROSTAT_BULK_MAX_BYTES;
+
+    afterEach(() => {
+      if (original === undefined) delete process.env.EUROSTAT_BULK_MAX_BYTES;
+      else process.env.EUROSTAT_BULK_MAX_BYTES = original;
+      vi.resetModules();
+    });
+
+    /** Budget the header, the first line, and `kept` bytes of the second, which is dropped. */
+    const cutAfterFirstLine = async (first: string, second: string, kept = 10) => {
+      const header = utf8(`${NAMA_HEADER}\n`);
+      const lead = utf8(`${first}\n`);
+      const { svc: fresh } = await freshServiceWithBudget(header.length + lead.length + kept, [
+        header,
+        lead,
+        utf8(`${second}\n`),
+      ]);
+      const dl = await fresh.startDownload(
+        'nama_10_gdp',
+        [],
+        {},
+        undefined,
+        undefined,
+        createMockContext(),
+      );
+      const rows = await collectRows(dl.rows());
+      return { rows, stats: dl.stats };
+    };
+
+    it('counts the unflagged cells of the lines it emitted', async () => {
+      const { rows, stats } = await cutAfterFirstLine(DE_LINE, FR_LINE);
+      expect(rows.every((row) => row.geo === 'DE')).toBe(true);
+      expect(stats).toMatchObject({
+        budgetExceeded: true,
+        rowCount: 21,
+        missingCount: 16,
+        absentCellCount: 16,
+        periodsSeen: ['1991', '1992', '1993', '1994', '1995'],
+      });
+    });
+
+    it('counts none from the line it cut', async () => {
+      // The cut falls after Germany's 16 bare ":" cells and its 1991 value, so a parsed
+      // fragment would add 17 rows and 16 absent cells.
+      const kept = DE_LINE.indexOf('1655317.2');
+      const { rows, stats } = await cutAfterFirstLine(FR_LINE, DE_LINE, kept);
+      expect(rows.every((row) => row.geo === 'FR')).toBe(true);
+      expect(stats).toMatchObject({
+        budgetExceeded: true,
+        rowCount: 21,
+        missingCount: 0,
+        absentCellCount: 0,
+        periodsSeen: YEARS,
+      });
+    });
   });
 });
 

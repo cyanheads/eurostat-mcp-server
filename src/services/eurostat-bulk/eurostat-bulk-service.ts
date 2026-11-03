@@ -3,7 +3,7 @@
  * dissemination endpoint. Builds the positional dimension key, sniffs gzip off
  * the stream, enforces a byte budget mid-transfer, classifies XML SOAP faults
  * and the asynchronous queue envelope, and expands the wide TSV layout into
- * one row per observation.
+ * one row per non-blank cell.
  * @module services/eurostat-bulk/eurostat-bulk-service
  */
 
@@ -40,7 +40,7 @@ import {
 import { dropUnsetFilters } from '@/services/eurostat-filters.js';
 import { dataHostFor, isComextDataset } from '@/services/eurostat-hosts.js';
 import { isUpstreamOutage, upstreamOutage } from '@/services/eurostat-outage.js';
-import { oneDayRange } from '@/services/eurostat-periods.js';
+import { frequenciesOf, oneDayRange } from '@/services/eurostat-periods.js';
 import {
   type BulkDownload,
   type BulkRow,
@@ -62,7 +62,10 @@ const XML_PEEK_CHARS = 8_192;
 /** Separator between the observation flag and the confidentiality flag inside a TSV cell. */
 const CONF_SEPARATOR = '@';
 
-/** Eurostat's marker for an observation whose value is not available. */
+/**
+ * Eurostat's marker for a cell with no value: with a flag or status, an observation
+ * published without one; with neither, a period the series lacks.
+ */
 const MISSING_VALUE = ':';
 
 /** The header line's first field ends with this literal before the period columns begin. */
@@ -197,9 +200,10 @@ function classifyFaultBody(err: unknown, datasetCode: string): void {
  * The grammar, read off live responses, is `<value>` `SPACE` `<flags>`, where
  * flags is `<obs_flag>` optionally followed by `@<conf_status>` and either part
  * may be empty: `429634.3 `, `3853937.0 p`, `: `, `: @C`. A cell that is empty
- * on both sides of the split is not an observation at all and yields
- * `undefined` — distinct from `: `, which is an observation Eurostat reports as
- * unavailable.
+ * on both sides of the split yields `undefined` — distinct from `: `, an unflagged
+ * `:` that comes back with every field null: a period the series lacks, which the
+ * Statistics API has no cell for. A flagged `:` (`: u`, `: @C`) is an observation
+ * Eurostat publishes without a value.
  *
  * A value that is not a number is read by {@link decodeTextValue}: PRODCOM's flag
  * and unit indicators publish `:C` (confidential, no space before the `C`) and `KG`
@@ -456,6 +460,7 @@ export class EurostatBulkService {
     }
 
     const stats: BulkStats = {
+      absentCellCount: 0,
       bytesRead: 0,
       budgetExceeded: false,
       compressed: false,
@@ -681,10 +686,10 @@ async function readHeader(
   };
 }
 
-/** A local transfer limit prevented the download from yielding a usable observation. */
+/** A local transfer limit prevented the download from yielding a usable row. */
 function byteBudgetFailure(datasetCode: string, stats: BulkStats, maxBytes: number): McpError {
   return validationError(
-    `The ${maxBytes}-byte decoded TSV budget was exhausted before a complete observation could be read for "${datasetCode}".`,
+    `The ${maxBytes}-byte decoded TSV budget was exhausted before a complete row could be read for "${datasetCode}".`,
     {
       reason: 'byte_budget_exceeded',
       datasetCode,
@@ -703,13 +708,16 @@ function stripCr(line: string): string {
 }
 
 /**
- * Expand the wide TSV body into one row per populated cell.
+ * Expand the wide TSV body into one row per non-blank cell.
  *
  * Each data line carries a comma-joined dimension key and one cell per period
- * column, so a line becomes as many rows as it has populated cells. Cells that
- * are blank on both sides of the value/flag split carry no observation and are
- * skipped; `:` is kept, because Eurostat reporting a value as unavailable is
- * itself data.
+ * column, so a line becomes as many rows as it has non-blank cells. Cells that
+ * are blank on both sides of the value/flag split are skipped. A `:` is kept: a
+ * flagged one is an observation Eurostat publishes without a value, and an
+ * unflagged one stays a null row too, though it is no observation — a period the
+ * series lacks, or a period of a frequency the series has no observation of. An
+ * unflagged `:` adds no period to `periodsSeen`, and adds to `absentCellCount`
+ * only when its line carries the column's frequency in another kept cell.
  *
  * Only complete lines are parsed. When the byte budget cancels the transfer
  * mid-line the trailing fragment is dropped rather than parsed into a row with
@@ -734,18 +742,51 @@ async function* expandRows(
   const seen = new Set<string>();
   let buf = remainder;
 
+  /**
+   * Each period column's frequency, as an index into `frequencies` (at most the seven
+   * shapes, so one bit each), or -1 for a code of no known shape, which carries no
+   * frequency and so is never counted absent.
+   */
+  const frequencies: string[] = [];
+  const columnFrequency = header.periods.map((period) => {
+    const [frequency] = frequenciesOf([period]);
+    if (frequency === undefined) return -1;
+    const at = frequencies.indexOf(frequency);
+    return at === -1 ? frequencies.push(frequency) - 1 : at;
+  });
+  /** The current line's unflagged `:` cells, per frequency index; zeroed after any line that has one. */
+  const unflaggedByFrequency = frequencies.map(() => 0);
+
   const emit = function* (line: string): Generator<BulkRow> {
     const trimmed = stripCr(line);
     if (trimmed === '') return;
     const fields = trimmed.split('\t');
     const keyParts = (fields[0] ?? '').split(',');
     const cellCount = Math.min(fields.length - 1, header.periods.length);
+    /** A bit per frequency index this line carries in a kept cell that is not an unflagged `:`. */
+    let carried = 0;
+    let unflagged = false;
 
     for (let i = 0; i < cellCount; i++) {
       const period = header.periods[i] ?? '';
       if (onlyPeriod !== undefined && period !== onlyPeriod) continue;
       const parsed = parseCell(fields[i + 1] ?? '');
       if (!parsed) continue;
+      const frequency = columnFrequency[i] ?? -1;
+      if (
+        parsed.value === null &&
+        parsed.flag === null &&
+        parsed.conf === null &&
+        parsed.text === undefined
+      ) {
+        if (frequency !== -1) {
+          unflaggedByFrequency[frequency] = (unflaggedByFrequency[frequency] ?? 0) + 1;
+          unflagged = true;
+        }
+      } else {
+        if (frequency !== -1) carried |= 1 << frequency;
+        seen.add(period);
+      }
       const row: BulkRow = {};
       for (let d = 0; d < header.dimensions.length; d++) {
         row[header.dimensions[d] as string] = keyParts[d]?.trim() ?? null;
@@ -762,9 +803,19 @@ async function* expandRows(
 
       stats.rowCount++;
       if (parsed.value === null) stats.missingCount++;
-      seen.add(period);
       yield row;
     }
+
+    /**
+     * Reached once the consumer has taken the line's last row, before the next line is read.
+     * Lines without an unflagged `:` skip the fold: a per-line reset measurably slows
+     * narrow bodies, where lines vastly outnumber cells.
+     */
+    if (!unflagged) return;
+    for (let f = 0; f < frequencies.length; f++) {
+      if (carried & (1 << f)) stats.absentCellCount += unflaggedByFrequency[f] ?? 0;
+    }
+    unflaggedByFrequency.fill(0);
   };
 
   /**

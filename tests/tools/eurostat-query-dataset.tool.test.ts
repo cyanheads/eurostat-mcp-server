@@ -63,6 +63,7 @@ const mockQueryResult = {
   truncated: false,
   timeRange: { start: '2023', end: '2023' },
   missingObsCount: 1,
+  absentCellCount: 0,
   appliedFilters: { unit: ['CP_MEUR'], na_item: ['B1GQ'], geo: ['DE', 'FR', 'IT'] },
 };
 
@@ -961,8 +962,9 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
         tableName: string;
       };
       expect(tableName).toMatch(/^df_[0-9a-f]{8}$/);
+      // pastCap() fills 2050 for G0 alone, so the other 99 geos each lack that period (#90).
       expect(notice).toBe(
-        `preview_limit=3 returns the first 3 of 5,001 matched rows inline; it does not reduce the match. All 5,001 matched rows are staged as table "${tableName}" on canvas "${canvasId}". Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query. Use dimension filters (geo) or a period range when the match itself should be smaller.`,
+        `99 absent cells in 99 of 100 series: periods a series lacks at a frequency it carries (no value, no flag). They are not observations: obsCount, missingObsCount, the rows and any staged table leave them out, so a per-period total across series covers only the series present. preview_limit=3 returns the first 3 of 5,001 matched rows inline; it does not reduce the match. All 5,001 matched rows are staged as table "${tableName}" on canvas "${canvasId}". Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query. Use dimension filters (geo) or a period range when the match itself should be smaller.`,
       );
       const text = contentText(result);
       expect(text).toContain(
@@ -1333,6 +1335,7 @@ describe('eurostatQueryDataset — period inputs and filter matching (real servi
     expect(result.isError).not.toBe(true);
     expect(Object.keys(result.structuredContent ?? {}).sort()).toEqual(
       [
+        'absentCellCount',
         'appliedFilters',
         'datasetCode',
         'datasetLabel',
@@ -1369,6 +1372,7 @@ describe('eurostatQueryDataset — period inputs and filter matching (real servi
     });
     expect(Object.keys(result.structuredContent ?? {}).sort()).toEqual(
       [
+        'absentCellCount',
         'appliedFilters',
         'datasetCode',
         'datasetLabel',
@@ -3423,5 +3427,191 @@ describe('eurostatQueryDataset — geo_level behind a bare NO_RESULTS (#85)', ()
       );
       expect(structureReads()).toBe(1);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Periods a series lacks (#90) — the real service on recorded replies, staged on a
+// real canvas.
+// ---------------------------------------------------------------------------
+
+describe('eurostatQueryDataset — periods a series lacks (#90)', () => {
+  let canvas: DataCanvas;
+  let teardown: () => Promise<void>;
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  /** The issue's step 1: Germany carries 1991–1995 of the 21 years, France all of them. */
+  const STEP1 = {
+    dataset_code: 'nama_10_gdp',
+    filters: { geo: ['DE', 'FR'], unit: ['CP_MEUR'], na_item: ['B1GQ'] },
+    since_period: '1975',
+    until_period: '1995',
+    stage: true,
+    preview_limit: 2,
+  };
+
+  const ctx = () => createMockContext({ errors: eurostatQueryDataset.errors, tenantId: 'default' });
+  const serve = (name: string) =>
+    fetchMock.mockImplementation(async () => jsonReply(envelope(name)));
+  const structured = (result: { structuredContent?: unknown }) =>
+    result.structuredContent as Record<string, unknown> & {
+      canvasId: string;
+      notice?: string;
+      tableName: string;
+    };
+
+  beforeAll(async () => {
+    ({ canvas, teardown } = withRealCanvas());
+    await canvas.acquire(undefined, ctx());
+  });
+  afterAll(async () => {
+    await teardown();
+  });
+  beforeEach(() => {
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(getEurostatDataService).mockReturnValue(
+      new EurostatDataService({} as never, {} as never),
+    );
+    setCanvas(canvas);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('characterizes the step-1 query: 26 observations staged, none missing, the preview sentence unchanged', async () => {
+    serve('nama-10-gdp-de-fr-1975-to-1995');
+    const result = await runToolContract(eurostatQueryDataset, STEP1);
+    expect(result.isError).not.toBe(true);
+    const out = structured(result);
+    expect(out).toMatchObject({
+      obsCount: 26,
+      missingObsCount: 0,
+      stagedRowCount: 26,
+      truncated: false,
+      timeRange: { start: '1975', end: '1995' },
+    });
+    expect(out.observations).toHaveLength(2);
+    expect(out.notice).toContain(
+      `preview_limit=2 returns the first 2 of 26 matched rows inline; it does not reduce the match. All 26 matched rows are staged as table "${out.tableName}" on canvas "${out.canvasId}". Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query. Use dimension filters (freq, unit, na_item, geo) or a period range when the match itself should be smaller.`,
+    );
+    expect(contentText(result)).toContain(out.notice as string);
+    expect(contentText(result)).toContain(
+      '**Observations:** 26 (0 missing) | **Period:** 1975 – 1995',
+    );
+    const staged = await (await canvas.acquire(out.canvasId, ctx())).query(
+      `SELECT count(*)::INTEGER AS n, count(obs_value)::INTEGER AS valued FROM ${out.tableName}`,
+    );
+    expect(staged.rows).toEqual([{ n: 26, valued: 26 }]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  /** The absent-cell sentence, for `cells` in `affected` of `total` series. */
+  const absentSentence = (cells: string, affected: number, total: number) =>
+    `${cells} in ${affected} of ${total} series: periods a series lacks at a frequency it carries (no value, no flag). They are not observations: obsCount, missingObsCount, the rows and any staged table leave them out, so a per-period total across series covers only the series present.`;
+
+  it('returns absentCellCount 16 on both surfaces, naming 16 absent cells in 1 of 2 series', async () => {
+    serve('nama-10-gdp-de-fr-1975-to-1995');
+    const result = await runToolContract(eurostatQueryDataset, STEP1);
+    expect(result.isError).not.toBe(true);
+    const out = structured(result);
+    expect(Object.keys(out).sort()).toEqual(
+      [
+        'absentCellCount',
+        'appliedFilters',
+        'canvasId',
+        'datasetCode',
+        'datasetLabel',
+        'dimensionsUsed',
+        'missingObsCount',
+        'notice',
+        'obsCount',
+        'observations',
+        'stagedRowCount',
+        'tableName',
+        'timeRange',
+        'truncated',
+      ].sort(),
+    );
+    expect(out).toMatchObject({ absentCellCount: 16, obsCount: 26, stagedRowCount: 26 });
+    expect(out.notice).toContain(absentSentence('16 absent cells', 1, 2));
+    const text = contentText(result);
+    expect(text).toContain(
+      '**Observations:** 26 (0 missing) | **Period:** 1975 – 1995 | **Absent cells:** 16',
+    );
+    expect(text).toContain(out.notice as string);
+    // The staged table holds Germany's five observations and no row for the years it lacks.
+    const staged = await (await canvas.acquire(out.canvasId, ctx())).query(
+      `SELECT count(*)::INTEGER AS n FROM ${out.tableName} WHERE geo = 'DE'`,
+    );
+    expect(staged.rows).toEqual([{ n: 5 }]);
+  });
+
+  for (const [label, input] of [
+    [
+      'last_n_periods',
+      { ...STEP1, since_period: undefined, until_period: undefined, last_n_periods: 21 },
+    ],
+    ['no staging and a 500-row preview', { ...STEP1, stage: false, preview_limit: 500 }],
+    ['a one-row preview', { ...STEP1, preview_limit: 1 }],
+  ] as const) {
+    it(`gives the same count with ${label}`, async () => {
+      serve('nama-10-gdp-de-fr-1975-to-1995');
+      const result = await runToolContract(eurostatQueryDataset, input as never);
+      const out = structured(result);
+      expect(out).toMatchObject({ absentCellCount: 16, obsCount: 26, missingObsCount: 0 });
+      expect(out.notice).toContain(absentSentence('16 absent cells', 1, 2));
+      expect(contentText(result)).toContain('**Absent cells:** 16');
+    });
+  }
+
+  it('reports 0 and adds no sentence for the recorded annual-beside-monthly Comext pair', async () => {
+    serve('comext/ds-045409-de-fr-2023-06-to-2024');
+    const result = await runToolContract(eurostatQueryDataset, {
+      dataset_code: 'DS-045409',
+      filters: {
+        reporter: ['DE'],
+        partner: ['FR'],
+        product: ['TOTAL'],
+        flow: ['1'],
+        indicators: ['VALUE_IN_EUROS'],
+      },
+      since_period: '2023-06',
+      until_period: '2024',
+      preview_limit: 500,
+    });
+    const out = structured(result);
+    expect(out).toMatchObject({ absentCellCount: 0, obsCount: 20, missingObsCount: 0 });
+    expect(out.notice).not.toMatch(/absent cell/);
+    expect(contentText(result)).toContain('| **Absent cells:** 0');
+  });
+
+  it('writes one absent cell in the singular, beside the last-N sentence for the same period', async () => {
+    serve('une-rt-m-geo-de-lower-last3');
+    const result = await runToolContract(eurostatQueryDataset, {
+      dataset_code: 'une_rt_m',
+      filters: DE_UNEMPLOYMENT,
+      last_n_periods: 3,
+    });
+    const out = structured(result);
+    expect(out).toMatchObject({ absentCellCount: 1, obsCount: 2 });
+    expect(out.notice).toContain('1 selected period (2026-08) carries no populated cells');
+    expect(out.notice).toContain(absentSentence('1 absent cell', 1, 1));
+    expect(contentText(result)).toContain(absentSentence('1 absent cell', 1, 1));
+  });
+
+  it('renders absentCellCount in format() whatever its value', () => {
+    for (const absentCellCount of [0, 1, 13_389]) {
+      const text = (
+        eurostatQueryDataset.format!({ ...mockQueryResult, absentCellCount }) as Array<{
+          text?: string;
+        }>
+      )
+        .map((block) => block.text ?? '')
+        .join('');
+      expect(text).toContain(
+        `**Observations:** 3 (1 missing) | **Period:** 2023 – 2023 | **Absent cells:** ${absentCellCount}`,
+      );
+    }
   });
 });

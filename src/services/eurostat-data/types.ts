@@ -132,14 +132,20 @@ export interface DimensionValuesResult {
  * A decoded query result.
  *
  * `observations` is the caller-bounded deterministic prefix; `obsCount`,
- * `missingObsCount` and `timeRange` describe the whole match. They are counted from the
- * response's cell keys rather than from the decoded array, so previewing never changes
- * what they report.
+ * `missingObsCount`, `absentCellCount` and `timeRange` describe the whole match. They are
+ * counted from the response's cell keys rather than from the decoded array, so previewing
+ * never changes what they report.
  *
  * `timeRange` bounds are absent when neither the returned observations nor the dataset-wide
  * annotations report them — an unknown bound is not an empty period.
  */
 export interface QueryResult {
+  /**
+   * Periods the matched series lack: for each series (one combination of the non-time
+   * dimensions) with at least one cell, the periods of a frequency it carries in which it
+   * has neither a value nor a status. Not observations, so no count or row includes them.
+   */
+  absentCellCount: number;
   /** Filters actually sent upstream — the requested filters minus any zero-length arrays. */
   appliedFilters: Record<string, string[]>;
   datasetCode: string;
@@ -184,6 +190,11 @@ export interface NoResultsDiagnosis {
  * source rather than a separately-derived set that can drift from it.
  */
 export interface QueryExecution extends QueryResult {
+  /**
+   * The series `absentCellCount` falls in, of the series with at least one cell. Set only
+   * when `absentCellCount` is above zero.
+   */
+  absentSeries?: { affected: number; total: number };
   /** Periods a bound excludes, read from the reply's own frequencies and coverage. */
   periodCuts?: PeriodCut[];
   /**

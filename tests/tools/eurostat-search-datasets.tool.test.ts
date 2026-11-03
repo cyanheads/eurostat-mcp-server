@@ -385,6 +385,111 @@ describe('eurostatSearchDatasets — disclosures and the no_match hint', () => {
     expect(hint).toMatch(/^Broadening will not find DS-056120: /);
     expect(hint.endsWith(STALE)).toBe(true);
   });
+
+  // The words no dataset carries, named when no single removal finds matches (#92).
+  const NOT_DISSEMINATED =
+    'Broadening will not find DS-056120: a collection on neither list is not disseminated. Search for its subject instead — "prodcom" or "CN8", for example — to find the DS-* collections Eurostat does disseminate.';
+
+  it.each([
+    [
+      'tourism overnight stays',
+      ['overnight', 'stays'],
+      '"overnight" and "stays" match no dataset label, theme breadcrumb, or code. Search again without them.',
+    ],
+    [
+      'tourism unemployment overnight',
+      ['overnight'],
+      '"overnight" matches no dataset label, theme breadcrumb, or code. Search again without it.',
+    ],
+    [
+      'tourism vending overnight stays guests',
+      ['vending', 'overnight', 'stays', 'guests'],
+      '"vending", "overnight", "stays" and "guests" match no dataset label, theme breadcrumb, or code. Search again without them.',
+    ],
+  ])(
+    'names the dead words of "%s" in place of the broaden hint',
+    async (query, unmatchedWords, expected) => {
+      serve({ datasets: [], totalMatches: 0, unmatchedWords });
+      const result = await run(query);
+      expect(hintOf(result)).toBe(expected);
+      expect(textOf(result)).toContain(`Recovery: ${expected}`);
+      expect((result.structuredContent as { error: { message: string } }).error.message).toBe(
+        `No datasets matched "${query}".`,
+      );
+    },
+  );
+
+  it('follows the dead words with the broaden hint when every word is dead', async () => {
+    serve({
+      datasets: [],
+      totalMatches: 0,
+      unmatchedWords: ['overnight', 'stays'],
+      allWordsUnmatched: true,
+    });
+    expect(hintOf(await run('overnight stays'))).toBe(
+      `"overnight" and "stays" match no dataset label, theme breadcrumb, or code. ${BROADER}`,
+    );
+  });
+
+  it('names the dead words after the not-disseminated sentence, the code included', async () => {
+    serve({
+      datasets: [],
+      totalMatches: 0,
+      undisseminatedCodes: ['DS-056120'],
+      unmatchedWords: ['DS-056120', 'overnight'],
+    });
+    expect(hintOf(await run('DS-056120 overnight prodcom'))).toBe(
+      `${NOT_DISSEMINATED} "DS-056120" and "overnight" match no dataset label, theme breadcrumb, or code. Search again without them.`,
+    );
+  });
+
+  it('adds no broaden hint after a not-disseminated code when every word is dead', async () => {
+    serve({
+      datasets: [],
+      totalMatches: 0,
+      undisseminatedCodes: ['DS-056120'],
+      unmatchedWords: ['DS-056120', 'overnight'],
+      allWordsUnmatched: true,
+    });
+    expect(hintOf(await run('DS-056120 overnight'))).toBe(
+      `${NOT_DISSEMINATED} "DS-056120" and "overnight" match no dataset label, theme breadcrumb, or code.`,
+    );
+  });
+
+  it('puts the dead words after the stale disclosure, in the counts’ slot', async () => {
+    serve({
+      datasets: [],
+      totalMatches: 0,
+      catalogueLoadedAt: LOADED_AT,
+      unmatchedWords: ['overnight'],
+    });
+    expect(hintOf(await run('tourism unemployment overnight'))).toBe(
+      `${STALE} "overnight" matches no dataset label, theme breadcrumb, or code. Search again without it.`,
+    );
+  });
+
+  it('keeps the removal count, not the dead-word sentence, when both apply', async () => {
+    serve({
+      datasets: [],
+      totalMatches: 0,
+      unmatchedWords: ['Overnight'],
+      wordRemovalCounts: [{ word: 'Overnight', totalMatches: 168 }],
+    });
+    expect(hintOf(await run('Overnight overnight tourism'))).toBe(
+      'Without "Overnight": 168 matches. Search again without one of those words to see its matches.',
+    );
+  });
+
+  it('names no dead word while the Comext list is unmerged', async () => {
+    serve({
+      datasets: [],
+      totalMatches: 0,
+      comextListMissing: true,
+      unmatchedWords: ['prodcom', 'cn8'],
+      allWordsUnmatched: true,
+    });
+    expect(hintOf(await run('prodcom cn8'))).toBe(`${COMEXT_UNSEARCHED} ${BROADER}`);
+  });
 });
 
 /**
@@ -428,14 +533,14 @@ describe('eurostatSearchDatasets — no_match from a catalogue a failed refresh 
   const stale = (loadedAt: string) =>
     `The catalogue could not be refreshed, so this search ran against the copy loaded at ${loadedAt}; datasets Eurostat added or changed since then were not searched.`;
 
-  it('carries the stale sentence and the broaden hint when no word blocks the match', async () => {
+  it('carries the stale sentence, then the dead words and the broaden hint when every word is dead', async () => {
     const loadedAt = serveStale();
     const result = await runToolContract(eurostatSearchDatasets, { query: 'zebra crossings' });
     expect(result.isError).toBe(true);
     expect(hintOf(result)).toMatchObject({
       reason: 'no_match',
       recovery: {
-        hint: `${stale(loadedAt)} Try a broader term or use eurostat_browse_themes to explore themes without text search.`,
+        hint: `${stale(loadedAt)} "zebra" and "crossings" match no dataset label, theme breadcrumb, or code. Try a broader term or use eurostat_browse_themes to explore themes without text search.`,
       },
     });
     expect(textOf(result)).toContain(stale(loadedAt));
@@ -499,5 +604,37 @@ describe('eurostatSearchDatasets — an unavailable catalogue host on a cold sta
     expect(error.data).toMatchObject({ reason: 'upstream_fault', retryable: true });
     expect((error.data.recovery as { hint: string }).hint).toContain('could not be reached');
     expect(text).toContain('reason upstream_fault · retryable');
+  });
+
+  it('fails a TOC answering 501 on its first attempt as a non-retryable upstream_fault (#94)', async () => {
+    const tocReads: string[] = [];
+    const { error, text } = await searchColdStart(async (input?: unknown) => {
+      const { pathname } = new URL(String(input));
+      if (pathname.includes('/catalogue/toc/')) tocReads.push(pathname);
+      return new Response('Not Implemented', { status: 501, statusText: 'Not Implemented' });
+    });
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    const hint =
+      "Retry in a few minutes: the catalogue load failed on Eurostat's side and runs again on the next call.";
+    expect(error.data).toMatchObject({
+      reason: 'upstream_fault',
+      status: 501,
+      retryable: false,
+      recovery: { hint },
+    });
+    expect(text).toContain(
+      "Eurostat's catalogue endpoint answered HTTP 501 to the table-of-contents read.",
+    );
+    expect(text).toContain(`Recovery: ${hint}`);
+    expect(text).toContain('reason upstream_fault · not retryable');
+    expect(tocReads).toHaveLength(1);
+  });
+
+  it('describes the 501 refusal in the upstream_fault contract (#94)', () => {
+    const when = eurostatSearchDatasets.errors?.find(
+      ({ reason }) => reason === 'upstream_fault',
+    )?.when;
+    expect(when).toContain('table of contents answered HTTP 501, which is not retried');
+    expect(when).toContain('could not be reached on every retry, which the error marks retryable');
   });
 });

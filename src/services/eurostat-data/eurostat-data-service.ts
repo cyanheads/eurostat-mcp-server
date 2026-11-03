@@ -31,6 +31,7 @@ import { dataHostFor, isComextDataset } from '@/services/eurostat-hosts.js';
 import { isUpstreamOutage, upstreamOutage } from '@/services/eurostat-outage.js';
 import {
   diagnoseEmptyRange,
+  frequenciesOf,
   oneDayRange,
   type PeriodCoverage,
   type PeriodRange,
@@ -642,10 +643,19 @@ export class EurostatDataService {
    * accompanies it. `queryDataset` also reads `obsCount` reaching zero as the no-results
    * condition, so one count decides both what the response reports and whether there is a
    * response at all.
+   *
+   * The same pass counts the cells the match lacks. A series is one combination of the
+   * non-time coordinates — a cell's linear index with its time coordinate removed — and a
+   * series with at least one cell lacks each period of a frequency it carries in which it
+   * has no cell in either map. Frequency is the period code's shape ({@link frequenciesOf}),
+   * so a monthly series beside an annual one lacks none of the annual periods, and a code of
+   * no known shape is a period no series lacks.
    */
   private scanCells(data: JsonStatResponse): {
-    obsCount: number;
+    absentCellCount: number;
+    absentSeries?: { affected: number; total: number };
     missingObsCount: number;
+    obsCount: number;
     timeCodes: string[];
     unpopulatedPeriods: string[];
   } {
@@ -660,6 +670,40 @@ export class EurostatDataService {
     const timeSize = timeDim >= 0 ? (sizes[timeDim] ?? 0) : 0;
     const timeSeen = new Uint8Array(timeSize);
 
+    const timeIndex = data.dimension?.time?.category?.index ?? {};
+    const timeCodeAt: string[] = new Array(timeSize) as string[];
+    for (const [code, pos] of Object.entries(timeIndex)) {
+      if (pos >= 0 && pos < timeSize) timeCodeAt[pos] = code;
+    }
+
+    // Each time position's frequency, as a slot whose positions `periodsInSlot` counts.
+    // Codes of no known shape share the slot keyed ''.
+    const slotOf = new Map<string, number>();
+    const slotAt = new Uint8Array(timeSize);
+    const periodsInSlot: number[] = [];
+    for (let pos = 0; pos < timeSize; pos++) {
+      const code = timeCodeAt[pos];
+      const [frequency = ''] = code === undefined ? [] : frequenciesOf([code]);
+      let slot = slotOf.get(frequency);
+      if (slot === undefined) {
+        slot = periodsInSlot.push(0) - 1;
+        slotOf.set(frequency, slot);
+      }
+      slotAt[pos] = slot;
+      periodsInSlot[slot] = (periodsInSlot[slot] ?? 0) + 1;
+    }
+    const slots = periodsInSlot.length;
+    const unknownSlot = slotOf.get('');
+
+    /**
+     * Cells per series and slot, at `series * slots + slot`: series × slots never exceeds
+     * the cube, which the decode walk already spans. Left out when no frequency spans two
+     * positions, since a series then fills every period of each frequency it carries.
+     */
+    const cellsBySeriesSlot = periodsInSlot.some((n, slot) => n > 1 && slot !== unknownSlot)
+      ? new Uint32Array((totalCells / timeSize) * slots)
+      : undefined;
+
     let obsCount = 0;
     let missingObsCount = 0;
 
@@ -668,7 +712,13 @@ export class EurostatDataService {
       if (!Number.isInteger(idx) || idx < 0 || idx >= totalCells) return;
       obsCount++;
       if (missing) missingObsCount++;
-      if (timeSize > 0) timeSeen[Math.floor(idx / timeStride) % timeSize] = 1;
+      if (timeSize === 0) return;
+      const pos = Math.floor(idx / timeStride) % timeSize;
+      timeSeen[pos] = 1;
+      if (!cellsBySeriesSlot) return;
+      const series = Math.floor(idx / (timeStride * timeSize)) * timeStride + (idx % timeStride);
+      const at = series * slots + (slotAt[pos] ?? 0);
+      cellsBySeriesSlot[at] = (cellsBySeriesSlot[at] ?? 0) + 1;
     };
 
     // A text value (PRODCOM's `:C`, `KG`) carries no number, so it counts as missing.
@@ -678,11 +728,27 @@ export class EurostatDataService {
       if (!(key in value)) count(key, true);
     }
 
-    const timeIndex = data.dimension?.time?.category?.index ?? {};
-    const timeCodeAt: string[] = new Array(timeSize) as string[];
-    for (const [code, pos] of Object.entries(timeIndex)) {
-      if (pos >= 0 && pos < timeSize) timeCodeAt[pos] = code;
+    let absentCellCount = 0;
+    let seriesWithCells = 0;
+    let affectedSeries = 0;
+    if (cellsBySeriesSlot) {
+      for (let first = 0; first < cellsBySeriesSlot.length; first += slots) {
+        let carried = false;
+        let absent = 0;
+        for (let slot = 0; slot < slots; slot++) {
+          const cells = cellsBySeriesSlot[first + slot] ?? 0;
+          if (cells === 0) continue;
+          carried = true;
+          if (slot !== unknownSlot) absent += (periodsInSlot[slot] ?? 0) - cells;
+        }
+        if (carried) seriesWithCells++;
+        if (absent > 0) {
+          affectedSeries++;
+          absentCellCount += absent;
+        }
+      }
     }
+
     const timeCodes: string[] = [];
     const unpopulatedPeriods: string[] = [];
     for (let pos = 0; pos < timeSize; pos++) {
@@ -690,7 +756,16 @@ export class EurostatDataService {
       if (timeSeen[pos]) timeCodes.push(code ?? String(pos));
       else if (code !== undefined) unpopulatedPeriods.push(code);
     }
-    return { obsCount, missingObsCount, timeCodes: timeCodes.sort(), unpopulatedPeriods };
+    return {
+      obsCount,
+      missingObsCount,
+      absentCellCount,
+      ...(absentCellCount > 0 && {
+        absentSeries: { affected: affectedSeries, total: seriesWithCells },
+      }),
+      timeCodes: timeCodes.sort(),
+      unpopulatedPeriods,
+    };
   }
 
   /**
@@ -1039,7 +1114,14 @@ export class EurostatDataService {
 
     // Totals describe the whole match and are counted from the response's cell keys, so the
     // decode cap below cannot shrink them.
-    const { obsCount, missingObsCount, timeCodes, unpopulatedPeriods } = this.scanCells(data);
+    const {
+      obsCount,
+      missingObsCount,
+      absentCellCount,
+      absentSeries,
+      timeCodes,
+      unpopulatedPeriods,
+    } = this.scanCells(data);
 
     const oldest = this.extractAnnotation(data, 'OBS_PERIOD_OVERALL_OLDEST', 'title');
     const latest = this.extractAnnotation(data, 'OBS_PERIOD_OVERALL_LATEST', 'title');
@@ -1087,6 +1169,8 @@ export class EurostatDataService {
       obsCount,
       timeRange,
       missingObsCount,
+      absentCellCount,
+      ...(absentSeries && { absentSeries }),
       appliedFilters,
       ...(unmatchedValues && { unmatchedValues }),
       ...(lastN && unpopulatedPeriods.length > 0 && { unpopulatedPeriods }),

@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { parseCell } from '@/services/eurostat-bulk/eurostat-bulk-service.js';
+import { EurostatBulkService, parseCell } from '@/services/eurostat-bulk/eurostat-bulk-service.js';
 import {
   EurostatDataService,
   findUnmatchedValues,
@@ -3286,5 +3286,241 @@ describe('EurostatDataService — a period range against the reply in hand (#84,
       const err = await send('nama_10_gdp', NAMA, undefined, '1980').catch((e: unknown) => e);
       expect((err as McpError).data).not.toHaveProperty('emptyRange');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// queryDataset — periods a series lacks (#90)
+// ---------------------------------------------------------------------------
+
+/**
+ * `nama-10-gdp-de-fr-1975-to-1995` is the Statistics API reply to `geo` DE+FR, `unit`
+ * CP_MEUR, `na_item` B1GQ, 1975–1995: France carries all 21 years, Germany only
+ * 1991–1995, and the reply holds no cell at all for Germany's 16 earlier years.
+ */
+describe('EurostatDataService — periods a series lacks (#90)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const STEP1 = { unit: ['CP_MEUR'], na_item: ['B1GQ'], geo: ['DE', 'FR'] };
+
+  const run = (
+    body: JsonStatResponse,
+    periods: { since?: string; until?: string; lastN?: number } = { since: '1975', until: '1995' },
+    preview = 50,
+  ) => {
+    const fetchMock = vi.fn(async () => okResponse(body));
+    vi.stubGlobal('fetch', fetchMock);
+    return new EurostatDataService(mockConfig, mockStorage)
+      .queryDataset(
+        'nama_10_gdp',
+        STEP1,
+        undefined,
+        periods.since,
+        periods.until,
+        periods.lastN,
+        'EN',
+        preview,
+        createMockContext(),
+      )
+      .then((result) => ({ result, fetchMock }));
+  };
+  /** A hand-built reply, queried with no filters and no period bounds. */
+  const runBody = (
+    dims: Record<string, string[]>,
+    cells: Pick<JsonStatResponse, 'status' | 'value'>,
+    preview = 50,
+  ) => run({ ...jsonStat(dims), ...cells }, {}, preview);
+
+  it('characterizes the step-1 slice: 26 observations, none missing, 1975–1995, 26 rows, one request', async () => {
+    const { result, fetchMock } = await run(fixture('nama-10-gdp-de-fr-1975-to-1995'));
+    expect(result.obsCount).toBe(26);
+    expect(result.missingObsCount).toBe(0);
+    expect(result.timeRange).toEqual({ start: '1975', end: '1995' });
+    expect(result.observations).toHaveLength(26);
+    const rows = [...result.rows()];
+    expect(rows).toHaveLength(26);
+    expect(rows.filter((row) => row.geo === 'DE').map((row) => row.time)).toEqual([
+      '1991',
+      '1992',
+      '1993',
+      '1994',
+      '1995',
+    ]);
+    expect(rows.every((row) => typeof row.obs_value === 'number')).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("counts Germany's 16 years without a cell as absent cells in 1 of 2 series", async () => {
+    const { result, fetchMock } = await run(fixture('nama-10-gdp-de-fr-1975-to-1995'));
+    expect(result.absentCellCount).toBe(16);
+    expect(result.absentSeries).toEqual({ affected: 1, total: 2 });
+    // Every period of every series is either an observation or an absent cell.
+    expect(result.obsCount + result.absentCellCount).toBe(2 * 21);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives the same count whatever the preview bound, the period selection, or the rows staged', async () => {
+    const body = fixture('nama-10-gdp-de-fr-1975-to-1995');
+    for (const [periods, preview] of [
+      [{ since: '1975', until: '1995' }, 1],
+      [{ since: '1975', until: '1995' }, OBS_CAP],
+      [{ lastN: 21 }, 50],
+      [{}, 50],
+    ] as const) {
+      const { result, fetchMock } = await run(body, periods, preview);
+      expect(result.observations).toHaveLength(Math.min(preview, 26));
+      expect(result.absentCellCount).toBe(16);
+      expect(result.absentSeries).toEqual({ affected: 1, total: 2 });
+      // Staged rows stay observations: an absent cell is never a row.
+      expect([...result.rows()]).toHaveLength(26);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('reports zero and no affected series when every series covers every period', async () => {
+    const { result } = await run(fixture('nama-10-gdp-de-2022-06-to-2024'), {
+      since: '2022-06',
+      until: '2024',
+    });
+    expect(result.obsCount).toBe(2);
+    expect(result.absentCellCount).toBe(0);
+    expect(result).not.toHaveProperty('absentSeries');
+  });
+
+  it('lacks no period of another frequency: the recorded annual-beside-monthly Comext pair gives 0', async () => {
+    const { result } = await run(fixture('comext/ds-045409-de-fr-2023-06-to-2024'), {
+      since: '2023-06',
+      until: '2024',
+    });
+    // One annual series (2024) beside one monthly series (2023-06 … 2024-12): each carries
+    // every period of its own frequency, and the 20 cross-frequency positions are no gap.
+    expect(result.obsCount).toBe(20);
+    expect(result.missingObsCount).toBe(0);
+    expect(result.absentCellCount).toBe(0);
+    expect(result).not.toHaveProperty('absentSeries');
+  });
+
+  it('counts each frequency a series carries apart, and only those it carries', async () => {
+    const { result } = await runBody(
+      { geo: ['DE', 'FR'], time: ['2023', '2023-01', '2023-02', '2023-03'] },
+      // DE carries 2023 and 2023-01: it lacks 2023-02 and 2023-03. FR carries 2023-02 and
+      // 2023-03: it lacks 2023-01, and no annual period, since it carries none.
+      { value: { '0': 1, '1': 2, '6': 3, '7': 4 } },
+    );
+    expect(result.obsCount).toBe(4);
+    expect(result.absentCellCount).toBe(3);
+    expect(result.absentSeries).toEqual({ affected: 2, total: 2 });
+  });
+
+  it('never counts a status-only, text, or null cell, and ignores keys outside the cube', async () => {
+    const { result } = await runBody(
+      { geo: ['DE', 'FR'], time: ['2020', '2021', '2022', '2023'] },
+      {
+        // DE: a number, a text value, a null; it lacks 2023. FR: a status-only 2020 beside two
+        // numbers; it lacks 2023 too. Keys -1 and 99 fall outside the 8-cell cube.
+        value: { '0': 1, '1': 'KG', '2': null, '5': 7, '6': 8, '99': 9 },
+        status: { '4': ':', '-1': 'C' },
+      },
+    );
+    expect(result.obsCount).toBe(6);
+    expect(result.missingObsCount).toBe(3);
+    expect(result.absentCellCount).toBe(2);
+    expect(result.absentSeries).toEqual({ affected: 2, total: 2 });
+  });
+
+  it('never counts a series that has no cell in the match', async () => {
+    const { result } = await runBody(
+      { geo: ['DE', 'FR', 'IT'], time: ['2020', '2021', '2022'] },
+      // IT is in the reply's index with no cell at all: it is no series of this match.
+      { value: { '0': 1, '3': 2, '4': 3, '5': 4 } },
+    );
+    expect(result.absentCellCount).toBe(2);
+    expect(result.absentSeries).toEqual({ affected: 1, total: 2 });
+  });
+
+  it('removes the time coordinate wherever time sits in the dimension order', async () => {
+    // time between geo and unit: strides [6, 2, 1], so a series is (geo, unit) and its cells
+    // are two indexes apart. DE/A carries 2024–2025, DE/B all three years, FR/A only 2026,
+    // FR/B nothing.
+    const { result } = await runBody(
+      { geo: ['DE', 'FR'], time: ['2024', '2025', '2026'], unit: ['A', 'B'] },
+      { value: { '0': 1, '2': 2, '1': 3, '3': 4, '5': 5, '10': 6 } },
+    );
+    expect(result.obsCount).toBe(6);
+    expect(result.absentCellCount).toBe(3);
+    expect(result.absentSeries).toEqual({ affected: 2, total: 3 });
+
+    // time first: each series' cells are a whole time slice apart.
+    const timeFirst = await runBody(
+      { time: ['2024', '2025', '2026'], geo: ['DE', 'FR'] },
+      { value: { '0': 1, '2': 2, '5': 3 } },
+    );
+    expect(timeFirst.result.absentCellCount).toBe(3);
+    expect(timeFirst.result.absentSeries).toEqual({ affected: 2, total: 2 });
+  });
+
+  it('counts past the decode cap, from the cell keys rather than the decoded rows', async () => {
+    const periods = Array.from({ length: 60 }, (_, i) => String(2000 + i));
+    const geos = Array.from({ length: 100 }, (_, i) => `G${i}`);
+    const value: Record<string, number> = {};
+    for (let i = 0; i < 6000; i++) value[String(i)] = i;
+    delete value['10']; // G10 lacks 2000, inside the cap
+    delete value['5500']; // G0 lacks 2055, past it
+    const { result } = await runBody({ time: periods, geo: geos }, { value }, OBS_CAP);
+    expect(result.observations).toHaveLength(OBS_CAP);
+    expect(result.obsCount).toBe(5998);
+    expect(result.absentCellCount).toBe(2);
+    expect(result.absentSeries).toEqual({ affected: 2, total: 100 });
+  });
+
+  it('agrees with the bulk download of the same slice, flagged cells included', async () => {
+    // DE lacks 2021 and publishes 2023 flagged "m"; FR publishes 2021 as confidential and
+    // lacks 2023. The TSV writes each lacked period as a bare ":"; the Statistics API has no
+    // cell there and carries the flagged cells as status-only.
+    const { result } = await runBody(
+      { freq: ['A'], geo: ['DE', 'FR'], time: ['2021', '2022', '2023'] },
+      { value: { '1': 94.4, '4': 1 }, status: { '1': 'p', '2': 'm', '3': 'C' } },
+    );
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            'freq,geo\\TIME_PERIOD\t2021 \t2022 \t2023 \r\nA,DE\t: \t94.4 p\t: m\r\nA,FR\t: @C\t1.0 \t: \r\n',
+          ),
+      ),
+    );
+    const download = await new EurostatBulkService(mockConfig, mockStorage).startDownload(
+      'nama_10_gdp',
+      [],
+      {},
+      undefined,
+      undefined,
+      createMockContext(),
+    );
+    for await (const _row of download.rows()) {
+      // drained for the counters
+    }
+    expect(result).toMatchObject({ obsCount: 4, missingObsCount: 2, absentCellCount: 2 });
+    expect(download.stats).toMatchObject({ rowCount: 6, missingCount: 4, absentCellCount: 2 });
+    expect(result.obsCount + result.absentCellCount).toBe(download.stats.rowCount);
+    expect(result.missingObsCount + result.absentCellCount).toBe(download.stats.missingCount);
+  });
+
+  it('counts no period whose code has no known shape, and nothing without a time dimension', async () => {
+    const { result } = await runBody(
+      { geo: ['DE', 'FR'], time: ['2024', '2024-H1', '2024-H2', '2025'] },
+      // DE carries 2024 and 2024-H1: it lacks 2025, and not 2024-H2, whose shape is unknown
+      // though DE has a cell at another unknown-shaped period. FR's only cell is at 2024-H1,
+      // so it carries no frequency it could lack a period of.
+      { value: { '0': 1, '1': 2, '5': 3 } },
+    );
+    expect(result.absentCellCount).toBe(1);
+    expect(result.absentSeries).toEqual({ affected: 1, total: 2 });
+
+    const timeless = await runBody({ geo: ['DE', 'FR', 'IT'] }, { value: { '1': 5 } });
+    expect(timeless.result.obsCount).toBe(1);
+    expect(timeless.result.absentCellCount).toBe(0);
+    expect(timeless.result).not.toHaveProperty('absentSeries');
   });
 });

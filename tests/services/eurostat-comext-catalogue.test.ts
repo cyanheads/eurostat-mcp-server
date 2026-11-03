@@ -485,9 +485,14 @@ describe('EurostatCatalogueService — undisseminated DS-* codes (#45)', () => {
     expect(result.undisseminatedCodes).toEqual(['DS-999999']);
   });
 
-  it('names nothing for a no-match query without a DS-* code', async () => {
+  it('names no code for a no-match query without a DS-* code', async () => {
     const result = await service().search('zebra crossings', 10, undefined, ctx());
-    expect(result).toEqual({ datasets: [], totalMatches: 0 });
+    expect(result).toEqual({
+      datasets: [],
+      totalMatches: 0,
+      unmatchedWords: ['zebra', 'crossings'],
+      allWordsUnmatched: true,
+    });
   });
 
   it('flags that the Comext list is missing rather than calling a code undisseminated', async () => {

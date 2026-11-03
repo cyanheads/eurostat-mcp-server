@@ -330,7 +330,12 @@ describe('eurostatGetDatasetInfo — the metadata path through the real data ser
     expect(result.isError).toBe(true);
     expect(errorOf(result)).toMatchObject({
       code: JsonRpcErrorCode.NotFound,
-      data: { reason: 'not_found', recovery: { hint: expect.stringContaining('nope_xyz') } },
+      data: {
+        reason: 'not_found',
+        recovery: {
+          hint: 'Dataset "nope_xyz" not found. Use eurostat_search_datasets or eurostat_browse_themes to find a valid code.',
+        },
+      },
     });
     expect(textOf(result)).toContain('reason not_found');
   });
@@ -429,9 +434,9 @@ describe('eurostatGetDatasetInfo — the metadata path through the real data ser
         recovery: { hint: expect.stringContaining('DS-045409') },
       });
       const hint = (error.data.recovery as { hint: string }).hint;
-      expect(hint).toMatch(/retry in a few minutes/i);
-      expect(hint).toContain('HTTP 503');
-      expect(hint).not.toContain('cannot read');
+      expect(hint).toBe(
+        'Eurostat\'s SDMX structure endpoint answered HTTP 503 for "DS-045409" on every attempt — an upstream outage, not a fault in the request. A failed read is not cached, so retry in a few minutes.',
+      );
       const text = textOf(result);
       expect(text).toContain(`Recovery: ${hint}`);
       expect(text).toContain('reason upstream_fault · retryable');
@@ -459,9 +464,46 @@ describe('eurostatGetDatasetInfo — the metadata path through the real data ser
       const result = await callSettled('earn_ses_annual');
       const error = errorOf(result);
       expect(error.data).toMatchObject({ reason: 'upstream_fault' });
-      expect((error.data.recovery as { hint: string }).hint).toContain('cannot read');
+      expect((error.data.recovery as { hint: string }).hint).toBe(
+        'Eurostat returned a structure for "earn_ses_annual" that this server cannot read. A failed read is not cached, so retry in a few minutes. If it fails the same way, eurostat_query_dataset reads the dataset\'s observations, with their dimension codes and labels, from the Statistics API, which does not depend on this structure; start with last_n_periods: 1 to keep the match small.',
+      );
       expect(error.data.retryable).toBeUndefined();
     });
+
+    it('names an HTTP 501 the structure endpoint answered, rather than an unreadable structure (#94)', async () => {
+      fetchMock = vi.fn(
+        async () => new Response('Not Implemented', { status: 501, statusText: 'Not Implemented' }),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      const result = await callSettled('nama_10_gdp');
+      expect(result.isError).toBe(true);
+      const error = errorOf(result);
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.data).toMatchObject({ reason: 'upstream_fault' });
+      // A 501 is a deterministic refusal: no retry, and the error is not marked retryable.
+      expect(error.data.retryable).toBeUndefined();
+      const hint = (error.data.recovery as { hint: string }).hint;
+      expect(hint).toBe(
+        'Eurostat\'s SDMX structure endpoint answered HTTP 501 for "nama_10_gdp", a status this server does not retry on its own. A failed read is not cached, so retry in a few minutes. If it fails the same way, eurostat_query_dataset reads the dataset\'s observations, with their dimension codes and labels, from the Statistics API, which does not depend on this structure; start with last_n_periods: 1 to keep the match small.',
+      );
+      expect(hint).not.toContain('cannot read');
+      const text = textOf(result);
+      expect(text).toContain('answered HTTP 501 to the');
+      expect(text).toContain(`Recovery: ${hint}`);
+      expect(text).toContain('reason upstream_fault');
+      expect(text).not.toContain('retryable');
+      // One attempt per structure read: the fetch layer does not retry a 501.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it('describes the 501 refusal in the upstream_fault contract (#94)', () => {
+    const when = eurostatGetDatasetInfo.errors?.find(
+      ({ reason }) => reason === 'upstream_fault',
+    )?.when;
+    expect(when).toContain('answered HTTP 501, which is not retried');
+    expect(when).toContain('could not be reached on every retry, which the error marks retryable');
   });
 
   it('declares exactly the failures its metadata path can raise', () => {

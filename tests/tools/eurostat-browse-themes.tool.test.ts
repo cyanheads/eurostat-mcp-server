@@ -614,4 +614,36 @@ describe('eurostatBrowseThemes — an unavailable catalogue host on a cold start
     expect((error.data.recovery as { hint: string }).hint).toContain('could not be reached');
     expect(text).toContain('reason upstream_fault · retryable');
   });
+
+  it('fails a TOC answering 501 on its first attempt as a non-retryable upstream_fault (#94)', async () => {
+    const tocReads: string[] = [];
+    const { error, text } = await browseColdStart(async (input?: unknown) => {
+      const { pathname } = new URL(String(input));
+      if (pathname.includes('/catalogue/toc/')) tocReads.push(pathname);
+      return new Response('Not Implemented', { status: 501, statusText: 'Not Implemented' });
+    });
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    const hint =
+      "Retry in a few minutes: the catalogue load failed on Eurostat's side and runs again on the next call.";
+    expect(error.data).toMatchObject({
+      reason: 'upstream_fault',
+      status: 501,
+      retryable: false,
+      recovery: { hint },
+    });
+    expect(text).toContain(
+      "Eurostat's catalogue endpoint answered HTTP 501 to the table-of-contents read.",
+    );
+    expect(text).toContain(`Recovery: ${hint}`);
+    expect(text).toContain('reason upstream_fault · not retryable');
+    expect(tocReads).toHaveLength(1);
+  });
+
+  it('describes the 501 refusal in the upstream_fault contract (#94)', () => {
+    const when = eurostatBrowseThemes.errors?.find(
+      ({ reason }) => reason === 'upstream_fault',
+    )?.when;
+    expect(when).toContain('table of contents answered HTTP 501, which is not retried');
+    expect(when).toContain('could not be reached on every retry, which the error marks retryable');
+  });
 });

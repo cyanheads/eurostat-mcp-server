@@ -42,7 +42,7 @@ The three `eurostat_dataframe_*` tools need the dataframe canvas, which is on by
 | `eurostat_get_dataset_info` | Fetch dataset metadata: dimensions with sample values, time range, observation count, and last-update date |
 | `eurostat_get_dimension_values` | List all valid codes for one dataset dimension, paged, with a code/label word filter and NUTS hierarchy filtering for `geo` |
 | `eurostat_query_dataset` | Fetch a bounded preview of decoded observations with dimension filters, NUTS geo-level, and time-range controls |
-| `eurostat_download_dataset` | Download a whole dataset via the SDMX bulk endpoint and stage every observation on the dataframe canvas |
+| `eurostat_download_dataset` | Download a whole dataset via the SDMX bulk endpoint and stage every row on the dataframe canvas |
 | `eurostat_dataframe_describe` | List the tables staged on a dataframe canvas, with row counts and column types |
 | `eurostat_dataframe_query` | Run a read-only SQL SELECT across staged tables |
 | `eurostat_dataframe_drop` | Remove one staged table from a dataframe canvas, leaving its other tables in place (opt-in) |
@@ -65,7 +65,7 @@ The same metadata is available through `eurostat_get_dataset_info` for tool-only
 ### `eurostat_search_datasets` <sub>tool</sub>
 
 - `query` words are ANDed case-insensitively across each dataset's label, theme breadcrumb, and code, ignoring spacing beside punctuation (`Rev.2` finds `Rev. 2`); `limit` is a positive integer (default 20), clamped to 100 with a notice. Page by passing `nextCursor` back as `cursor`; cursor calls ignore `limit`
-- Results carry `code`, `label`, `type` (`dataset` / `table`), period coverage, `obsCount`, `lastUpdated`, and `themePath`, with `totalMatches` across every page; fails as `no_match` (naming the words whose removal finds matches), `invalid_cursor`, or a retryable `upstream_fault` when no catalogue is loaded and Eurostat's table of contents is unreachable
+- Results carry `code`, `label`, `type` (`dataset` / `table`), period coverage, `obsCount`, `lastUpdated`, and `themePath`, with `totalMatches` across every page; fails as `no_match` (naming the words whose removal finds matches or, when none does, the words that match no dataset), `invalid_cursor`, or a retryable `upstream_fault` when no catalogue is loaded and Eurostat's table of contents is unreachable
 - If the Comext dataflow list cannot be loaded, results carry `comextListMissing` and a `notice`; a catalogue that could not be refreshed carries `catalogueLoadedAt`
 
 ---
@@ -99,7 +99,7 @@ The same metadata is available through `eurostat_get_dataset_info` for tool-only
 - `stage: true` stages the whole match on an available canvas, regardless of size; reuse `canvas_id` or omit it to create one. Without it, automatic staging starts above 5,000 observations. `truncated` still describes that threshold; `tableName` identifies a staged result. Canvas-disabled deployments disclose an explicit staging request as unavailable
 - `last_n_periods` counts dataset time positions, which can include periods with no populated cells. A notice names gaps across the full match (up to the newest 24, with an omitted count); increase N or replace it with `until_period` to reach earlier observations
 - Eurostat keeps only periods wholly inside `since_period`–`until_period`, per frequency. A notice names a period a bound falls inside and the bound that includes it. A one-day range goes out as `time=<date>`, because Eurostat ignores one-day bounds
-- Each observation carries code/label pairs per dimension, a nullable `value`, `status` (OBS_FLAG), and `confStatus` (CONF_STATUS); `obsCount`, `missingObsCount`, and `timeRange` cover the whole match, `truncated` is true above 5,000 observations, and `unmatchedValues` names filter values that matched nothing
+- Each observation carries code/label pairs per dimension, a nullable `value`, `status` (OBS_FLAG), and `confStatus` (CONF_STATUS); `obsCount`, `missingObsCount`, `absentCellCount` (periods a matched series lacks, which are not observations and are never staged), and `timeRange` cover the whole match, `truncated` is true above 5,000 observations, and `unmatchedValues` names filter values that matched nothing
 - Fails as `not_found`, `no_results` (naming the unmatched values, the periods with no value, why a range selected no period, or `geo_level` as the likely cause when Eurostat's reply says nothing more), `invalid_dimension`, `invalid_period`, `conflicting_params`, a non-retryable `async_response` for a query too large to serve, `canvas_not_found`, or a retryable `upstream_fault` when the Statistics API is down
 
 ---
@@ -108,8 +108,9 @@ The same metadata is available through `eurostat_get_dataset_info` for tool-only
 
 - `dataset_code` plus the same `filters` map and `since_period` / `until_period` (no `last_n_periods`: the TSV keeps a column per period unless a range drops it); `preview_limit` is a positive integer (default 25), clamped to 500 with a notice
 - The wholly-inside rule and its notice apply here too. A one-day range requests that day and the next, and the later day's column is dropped before anything is counted or staged
-- Returns `rowCount` (echoed as `totalCount`), `missingCount`, `periodRange`, and `bytesRead` for the whole download; fails as `not_found`, `invalid_dimension`, `invalid_period`, `filter_arity`, a non-retryable `async_queued` or `extraction_too_big`, `no_results`, `upstream_fault` (retryable when the SDMX endpoint is down), or `canvas_not_found`
-- The `EUROSTAT_BULK_MAX_BYTES` budget (default 50 MiB decoded) retains complete observations within the permitted prefix and returns `budgetExceeded: true`. A budget too small for a complete header and usable observation fails as `byte_budget_exceeded`, with the configured limit and narrowing guidance. `bytesRead` counts accepted decoded bytes, never more than the budget; incomplete trailing rows are discarded.
+- Stages one row per non-blank TSV cell. A row with null `obs_value` and no flag, status or text (an unflagged `:`) is not an observation: it is a period the series lacks, or a period of a frequency the series has no observation of (the padding of a mixed-frequency slice)
+- Returns `rowCount` (echoed as `totalCount`), `missingCount`, `absentCellCount` (the unflagged rows at periods of a frequency the series carries), `periodRange` (bounded by rows carrying a value, flag, status, or text), and `bytesRead` for the whole download; fails as `not_found`, `invalid_dimension`, `invalid_period`, `filter_arity`, a non-retryable `async_queued` or `extraction_too_big`, `no_results`, `upstream_fault` (retryable when the SDMX endpoint is down), or `canvas_not_found`
+- The `EUROSTAT_BULK_MAX_BYTES` budget (default 50 MiB decoded) retains complete rows within the permitted prefix and returns `budgetExceeded: true`. A budget too small for a complete header and usable row fails as `byte_budget_exceeded`, with the configured limit and narrowing guidance. `bytesRead` counts accepted decoded bytes, never more than the budget; incomplete trailing rows are discarded.
 
 ---
 
@@ -137,7 +138,7 @@ The same metadata is available through `eurostat_get_dataset_info` for tool-only
 
 ### `eurostat://dataset/{dataset_code}` <sub>resource</sub>
 
-- Same payload as `eurostat_get_dataset_info`, returned as `application/json`; a failed read carries the same `reason`, and `retryable` on an outage
+- Same payload as `eurostat_get_dataset_info`, returned as `application/json`; a failed read carries the same `reason` and a recovery hint, and `retryable` on an outage
 - `dataset_code` comes from `eurostat_search_datasets` or `eurostat_browse_themes`
 
 ## Features

@@ -105,7 +105,7 @@ export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
     {
       reason: 'upstream_fault',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: "Eurostat returned a dataset structure or content constraint this server cannot read — malformed, truncated, not XML, or missing the requested dataset's dataflow — or the structure endpoint answered HTTP 5xx or could not be reached on every retry, which the error marks retryable.",
+      when: "Eurostat returned a dataset structure or content constraint this server cannot read — malformed, truncated, not XML, or missing the requested dataset's dataflow; the structure endpoint answered HTTP 501, which is not retried; or it answered another HTTP 5xx or could not be reached on every retry, which the error marks retryable.",
       recovery:
         'Retry in a few minutes, since a failed structure read is not cached. If it fails the same way, eurostat_query_dataset reads the observations, with dimension codes and labels, from a separate endpoint.',
     },
@@ -130,6 +130,15 @@ export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
           retryable: true,
           recovery: {
             hint: `Eurostat's SDMX structure endpoint ${outageAnswer((err as McpError).data?.status)} for "${input.dataset_code}" on every attempt — an upstream outage, not a fault in the request. A failed read is not cached, so retry in a few minutes.`,
+          },
+        });
+      }
+      const status = (err as McpError).data?.status;
+      if (reason === 'upstream_fault' && typeof status === 'number') {
+        // An HTTP status the fetch layer does not retry (a 501): an answer, not a body to read.
+        throw ctx.fail('upstream_fault', (err as Error).message, {
+          recovery: {
+            hint: `Eurostat's SDMX structure endpoint answered HTTP ${status} for "${input.dataset_code}", a status this server does not retry on its own. A failed read is not cached, so retry in a few minutes. If it fails the same way, eurostat_query_dataset reads the dataset's observations, with their dimension codes and labels, from the Statistics API, which does not depend on this structure; start with last_n_periods: 1 to keep the match small.`,
           },
         });
       }

@@ -858,9 +858,9 @@ describe('eurostatGetDimensionValues — failures raised by the real data servic
         recovery: { hint: expect.stringContaining('"unit" values of "nama_10_gdp"') },
       });
       const hint = (error.data.recovery as { hint: string }).hint;
-      expect(hint).toContain('HTTP 503');
-      expect(hint).toMatch(/retry in a few minutes/i);
-      expect(hint).not.toContain('cannot read');
+      expect(hint).toBe(
+        'Eurostat\'s SDMX structure endpoint answered HTTP 503 on every attempt, so the "unit" values of "nama_10_gdp" cannot be listed — an upstream outage, not a fault in the request. A failed read is not cached, so retry in a few minutes.',
+      );
       const text = textOf(result);
       expect(text).toContain(`Recovery: ${hint}`);
       expect(text).toContain('reason upstream_fault · retryable');
@@ -887,9 +887,36 @@ describe('eurostatGetDimensionValues — failures raised by the real data servic
       const result = await callSettled({ dataset_code: 'earn_ses_annual', dimension: 'geo' });
       const error = errorOf(result);
       expect(error.data).toMatchObject({ reason: 'upstream_fault' });
-      expect((error.data.recovery as { hint: string }).hint).toContain('cannot read');
+      expect((error.data.recovery as { hint: string }).hint).toBe(
+        'Eurostat returned a structure this server cannot read, so the "geo" values of "earn_ses_annual" cannot be listed. A failed read is not cached, so retry in a few minutes. If it fails the same way, filter eurostat_query_dataset on the code in question: a code the dataset lacks comes back in unmatchedValues.',
+      );
       expect(error.data.retryable).toBeUndefined();
       expect(textOf(result)).not.toContain('retryable');
+    });
+
+    it('names an HTTP 501 the structure endpoint answered, rather than an unreadable structure (#94)', async () => {
+      const fetchMock = vi.fn(
+        async () => new Response('Not Implemented', { status: 501, statusText: 'Not Implemented' }),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      const result = await callSettled({ dataset_code: 'nama_10_gdp', dimension: 'unit' });
+      expect(result.isError).toBe(true);
+      const error = errorOf(result);
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.data).toMatchObject({ reason: 'upstream_fault' });
+      expect(error.data.retryable).toBeUndefined();
+      const hint = (error.data.recovery as { hint: string }).hint;
+      expect(hint).toBe(
+        'Eurostat\'s SDMX structure endpoint answered HTTP 501, a status this server does not retry on its own, so the "unit" values of "nama_10_gdp" cannot be listed. A failed read is not cached, so retry in a few minutes. If it fails the same way, filter eurostat_query_dataset on the code in question: a code the dataset lacks comes back in unmatchedValues.',
+      );
+      expect(hint).not.toContain('cannot read');
+      const text = textOf(result);
+      expect(text).toContain('answered HTTP 501 to the');
+      expect(text).toContain(`Recovery: ${hint}`);
+      expect(text).not.toContain('retryable');
+      // One attempt per structure read: the fetch layer does not retry a 501.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
     });
 
     it('leaves a cancelled call as a cancellation, not an outage', async () => {
@@ -911,6 +938,14 @@ describe('eurostatGetDimensionValues — failures raised by the real data servic
       expect(error.code).toBe(JsonRpcErrorCode.RequestCancelled);
       expect(error.data?.reason).not.toBe('upstream_fault');
     });
+  });
+
+  it('describes the 501 refusal in the upstream_fault contract (#94)', () => {
+    const when = eurostatGetDimensionValues.errors?.find(
+      ({ reason }) => reason === 'upstream_fault',
+    )?.when;
+    expect(when).toContain('answered HTTP 501, which is not retried');
+    expect(when).toContain('could not be reached on every retry, which the error marks retryable');
   });
 
   it('declares exactly the failures its metadata, paging and staging paths can raise', () => {

@@ -664,10 +664,78 @@ describe('EurostatCatalogueService — punctuation spacing and blocking words (#
     expect(await svc.search('zebra crossings unemployment', 20, undefined, ctx)).toEqual({
       datasets: [],
       totalMatches: 0,
+      unmatchedWords: ['zebra', 'crossings'],
     });
     expect(await svc.search('rates rates', 20, undefined, ctx)).not.toHaveProperty(
       'wordRemovalCounts',
     );
+  });
+
+  it('names the words no dataset carries, as typed, in query order, each once (#92)', async () => {
+    const svc = excerptService();
+    const ctx = createMockContext();
+    // "tourism" files sbs_sc_ovw under the Tourism theme; neither other word is in the excerpt.
+    expect(await svc.search('tourism Overnight stays overnight', 20, undefined, ctx)).toEqual({
+      datasets: [],
+      totalMatches: 0,
+      unmatchedWords: ['Overnight', 'stays'],
+    });
+    // "tourism" and "unemployment" each match, never together, so no removal count applies.
+    expect(await svc.search('tourism unemployment overnight', 20, undefined, ctx)).toEqual({
+      datasets: [],
+      totalMatches: 0,
+      unmatchedWords: ['overnight'],
+    });
+  });
+
+  it('flags a query none of whose words any dataset carries (#92)', async () => {
+    const result = await excerptService().search(
+      'overnight STAYS overnight',
+      20,
+      undefined,
+      createMockContext(),
+    );
+    expect(result).toEqual({
+      datasets: [],
+      totalMatches: 0,
+      unmatchedWords: ['overnight', 'STAYS'],
+      allWordsUnmatched: true,
+    });
+  });
+
+  it('reports a dead word beside its own removal count when the other words co-occur (#92)', async () => {
+    const result = await excerptService().search(
+      'Overnight overnight tourism',
+      20,
+      undefined,
+      createMockContext(),
+    );
+    expect(result).toEqual({
+      datasets: [],
+      totalMatches: 0,
+      unmatchedWords: ['Overnight'],
+      wordRemovalCounts: [{ word: 'Overnight', totalMatches: 1 }],
+    });
+  });
+
+  it('checks a word past a dataset’s second miss, so a late match keeps it off the list (#92)', async () => {
+    /**
+     * "delta" appears only in a dataset that already lacks two query words before it
+     * ("alpha" and "gamma"), so a scan stopping at a dataset's second miss would call it dead.
+     */
+    const svc = await makeLoadedService([
+      tocLine('Root', 'root', 'folder'),
+      tocLine('    alpha beta', 'first', 'dataset'),
+      tocLine('    gamma', 'second', 'dataset'),
+      tocLine('    delta', 'third', 'dataset'),
+    ]);
+    const result = await svc.search(
+      'alpha gamma delta epsilon',
+      10,
+      undefined,
+      createMockContext(),
+    );
+    expect(result).toEqual({ datasets: [], totalMatches: 0, unmatchedWords: ['epsilon'] });
   });
 
   /**

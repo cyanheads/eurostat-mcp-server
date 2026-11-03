@@ -107,7 +107,8 @@ export const OBS_VALUE_TEXT_COLUMN = 'obs_value_text';
  * formats: `:C` for a confidential cell and `KG` for a quantity unit, with nothing
  * separating them from the numeric indicators beside them. `:` is Eurostat's
  * missing-value marker, so `:` followed by a `CONF_STATUS` code is a withheld value
- * carrying its confidentiality status, and `:` alone is a plain missing value. Any
+ * carrying its confidentiality status, and `:` alone is a cell with no value (in the
+ * TSV, unflagged, a period the series lacks rather than an observation). Any
  * other text is kept as published — never coerced to a number, and never dropped.
  */
 export function decodeTextValue(raw: string): { confStatus?: string; text?: string } {

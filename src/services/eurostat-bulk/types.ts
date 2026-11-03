@@ -6,7 +6,7 @@
  */
 
 /**
- * One observation flattened from the wide TSV layout into a dataframe row.
+ * One non-blank TSV cell flattened from the wide layout into a dataframe row.
  *
  * The TSV endpoint carries codes only — no labels — so a row has one column per
  * dimension holding the code, `time` for the period, then the measure columns.
@@ -42,6 +42,14 @@ export interface TsvHeader {
  */
 export interface BulkStats {
   /**
+   * Emitted rows holding an unflagged `:` — no value, flag, status or text — in a period
+   * whose frequency (read off the period code's shape) the same line carries in a row
+   * that is not one: periods the series lacks, which the Statistics API has no cell for.
+   * An unflagged `:` at a period of a frequency the line has no observation of (the
+   * padding of a mixed-frequency slice, or a series that is `:` throughout) is left out. Part of {@link rowCount} and {@link missingCount}.
+   */
+  absentCellCount: number;
+  /**
    * True when the byte budget stopped the transfer before the body ended, so
    * the rows are a prefix of the dataset rather than all of it.
    */
@@ -50,11 +58,20 @@ export interface BulkStats {
   bytesRead: number;
   /** Whether the response body arrived gzip-compressed. */
   compressed: boolean;
-  /** Emitted observations carrying no numeric value. */
+  /**
+   * Emitted rows carrying no numeric value: observations published without a number (a
+   * flagged `:`, a text value) and the rows of unflagged `:` cells.
+   */
   missingCount: number;
-  /** Distinct periods actually emitted, ascending. */
+  /**
+   * Distinct periods of the emitted rows that carry an observation — a value, a flag, a
+   * status or a text value — ascending. An unflagged `:` adds none.
+   */
   periodsSeen: string[];
-  /** Observations emitted — one per populated cell. */
+  /**
+   * Rows emitted, one per non-blank cell: the observations, flagged `:` cells included,
+   * and the unflagged `:` cells, which are not observations.
+   */
   rowCount: number;
 }
 

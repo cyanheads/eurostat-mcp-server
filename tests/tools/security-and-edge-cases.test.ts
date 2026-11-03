@@ -142,6 +142,7 @@ const minimalQueryResult = {
   truncated: false,
   timeRange: { start: '2024', end: '2024' },
   missingObsCount: 0,
+  absentCellCount: 0,
   appliedFilters: {},
 };
 
@@ -157,6 +158,7 @@ function minimalDownload(): BulkDownload {
       compressed: false,
       rowCount: 0,
       missingCount: 0,
+      absentCellCount: 0,
       periodsSeen: [],
     },
     rows: async function* () {
@@ -537,6 +539,7 @@ describe('Secret leakage prevention', () => {
       dimensionsUsed: ['freq', 'geo'],
       rowCount: 1,
       missingCount: 0,
+      absentCellCount: 0,
       periodRange: { start: '2024', end: '2024' },
       bytesRead: 64,
       compressed: false,
@@ -1155,14 +1158,14 @@ describe('Edge cases', () => {
       vi.mocked(getEurostatDataService).mockReturnValue({
         getDatasetInfo: mockGetInfo,
       } as never);
-      const ctx = createMockContext({ tenantId: 'test' });
+      const ctx = createMockContext({ tenantId: 'test', errors: eurostatDatasetResource.errors });
       const params = resourceParams.parse({ dataset_code: 'nama_10_gdp' });
       await eurostatDatasetResource.handler(params, ctx);
       expect(mockGetInfo).toHaveBeenCalledWith('nama_10_gdp', ctx);
     });
 
     it('returns full meta shape including dimensions array', async () => {
-      const ctx = createMockContext({ tenantId: 'test' });
+      const ctx = createMockContext({ tenantId: 'test', errors: eurostatDatasetResource.errors });
       const params = resourceParams.parse({ dataset_code: 'nama_10_gdp' });
       const result = await eurostatDatasetResource.handler(params, ctx);
       expect(result.dimensions).toBeInstanceOf(Array);
@@ -1174,7 +1177,7 @@ describe('Edge cases', () => {
       vi.mocked(getEurostatDataService).mockReturnValue({
         getDatasetInfo: mockGetInfo,
       } as never);
-      const ctx = createMockContext({ tenantId: 'test' });
+      const ctx = createMockContext({ tenantId: 'test', errors: eurostatDatasetResource.errors });
       const params = resourceParams.parse({ dataset_code: '../etc/passwd' });
       await expect(eurostatDatasetResource.handler(params, ctx)).rejects.toThrow();
       // The injection reaches the service, which rejects it — no crash before the service call

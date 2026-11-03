@@ -96,6 +96,13 @@ interface TocCache {
   searchText?: (string | undefined)[];
 }
 
+/** What `countWithoutEachWord` finds for a query that matched nothing; each field is omitted when empty. */
+interface BlockingWords {
+  allWordsUnmatched?: true;
+  unmatchedWords?: string[];
+  wordRemovalCounts?: Array<{ totalMatches: number; word: string }>;
+}
+
 export class EurostatCatalogueService {
   private cache: TocCache | undefined;
   /** Shared in-flight refresh so concurrent callers past the TTL trigger one fetch. */
@@ -686,34 +693,51 @@ export class EurostatCatalogueService {
 
   /**
    * For a query that matched nothing, the words whose removal alone finds matches, with
-   * that count, in query order. `words` maps each distinct token to the word as typed.
-   * One pass: a placement missing exactly one word rescues its code for that word, and a
-   * code counts once per word whichever placement rescued it — so each count equals the
-   * `totalMatches` of the same search without that word.
+   * that count (`wordRemovalCounts`), and the words no searched text contains at all
+   * (`unmatchedWords`, with `allWordsUnmatched` when that is every word), each in query
+   * order and each omitted when empty. `words` maps each distinct token to the word as
+   * typed. One pass: a placement missing exactly one word rescues its code for that
+   * word, and a code counts once per word whichever placement rescued it — so each count
+   * equals the `totalMatches` of the same search without that word.
    */
   private countWithoutEachWord(
     toc: TocCache,
     texts: (string | undefined)[],
     words: Map<string, string>,
-  ): Array<{ totalMatches: number; word: string }> {
+  ): BlockingWords {
     const rescued = new Map<string, Set<string>>();
+    const unmatched = new Set(words.keys());
     toc.entries.forEach((e, i) => {
       const text = texts[i];
       if (text === undefined) return;
       let missing: string | undefined;
+      let misses = 0;
       for (const token of words.keys()) {
-        if (text.includes(token)) continue;
-        if (missing !== undefined) return;
-        missing = token;
+        // Past a second miss nothing is rescued; only a word not yet seen anywhere needs checking.
+        if (misses > 1 && !unmatched.has(token)) continue;
+        if (text.includes(token)) {
+          unmatched.delete(token);
+        } else {
+          misses += 1;
+          missing = token;
+        }
       }
-      if (missing === undefined) return;
+      if (misses !== 1 || missing === undefined) return;
       const codes = rescued.get(missing) ?? new Set<string>();
       rescued.set(missing, codes.add(e.code));
     });
-    return [...words].flatMap(([token, word]) => {
+    const wordRemovalCounts = [...words].flatMap(([token, word]) => {
       const codes = rescued.get(token);
       return codes ? [{ word, totalMatches: codes.size }] : [];
     });
+    const unmatchedWords = [...words].flatMap(([token, word]) =>
+      unmatched.has(token) ? [word] : [],
+    );
+    return {
+      ...(wordRemovalCounts.length > 0 && { wordRemovalCounts }),
+      ...(unmatchedWords.length > 0 && { unmatchedWords }),
+      ...(unmatched.size === words.size && { allWordsUnmatched: true as const }),
+    };
   }
 
   /**
@@ -739,10 +763,12 @@ export class EurostatCatalogueService {
    * An empty match reports the `DS-*` codes the query names that neither source lists
    * (`undisseminatedCodes`), so the caller can be told the collection is not
    * disseminated rather than to broaden the search, and — for two or more distinct
-   * words — each word whose removal alone finds matches (`wordRemovalCounts`).
-   * `comextListMissing` flags that the Comext list is not merged right now, so the
-   * `DS-*` collections were not searched and absence from that list proves nothing;
-   * `catalogueLoadedAt` marks a catalogue a failed refresh could not replace.
+   * words — each word whose removal alone finds matches (`wordRemovalCounts`) and each
+   * word no dataset's search text contains (`unmatchedWords`, as first typed), with
+   * `allWordsUnmatched` when that is every word. `comextListMissing` flags that the
+   * Comext list is not merged right now, so the `DS-*` collections were not searched and
+   * absence from that list proves nothing; `catalogueLoadedAt` marks a catalogue a
+   * failed refresh could not replace.
    */
   async search(
     query: string,
@@ -750,12 +776,14 @@ export class EurostatCatalogueService {
     cursor: string | undefined,
     ctx: Context,
   ): Promise<{
+    allWordsUnmatched?: true;
     catalogueLoadedAt?: string;
     comextListMissing?: boolean;
     datasets: DatasetResult[];
     nextCursor?: string;
     totalMatches: number;
     undisseminatedCodes?: string[];
+    unmatchedWords?: string[];
     wordRemovalCounts?: Array<{ totalMatches: number; word: string }>;
   }> {
     const toc = await this.ensureLoaded(ctx);
@@ -798,7 +826,7 @@ export class EurostatCatalogueService {
     }));
 
     let undisseminatedCodes: string[] = [];
-    let wordRemovalCounts: Array<{ totalMatches: number; word: string }> = [];
+    let blockingWords: BlockingWords = {};
     if (matched.length === 0) {
       undisseminatedCodes = tokens
         .filter((t) => DS_CODE_TOKEN.test(t) && !toc.codeIndex.has(t.toUpperCase()))
@@ -809,14 +837,14 @@ export class EurostatCatalogueService {
       tokens.forEach((token, n) => {
         if (!words.has(token)) words.set(token, typed[n] ?? token);
       });
-      if (words.size > 1) wordRemovalCounts = this.countWithoutEachWord(toc, texts, words);
+      if (words.size > 1) blockingWords = this.countWithoutEachWord(toc, texts, words);
     }
     const nextOffset = offset + pageSize;
     return {
       datasets,
       totalMatches: matched.length,
       ...(undisseminatedCodes.length > 0 && { undisseminatedCodes }),
-      ...(wordRemovalCounts.length > 0 && { wordRemovalCounts }),
+      ...blockingWords,
       ...(toc.comextRetryAt !== undefined && { comextListMissing: true }),
       ...this.staleness(toc),
       ...(nextOffset < matched.length && {

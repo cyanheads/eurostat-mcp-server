@@ -472,7 +472,7 @@ describe('DS-999999 is not_found on every tool (#46)', () => {
     await expect(
       eurostatDatasetResource.handler(
         { dataset_code: 'DS-999999' },
-        createMockContext({ tenantId: 'default' }),
+        createMockContext({ tenantId: 'default', errors: eurostatDatasetResource.errors }),
       ),
     ).rejects.toMatchObject({ data: { reason: 'not_found' } });
   });
@@ -697,6 +697,27 @@ describe('search and browse over both sources (#46, #45)', () => {
     expect(hintOf(result)).toContain('Try a broader term');
   });
 
+  it('names the dead words, then the broaden hint, when no word of the query matches (#92)', async () => {
+    const result = await runToolContract(eurostatSearchDatasets, { query: 'zebra crossings' });
+    const hint =
+      '"zebra" and "crossings" match no dataset label, theme breadcrumb, or code. Try a broader term or use eurostat_browse_themes to explore themes without text search.';
+    expect(hintOf(result)).toBe(hint);
+    expect(text(result)).toContain(`Recovery: ${hint}`);
+  });
+
+  it('names a not-disseminated code among the dead words, after its own sentence (#92)', async () => {
+    const result = await runToolContract(eurostatSearchDatasets, {
+      query: 'DS-056120 overnight prodcom',
+    });
+    expect(errorData(result)).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'no_match' },
+    });
+    expect(hintOf(result)).toBe(
+      'Broadening will not find DS-056120: a collection on neither list is not disseminated. Search for its subject instead — "prodcom" or "CN8", for example — to find the DS-* collections Eurostat does disseminate. "DS-056120" and "overnight" match no dataset label, theme breadcrumb, or code. Search again without them.',
+    );
+  });
+
   it('checks a code directly when the Comext list could not be loaded', async () => {
     fetchMock.mockImplementation(async (input: unknown) =>
       routeOf(input).route === 'dataflow-list'
@@ -741,6 +762,35 @@ describe('search and browse over both sources (#46, #45)', () => {
         'Without "rates": 7 matches. Without "sex": 3 matches. Without "annual": 4 matches. Search again without one of those words to see its matches.',
       );
       expect(text(result)).toContain('Without "annual": 4 matches.');
+    });
+
+    it('names the words no dataset carries when no single removal finds matches (#92)', async () => {
+      const result = await runToolContract(eurostatSearchDatasets, {
+        query: 'tourism overnight stays',
+      });
+      expect(errorData(result)).toMatchObject({
+        code: JsonRpcErrorCode.NotFound,
+        message: 'No datasets matched "tourism overnight stays".',
+        data: { reason: 'no_match' },
+      });
+      const hint =
+        '"overnight" and "stays" match no dataset label, theme breadcrumb, or code. Search again without them.';
+      expect(hintOf(result)).toBe(hint);
+      expect(text(result)).toContain(`Recovery: ${hint}`);
+    });
+
+    it.each([
+      [
+        'tourism vending overnight stays guests',
+        '"vending", "overnight", "stays" and "guests" match no dataset label, theme breadcrumb, or code. Search again without them.',
+      ],
+      [
+        'tourism overnight overnight stays',
+        '"overnight" and "stays" match no dataset label, theme breadcrumb, or code. Search again without them.',
+      ],
+    ])('names the dead words of "%s" in query order, each once (#92)', async (query, hint) => {
+      const result = await runToolContract(eurostatSearchDatasets, { query });
+      expect(hintOf(result)).toBe(hint);
     });
   });
 
@@ -789,6 +839,26 @@ describe('search and browse over both sources (#46, #45)', () => {
       expect(hintOf(result)).toMatch(/^The Comext dataflow list could not be loaded/);
       expect(hintOf(result)).toContain('Try a broader term');
       expect(text(result)).toContain('were not searched');
+    });
+
+    it('names no word of a multi-word no-match while the list is down (#92)', async () => {
+      // "prodcom" is carried only by DS-* entries, so with the list down it matches nothing either.
+      listDown();
+      const result = await runToolContract(eurostatSearchDatasets, {
+        query: 'prodcom zebra crossings',
+      });
+      expect(hintOf(result)).toBe(
+        'The Comext dataflow list could not be loaded, so the DS-* collections (detailed trade and PRODCOM) were not searched; the merge is retried about once a minute. eurostat_get_dataset_info reads a DS-* code directly. Try a broader term or use eurostat_browse_themes to explore themes without text search.',
+      );
+    });
+
+    it('names the dead words of the same query once the list is merged (#92)', async () => {
+      const result = await runToolContract(eurostatSearchDatasets, {
+        query: 'prodcom zebra crossings',
+      });
+      expect(hintOf(result)).toBe(
+        '"zebra" and "crossings" match no dataset label, theme breadcrumb, or code. Search again without them.',
+      );
     });
 
     it('flags a browse of ext_go and icts, and leaves other folders alone', async () => {

@@ -18,18 +18,24 @@ const BROADEN_HINT =
 /**
  * The `no_match` recovery: first what the catalogue could not answer for (the unmerged
  * Comext list, or a DS-* code no source lists), then the expired copy a failed refresh
- * left in service, then each word whose removal alone finds matches, and the broaden hint
- * only when neither a count nor a code points elsewhere.
+ * left in service, then each word whose removal alone finds matches — or, when none
+ * does, the words no dataset carries, unless the unmerged Comext list leaves that
+ * unproven — and the broaden hint only when neither a count, a word left to search, nor
+ * a code points elsewhere.
  */
 function noMatchHint({
+  allWordsUnmatched,
   catalogueLoadedAt,
   comextListMissing,
   undisseminatedCodes,
+  unmatchedWords,
   wordRemovalCounts,
 }: {
+  allWordsUnmatched?: true;
   catalogueLoadedAt?: string;
   comextListMissing?: boolean;
   undisseminatedCodes?: string[];
+  unmatchedWords?: string[];
   wordRemovalCounts?: Array<{ totalMatches: number; word: string }>;
 }): string {
   const codes = undisseminatedCodes?.join(', ');
@@ -56,6 +62,13 @@ function noMatchHint({
       hint.push(`Without "${word}": ${totalMatches} ${totalMatches === 1 ? 'match' : 'matches'}.`);
     }
     hint.push('Search again without one of those words to see its matches.');
+  } else if (unmatchedWords?.length && !comextListMissing) {
+    const quoted = unmatchedWords.map((word) => `"${word}"`);
+    const one = quoted.length === 1;
+    const named = one ? quoted[0] : `${quoted.slice(0, -1).join(', ')} and ${quoted.at(-1)}`;
+    hint.push(`${named} ${one ? 'matches' : 'match'} no dataset label, theme breadcrumb, or code.`);
+    if (!allWordsUnmatched) hint.push(`Search again without ${one ? 'it' : 'them'}.`);
+    else if (!codes) hint.push(BROADEN_HINT);
   } else if (!codes) {
     hint.push(BROADEN_HINT);
   }
@@ -75,7 +88,7 @@ export const createEurostatSearchDatasets = (clampLimits: boolean) =>
         .min(1)
         .regex(/\S/, 'Query must contain at least one non-whitespace search term.')
         .describe(
-          'Search terms — at least one non-whitespace token is required. Split on whitespace into tokens; every token must match (AND), case-insensitively, somewhere across the dataset label, theme breadcrumb, or code. Spacing beside punctuation in the catalogue is ignored, so "Rev.2" also finds "Rev. 2" and "2015=100" finds "2015 = 100"; a token keeps its own punctuation, as in "R&D", "non-EU", or "DS-045409". Word order does not matter, so "business demography NUTS 3" or "regional economic accounts" resolve without naming a label verbatim. When nothing matches, the error names each word whose removal alone would find matches.',
+          'Search terms — at least one non-whitespace token is required. Split on whitespace into tokens; every token must match (AND), case-insensitively, somewhere across the dataset label, theme breadcrumb, or code. Spacing beside punctuation in the catalogue is ignored, so "Rev.2" also finds "Rev. 2" and "2015=100" finds "2015 = 100"; a token keeps its own punctuation, as in "R&D", "non-EU", or "DS-045409". Word order does not matter, so "business demography NUTS 3" or "regional economic accounts" resolve without naming a label verbatim. When nothing matches, the error names each word whose removal alone would find matches or, when no single removal would and both catalogue sources were searched, the words that match no dataset label, theme breadcrumb, or code.',
         ),
       limit: (clampLimits ? z.number().multipleOf(1).min(1) : z.number().int().min(1).max(100))
         .default(20)
@@ -189,7 +202,7 @@ export const createEurostatSearchDatasets = (clampLimits: boolean) =>
         code: JsonRpcErrorCode.NotFound,
         when: 'No datasets matched the query string — including a query naming a DS-* code that neither the dissemination table of contents nor the Comext dataflow list carries, which is a collection Eurostat does not disseminate, and any query while the Comext dataflow list cannot be loaded and only the table of contents is searched.',
         recovery:
-          'Try a broader or different search term, or eurostat_browse_themes to explore without text search; for a multi-word query the hint names each word whose removal alone finds matches, with the count. A DS-* code on neither list is not disseminated, so search for its subject (e.g. "prodcom", "CN8") to find the collections that are. While the Comext dataflow list cannot be loaded, eurostat_get_dataset_info reads a DS-* code directly.',
+          'Try a broader or different search term, or eurostat_browse_themes to explore without text search; for a multi-word query the hint names each word whose removal alone finds matches, with the count, or else, when both catalogue sources were searched, the words that match no dataset label, theme breadcrumb, or code. A DS-* code on neither list is not disseminated, so search for its subject (e.g. "prodcom", "CN8") to find the collections that are. While the Comext dataflow list cannot be loaded, eurostat_get_dataset_info reads a DS-* code directly.',
       },
       {
         reason: 'invalid_cursor',
@@ -201,7 +214,7 @@ export const createEurostatSearchDatasets = (clampLimits: boolean) =>
       {
         reason: 'upstream_fault',
         code: JsonRpcErrorCode.ServiceUnavailable,
-        when: "The server had no catalogue loaded yet, and Eurostat's table of contents answered HTTP 5xx or could not be reached on every retry, which the error marks retryable. Once a catalogue is loaded, a failed refresh serves that copy instead.",
+        when: "The server had no catalogue loaded yet, and Eurostat's table of contents answered HTTP 501, which is not retried; or it answered another HTTP 5xx or could not be reached on every retry, which the error marks retryable. Once a catalogue is loaded, a failed refresh serves that copy instead.",
         recovery:
           "Retry in a few minutes: the catalogue load failed on Eurostat's side and runs again on the next call.",
       },

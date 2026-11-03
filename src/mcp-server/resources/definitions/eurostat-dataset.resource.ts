@@ -4,6 +4,7 @@
  */
 
 import { resource, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getEurostatDataService } from '@/services/eurostat-data/eurostat-data-service.js';
 
 export const eurostatDatasetResource = resource('eurostat://dataset/{dataset_code}', {
@@ -76,6 +77,24 @@ export const eurostatDatasetResource = resource('eurostat://dataset/{dataset_cod
       ),
     metadataUrl: z.string().optional().describe('Link to ESMS metadata page, when available.'),
   }),
+  errors: [
+    {
+      reason: 'not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The dataset code does not exist or is not available for dissemination.',
+      recovery:
+        'Use eurostat_search_datasets or eurostat_browse_themes to find a valid dataset code.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_fault',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: "Eurostat returned a dataset structure or content constraint this server cannot read — malformed, truncated, not XML, or missing the requested dataset's dataflow; the structure endpoint answered HTTP 501, which is not retried; or it answered another HTTP 5xx or could not be reached on every retry, which the error marks retryable.",
+      recovery:
+        'Retry in a few minutes, since a failed structure read is not cached. If it fails the same way, eurostat_query_dataset reads the observations, with dimension codes and labels, from a separate endpoint.',
+      thrownBy: 'service',
+    },
+  ],
 
   handler(params, ctx) {
     const svc = getEurostatDataService();
