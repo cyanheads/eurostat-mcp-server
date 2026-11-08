@@ -497,7 +497,8 @@ export class EurostatCatalogueService {
       if (typeof status === 'number') {
         throw serviceUnavailable(
           `Eurostat's catalogue endpoint answered HTTP ${status} to the table-of-contents read.`,
-          { reason: 'upstream_fault', status, retryable: false },
+          // 408 and 429 are transient however long they last; any other status repeats until Eurostat changes it.
+          { reason: 'upstream_fault', status, retryable: status === 408 || status === 429 },
           { cause: error },
         );
       }

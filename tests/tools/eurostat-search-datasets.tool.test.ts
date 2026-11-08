@@ -697,6 +697,33 @@ describe('eurostatSearchDatasets — an unavailable catalogue host on a cold sta
     expect(text).toContain('reason upstream_fault · not retryable');
   });
 
+  it.each([
+    [408, 'Request Timeout'],
+    [429, 'Too Many Requests'],
+  ])(
+    'fails a TOC answering %i on every attempt as a retryable upstream_fault on both surfaces',
+    async (status, statusText) => {
+      const tocReads: string[] = [];
+      const { error, text } = await searchColdStart(async (input?: unknown) => {
+        const { pathname } = new URL(String(input));
+        if (pathname.includes('/catalogue/toc/')) tocReads.push(pathname);
+        return new Response(statusText, { status, statusText });
+      });
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.data).toMatchObject({ reason: 'upstream_fault', retryable: true });
+      const hint = (error.data.recovery as { hint: string }).hint;
+      expect(hint).toContain(`HTTP ${status} on every attempt`);
+      expect(hint).toMatch(/retry in a few minutes/i);
+      expect(text).toContain(
+        `Eurostat's catalogue endpoint answered HTTP ${status} to the table-of-contents read.`,
+      );
+      expect(text).toContain(`Recovery: ${hint}`);
+      expect(text).toContain('reason upstream_fault · retryable');
+      // Retried like any transient answer: the first attempt and three more.
+      expect(tocReads).toHaveLength(4);
+    },
+  );
+
   it('describes the 501 refusal in the upstream_fault contract (#94)', () => {
     const when = eurostatSearchDatasets.errors?.find(
       ({ reason }) => reason === 'upstream_fault',
