@@ -124,9 +124,28 @@ export interface DimensionValuesResult {
   dimensionLabel: string;
   /** Effective hierarchy level for `geo`, including the omitted-input default. */
   geoLevel?: GeoLevel;
+  /**
+   * The dimension's whole list, narrowed only by an explicit geo level: for `geo`
+   * without one, every level, beside the `country` default `values` holds.
+   */
+  listedValues: ListedValue[];
   totalCount: number;
   values: Array<{ code: string; label: string }>;
 }
+
+/**
+ * A dimension value as the dataset lists it; a `geo` value also carries its NUTS
+ * level. A type alias, not an interface, so a list of them stages as canvas rows.
+ */
+export type ListedValue = {
+  code: string;
+  label: string;
+  /**
+   * Set on `geo` values only. Null when the code's codelist entry has no LEVEL
+   * annotation, or one no {@link GeoLevel} maps (`5` capital regions, `OTH` groupings).
+   */
+  level?: GeoLevel | null;
+};
 
 /**
  * A decoded query result.
@@ -143,7 +162,9 @@ export interface QueryResult {
   /**
    * Periods the matched series lack: for each series (one combination of the non-time
    * dimensions) with at least one cell, the periods of a frequency it carries in which it
-   * has neither a value nor a status. Not observations, so no count or row includes them.
+   * has neither a value nor a status, counted only from that frequency's first to its
+   * latest period with a cell in any series. Not observations, so no count or row
+   * includes them.
    */
   absentCellCount: number;
   /** Filters actually sent upstream — the requested filters minus any zero-length arrays. */
@@ -151,6 +172,14 @@ export interface QueryResult {
   datasetCode: string;
   datasetLabel: string;
   dimensionsUsed: string[];
+  /**
+   * Values the query selects that the reply lists but no cell of the match carries, keyed
+   * by dimension: filter values under the key and in the spelling sent, each once, and
+   * under `geo_level` every `geo` code of the level. Never a value `unmatchedValues` holds,
+   * a time value, or a value of a dimension that neither filters nor `geo_level` selects.
+   * Absent when every one has a cell.
+   */
+  emptyValues?: Record<string, string[]>;
   /** Observations with no value across the whole match, not just the decoded page. */
   missingObsCount: number;
   /** Observations matched upstream, before the inline preview bound. */
@@ -169,6 +198,17 @@ export interface QueryResult {
 export type UnmatchedValues = Record<string, string[]>;
 
 /**
+ * One frequency's periods without a cell in any series that lie outside the span its
+ * cells cover, each list chronological. `edges`: some period of the frequency has a
+ * cell, and these are the periods before `first` and after `last`. `empty`: no period of
+ * the frequency has a cell in the match.
+ */
+export type OutsideSpan = { frequency: string } & (
+  | { after: string[]; before: string[]; first: string; kind: 'edges'; last: string }
+  | { kind: 'empty'; periods: string[] }
+);
+
+/**
  * What an empty JSON-stat match says about why it is empty, carried on a
  * `no_results` error's data. The members co-occur — an unmatched value can sit
  * beside periods that carry no value — and all are absent when the reply says
@@ -180,6 +220,35 @@ export interface NoResultsDiagnosis {
   /** Periods the reply selected, none carrying a value. Set only when every dimension matched. */
   matchedPeriods?: string[];
   unmatchedValues?: UnmatchedValues;
+}
+
+/**
+ * The values a `no_results` error lists for each dimension holding an unmatched filter
+ * value, keyed by dimension as sent: `totalCount` counts every value the dimension
+ * lists (every `geo` level), and `values` holds each code and label when there are at
+ * most 25. A dimension whose values could not be read is absent.
+ */
+export type ValidValues = Record<
+  string,
+  { totalCount: number; values?: Array<{ code: string; label: string }> }
+>;
+
+/**
+ * What a Statistics API query that outlasted its deadline carries on its
+ * `retry_deadline_exceeded` Timeout, beside the fields `withRetry` sets.
+ */
+export interface StatisticsDeadlineData {
+  datasetCode: string;
+  deadlineMs: number;
+  elapsedMs: number;
+  /**
+   * Whether the last request had its response status and headers before it failed. False
+   * when the deadline cut Eurostat off while it was still preparing the extraction; true
+   * when the answer was arriving, or when it came back as an error and a backoff was cut.
+   */
+  headersReceived: boolean;
+  reason: 'retry_deadline_exceeded';
+  retryAttempts: number;
 }
 
 /**
@@ -195,6 +264,17 @@ export interface QueryExecution extends QueryResult {
    * when `absentCellCount` is above zero.
    */
   absentSeries?: { affected: number; total: number };
+  /**
+   * The period of a known shape with a cell that ends last, across frequencies. Set
+   * alongside `outsideSpans` whenever such a period exists.
+   */
+  latestWithCell?: string;
+  /**
+   * Per frequency, finest first, the periods no series has a cell in outside the span from
+   * that frequency's first to its latest period with one, which `absentCellCount` leaves
+   * out. Set only when some frequency has such a period.
+   */
+  outsideSpans?: OutsideSpan[];
   /** Periods a bound excludes, read from the reply's own frequencies and coverage. */
   periodCuts?: PeriodCut[];
   /**
@@ -204,7 +284,10 @@ export interface QueryExecution extends QueryResult {
    * them — the allocation `OBS_CAP` exists to avoid.
    */
   rows: () => Generator<ObservationRow>;
-  /** Selected last-N time positions without any in-range value/status cell, in index order. */
+  /**
+   * Selected last-N time positions without any in-range value/status cell, in index order:
+   * those `outsideSpans` lists, and any inside a span or of no known period shape.
+   */
   unpopulatedPeriods?: string[];
 }
 

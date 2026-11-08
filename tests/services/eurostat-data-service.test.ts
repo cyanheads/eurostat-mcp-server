@@ -4,10 +4,13 @@
  * @module tests/services/eurostat-data-service.test
  */
 
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
+import { createServer, type Server, type ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as serverConfig from '@/config/server-config.js';
 import { EurostatBulkService, parseCell } from '@/services/eurostat-bulk/eurostat-bulk-service.js';
 import {
   EurostatDataService,
@@ -20,11 +23,17 @@ import {
 } from '@/services/eurostat-data/eurostat-data-service.js';
 import type { SdmxDatasetMetadata } from '@/services/eurostat-data/sdmx-metadata.js';
 import {
+  type GeoLevel,
   type JsonStatResponse,
   OBS_CAP,
   type Observation,
   type ObservationRow,
 } from '@/services/eurostat-data/types.js';
+import {
+  CONSTRAINT_WITH_UNMAPPED_LEVELS_XML,
+  DATAFLOW_WITH_UNMAPPED_LEVELS_XML,
+  UNMAPPED_GEO_CODES,
+} from '../fixtures/dimension-values/geo-unmapped-levels.js';
 import {
   EARN_SES_ANNUAL_DIMENSIONS,
   SDMX_CONSTRAINT_WITHOUT_COUNTRIES_XML,
@@ -726,6 +735,80 @@ describe('EurostatDataService — dataset-scoped SDMX metadata (#44)', () => {
     );
     expect(result.geoLevel).toBe('nuts2');
     expect(result.values).toEqual([{ code: 'DE11', label: 'Stuttgart' }]);
+  });
+
+  describe('the whole list beside the inline values (#99)', () => {
+    it('lists every geo level, each code with its level, when geo_level is omitted', async () => {
+      const result = await svc().getDimensionValues(
+        'earn_ses_annual',
+        'geo',
+        undefined,
+        createMockContext(),
+      );
+      expect(result.values.map(({ code }) => code)).toEqual(['DE', 'FR']);
+      expect(result.listedValues).toEqual([
+        { code: 'EU27_2020', label: 'European Union - 27 countries', level: 'aggregate' },
+        { code: 'EA20', label: 'Euro area - 20 countries', level: 'aggregate' },
+        { code: 'DE', label: 'Germany', level: 'country' },
+        { code: 'FR', label: 'France', level: 'country' },
+        { code: 'DE1', label: 'Baden-Württemberg', level: 'nuts1' },
+        { code: 'DE11', label: 'Stuttgart', level: 'nuts2' },
+        { code: 'DE111', label: 'Stuttgart, Stadtkreis', level: 'nuts3' },
+      ]);
+    });
+
+    it.each(['country', 'nuts2'] as const)(
+      'narrows the list to an explicit geo_level %s, the inline values at the same level',
+      async (level) => {
+        const result = await svc().getDimensionValues(
+          'earn_ses_annual',
+          'geo',
+          level,
+          createMockContext(),
+        );
+        expect(result.listedValues).toEqual(result.values.map((value) => ({ ...value, level })));
+        expect(result.listedValues.length).toBeGreaterThan(0);
+      },
+    );
+
+    it('gives a geo code whose LEVEL is OTH, 5 or absent level null, and no explicit level', async () => {
+      fetchMock.mockImplementation(async (input: string | URL) =>
+        new URL(String(input)).pathname.includes('/dataflow/')
+          ? xmlResponse(DATAFLOW_WITH_UNMAPPED_LEVELS_XML)
+          : xmlResponse(CONSTRAINT_WITH_UNMAPPED_LEVELS_XML),
+      );
+      const all = await svc().getDimensionValues(
+        'earn_ses_annual',
+        'geo',
+        undefined,
+        createMockContext(),
+      );
+      expect(all.listedValues.slice(-3)).toEqual(
+        UNMAPPED_GEO_CODES.map((value) => ({ ...value, level: null })),
+      );
+      expect(all.totalCount).toBe(2);
+      for (const level of ['aggregate', 'country', 'nuts1', 'nuts2', 'nuts3'] as const) {
+        const one = await svc().getDimensionValues(
+          'earn_ses_annual',
+          'geo',
+          level,
+          createMockContext(),
+        );
+        expect(one.listedValues.map(({ code }) => code)).not.toContain('DEA_RUHR');
+      }
+    });
+
+    it('lists a non-geo dimension whole, with no level, as values does', async () => {
+      const result = await svc().getDimensionValues(
+        'earn_ses_annual',
+        'unit',
+        undefined,
+        createMockContext(),
+      );
+      expect(result.listedValues).toEqual(result.values);
+      expect(result.listedValues).toHaveLength(11);
+      expect(result.listedValues.some((value) => 'level' in value)).toBe(false);
+    });
   });
 
   it('returns the full constrained value set for a non-geo dimension', async () => {
@@ -2530,6 +2613,210 @@ describe('EurostatDataService — operation deadlines (#72)', () => {
   });
 });
 
+describe('EurostatDataService — a Statistics API query that outlasts its deadline (#98)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /** The issue's step-2 query: a cold Comext slice Eurostat takes longer than 30 s to prepare. */
+  const query = (ctx = createMockContext()) =>
+    new EurostatDataService(mockConfig, mockStorage).queryDataset(
+      'DS-045409',
+      { freq: ['M'], flow: ['2'], product: ['2204'], indicators: ['VALUE_IN_EUROS'] },
+      undefined,
+      '2025-01',
+      undefined,
+      undefined,
+      'EN',
+      25,
+      ctx,
+    );
+
+  /** A request that never answers: it settles only when its signal aborts. */
+  const silent = (_input: unknown, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) =>
+      init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true }),
+    );
+  /** A 200 whose headers arrive at once and whose body never ends until the signal aborts. */
+  const stalledBody = (_input: unknown, init?: RequestInit) =>
+    Promise.resolve(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"version":"2.0","class":"dataset"'));
+            init?.signal?.addEventListener('abort', () => controller.error(init.signal?.reason), {
+              once: true,
+            });
+          },
+        }),
+        { headers: { 'content-type': 'application/json' } },
+      ),
+    );
+
+  const settled = async (ctx = createMockContext()) => {
+    const outcome = query(ctx).then(
+      () => undefined,
+      (error: unknown) => error as McpError,
+    );
+    await vi.advanceTimersByTimeAsync(30_001);
+    return outcome;
+  };
+
+  it('names the Statistics API, the dataset and the deadline, and says no headers arrived', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(silent);
+    vi.stubGlobal('fetch', fetchMock);
+    const error = await settled();
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      message:
+        'Eurostat\'s Statistics API did not complete a query of dataset "DS-045409" within its 30,000 ms deadline (1 attempt).',
+      data: {
+        reason: 'retry_deadline_exceeded',
+        datasetCode: 'DS-045409',
+        deadlineMs: 30_000,
+        retryAttempts: 1,
+        headersReceived: false,
+      },
+    });
+    expect(error?.message).not.toContain('fetchJsonStat');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('says the headers arrived when the deadline cuts a body still streaming', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn(stalledBody));
+    const error = await settled();
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'retry_deadline_exceeded', headersReceived: true },
+    });
+  });
+
+  it('says the headers arrived when an answered 503 is followed by a backoff the deadline cuts', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const fetchMock = vi.fn(async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 29_000));
+      return new Response('Unavailable', { status: 503 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const error = await settled();
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'retry_deadline_exceeded', headersReceived: true },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads the latest attempt: a 503 answered, then a retry that never answers, has no headers', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('Unavailable', { status: 503 }))
+      .mockImplementation(silent);
+    vi.stubGlobal('fetch', fetchMock);
+    const error = await settled();
+    expect(error).toMatchObject({
+      data: { reason: 'retry_deadline_exceeded', headersReceived: false, retryAttempts: 2 },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('leaves a cancelled query as the caller’s cancellation, not a deadline', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn(silent));
+    const controller = new AbortController();
+    const outcome = query(createMockContext({ signal: controller.signal })).then(
+      () => undefined,
+      (error: unknown) => error as McpError,
+    );
+    await vi.advanceTimersByTimeAsync(10_000);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(30_000);
+    const error = await outcome;
+    expect(error?.code).toBe(JsonRpcErrorCode.RequestCancelled);
+    expect(error?.data?.reason).toBeUndefined();
+  });
+
+  /**
+   * The runtime's own fetch against a loopback Comext host, so header arrival is the real
+   * one. Only the timers are faked: each case waits for the exchange to reach the state it
+   * needs, then moves the clock past the deadline.
+   */
+  describe('on a loopback upstream', () => {
+    let server: Server;
+    let onRequest: (response: ServerResponse) => void;
+    let requestSeen: Promise<void>;
+
+    beforeEach(async () => {
+      let seen: () => void = () => {};
+      requestSeen = new Promise<void>((resolve) => {
+        seen = resolve;
+      });
+      server = createServer((_request, response) => {
+        seen();
+        onRequest(response);
+      });
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const { port } = server.address() as AddressInfo;
+      const config = serverConfig.getServerConfig();
+      vi.spyOn(serverConfig, 'getServerConfig').mockReturnValue({
+        ...config,
+        comextBaseUrl: `http://127.0.0.1:${port}/eurostat/api/comext/dissemination`,
+      });
+    });
+    afterEach(async () => {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    });
+
+    it('reports no headers from a host that accepts the connection and never answers', async () => {
+      onRequest = () => {};
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      const outcome = query().then(
+        () => undefined,
+        (error: unknown) => error as McpError,
+      );
+      await requestSeen;
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(await outcome).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        data: { reason: 'retry_deadline_exceeded', headersReceived: false, retryAttempts: 1 },
+      });
+    });
+
+    it('reports headers from a host that sends them, then stalls the body', async () => {
+      onRequest = (response) => {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.write('{"version":"2.0"');
+      };
+      const realFetch = globalThis.fetch;
+      let headersIn: Promise<unknown> = Promise.resolve();
+      vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
+        const pending = realFetch(input, init);
+        headersIn = pending.catch(() => undefined);
+        return pending;
+      });
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      const outcome = query().then(
+        () => undefined,
+        (error: unknown) => error as McpError,
+      );
+      await requestSeen;
+      await headersIn;
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(await outcome).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        data: { reason: 'retry_deadline_exceeded', headersReceived: true },
+      });
+    });
+  });
+});
+
 describe("EurostatDataService — Eurostat's period rejections map to invalid_period (#47)", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
   beforeEach(() => {
@@ -3414,15 +3701,16 @@ describe('EurostatDataService — periods a series lacks (#90)', () => {
 
   it('never counts a status-only, text, or null cell, and ignores keys outside the cube', async () => {
     const { result } = await runBody(
-      { geo: ['DE', 'FR'], time: ['2020', '2021', '2022', '2023'] },
+      { geo: ['DE', 'FR'], time: ['2020', '2021', '2022', '2023', '2024'] },
       {
-        // DE: a number, a text value, a null; it lacks 2023. FR: a status-only 2020 beside two
-        // numbers; it lacks 2023 too. Keys -1 and 99 fall outside the 8-cell cube.
-        value: { '0': 1, '1': 'KG', '2': null, '5': 7, '6': 8, '99': 9 },
-        status: { '4': ':', '-1': 'C' },
+        // DE: a number, a text value, a null; it lacks 2023. FR: a status-only 2020 beside
+        // three numbers; it lacks 2023 too, inside the span both series' 2024 closes. Keys -1
+        // and 99 fall outside the 10-cell cube.
+        value: { '0': 1, '1': 'KG', '2': null, '4': 6, '6': 7, '7': 8, '9': 9, '99': 9 },
+        status: { '5': ':', '-1': 'C' },
       },
     );
-    expect(result.obsCount).toBe(6);
+    expect(result.obsCount).toBe(8);
     expect(result.missingObsCount).toBe(3);
     expect(result.absentCellCount).toBe(2);
     expect(result.absentSeries).toEqual({ affected: 2, total: 2 });
@@ -3509,11 +3797,11 @@ describe('EurostatDataService — periods a series lacks (#90)', () => {
 
   it('counts no period whose code has no known shape, and nothing without a time dimension', async () => {
     const { result } = await runBody(
-      { geo: ['DE', 'FR'], time: ['2024', '2024-H1', '2024-H2', '2025'] },
-      // DE carries 2024 and 2024-H1: it lacks 2025, and not 2024-H2, whose shape is unknown
-      // though DE has a cell at another unknown-shaped period. FR's only cell is at 2024-H1,
-      // so it carries no frequency it could lack a period of.
-      { value: { '0': 1, '1': 2, '5': 3 } },
+      { geo: ['DE', 'FR'], time: ['2024', '2024-H1', '2024-H2', '2025', '2026'] },
+      // DE carries 2024, 2024-H1 and 2026: it lacks 2025, inside the annual span, and not
+      // 2024-H2, whose shape is unknown though DE has a cell at another unknown-shaped period.
+      // FR's only cell is at 2024-H1, so it carries no frequency it could lack a period of.
+      { value: { '0': 1, '1': 2, '4': 3, '6': 4 } },
     );
     expect(result.absentCellCount).toBe(1);
     expect(result.absentSeries).toEqual({ affected: 1, total: 2 });
@@ -3522,5 +3810,399 @@ describe('EurostatDataService — periods a series lacks (#90)', () => {
     expect(timeless.result.obsCount).toBe(1);
     expect(timeless.result.absentCellCount).toBe(0);
     expect(timeless.result).not.toHaveProperty('absentSeries');
+  });
+});
+
+/** Run one query against a recorded or hand-built reply, with the inputs that produced it. */
+function queryReply(
+  datasetCode: string,
+  body: JsonStatResponse,
+  filters: Record<string, string[]>,
+  options: { geoLevel?: GeoLevel; lastN?: number; since?: string; until?: string } = {},
+) {
+  const fetchMock = vi.fn(async () => okResponse(body));
+  vi.stubGlobal('fetch', fetchMock);
+  return new EurostatDataService(mockConfig, mockStorage)
+    .queryDataset(
+      datasetCode,
+      filters,
+      options.geoLevel,
+      options.since,
+      options.until,
+      options.lastN,
+      'EN',
+      50,
+      createMockContext(),
+    )
+    .then((result) => ({ result, fetchMock }));
+}
+
+/** Every recorded reply here is a live capture of the filters and periods its test sends. */
+describe('EurostatDataService — values with no cell in the match (#96)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const UNIT = { unit: ['PPS_HAB_EU27_2020'] };
+
+  it('names the requested values the match has no cell for (step 1)', async () => {
+    const { result, fetchMock } = await queryReply(
+      'nama_10r_2gdp',
+      fixture('nama-10r-2gdp-de11-no02-ch01-last1'),
+      { ...UNIT, geo: ['DE11', 'NO02', 'CH01'] },
+      { lastN: 1 },
+    );
+    expect(result.emptyValues).toEqual({ geo: ['NO02', 'CH01'] });
+    expect(result).toMatchObject({ obsCount: 1, absentCellCount: 0 });
+    expect(result).not.toHaveProperty('unmatchedValues');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops a value once the selection reaches its cells, leaving the absent count as it was', async () => {
+    const { result } = await queryReply(
+      'nama_10r_2gdp',
+      fixture('nama-10r-2gdp-de11-no02-ch01-last4'),
+      { ...UNIT, geo: ['DE11', 'NO02', 'CH01'] },
+      { lastN: 4 },
+    );
+    expect(result.emptyValues).toEqual({ geo: ['CH01'] });
+    expect(result.absentCellCount).toBe(3);
+    expect(result.absentSeries).toEqual({ affected: 1, total: 2 });
+  });
+
+  it('lists every geo code of the level with no cell under geo_level (step 3)', async () => {
+    const { result } = await queryReply(
+      'nama_10r_2gdp',
+      fixture('nama-10r-2gdp-nuts2-last1'),
+      UNIT,
+      { geoLevel: 'nuts2', lastN: 1 },
+    );
+    expect(result.obsCount).toBe(276);
+    expect(result.emptyValues).toEqual({
+      geo: [
+        ...['BEZZ', 'DKZZ', 'ESZZ', 'FRZZ', 'ITZZ', 'LVZZ', 'HUZZ', 'MTZZ', 'NLZZ', 'ATZZ'],
+        ...['PTZZ', 'ROZZ', 'FIZZ', 'SEZZ', 'NO02', 'NO06', 'NO07', 'NO08', 'NO09', 'NO0A'],
+        ...['NO0B', 'NOZZ', 'CH01', 'CH02', 'CH03', 'CH04', 'CH05', 'CH06', 'CH07', 'AL01'],
+        ...['AL02', 'AL03', 'RSZZ'],
+      ],
+    });
+  });
+
+  it('keeps a value the index lacks apart from one it lists without a cell', async () => {
+    const { result } = await queryReply(
+      'nama_10r_2gdp',
+      fixture('nama-10r-2gdp-de11-xx99-ch01-last1'),
+      { ...UNIT, geo: ['DE11', 'XX99', 'CH01'] },
+      { lastN: 1 },
+    );
+    expect(result.unmatchedValues).toEqual({ geo: ['XX99'] });
+    expect(result.emptyValues).toEqual({ geo: ['CH01'] });
+  });
+
+  it('matches values and the key in any case, reporting each spelling once, as sent', async () => {
+    const { result } = await queryReply(
+      'nama_10r_2gdp',
+      fixture('nama-10r-2gdp-de11-no02-ch01-last1'),
+      { ...UNIT, GEO: ['de11', 'no02', 'Ch01', 'no02'] },
+      { lastN: 1 },
+    );
+    expect(result.emptyValues).toEqual({ GEO: ['no02', 'Ch01'] });
+    expect(result).not.toHaveProperty('unmatchedValues');
+  });
+
+  it('counts a status-only cell as a cell: the all-confidential slice names no value', async () => {
+    const { result } = await queryReply(
+      'sts_inpr_m',
+      fixture('sts-inpr-m-ie-confidential'),
+      { indic_bt: ['PRD'], nace_r2: ['B'], s_adj: ['CA'], unit: ['I21'], geo: ['IE'] },
+      { since: '2023-01', until: '2023-06' },
+    );
+    expect(result.obsCount).toBe(6);
+    expect(result).not.toHaveProperty('emptyValues');
+  });
+
+  it('reports no unfiltered dimension, though its index lists a code with no cell', async () => {
+    // `citizen` is unfiltered, and its NRP code has no cell in this slice.
+    const { result } = await queryReply(
+      'lfsa_egan',
+      fixture('lfsa-egan-mt-lu-cy-ee-2010-to-2022'),
+      { geo: ['MT', 'LU', 'CY', 'EE'], sex: ['F'], age: ['Y15-24'], unit: ['THS_PER'] },
+      { since: '2010', until: '2022' },
+    );
+    expect(result.dimensionsUsed).toContain('citizen');
+    expect(result).not.toHaveProperty('emptyValues');
+  });
+
+  it('reports a filtered non-geo dimension the same way, and never a time value', async () => {
+    const { result } = await queryReply(
+      'test_ds',
+      // Unit A has a 2024 cell; unit B has none, and neither has a 2025 cell.
+      { ...jsonStat({ unit: ['A', 'B'], geo: ['DE'], time: ['2024', '2025'] }), value: { '0': 1 } },
+      { unit: ['A', 'B'], time: ['2024', '2025'] },
+    );
+    expect(result.emptyValues).toEqual({ unit: ['B'] });
+  });
+
+  it('derives the empty positions Eurostat lists, on every recorded reply that carries them', () => {
+    const svc = new EurostatDataService(mockConfig, mockStorage);
+    const root = new URL('../fixtures/', import.meta.url);
+    let compared = 0;
+    for (const name of readdirSync(root, { recursive: true }) as string[]) {
+      if (!name.endsWith('.json')) continue;
+      const data = JSON.parse(readFileSync(new URL(name, root), 'utf8')) as JsonStatResponse & {
+        extension?: { 'positions-with-no-data'?: Record<string, number[]> };
+      };
+      const listed = data.extension?.['positions-with-no-data'];
+      if (!listed || !data.id) continue;
+      const dims = data.id.filter((dim) => dim !== 'time');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const scan = (svc as any).scanCells(data, dims) as {
+        emptyCodes: Map<string, string[]>;
+        unpopulatedPeriods: string[];
+      };
+      /** The codes at the positions Eurostat lists for a dimension. */
+      const codesListed = (dim: string) => {
+        const at = Object.entries(data.dimension?.[dim]?.category?.index ?? {})
+          .sort(([, a], [, b]) => a - b)
+          .map(([code]) => code);
+        return (listed[dim] ?? []).map((position) => at[position]);
+      };
+      for (const dim of dims) {
+        expect(scan.emptyCodes.get(dim), `${name} ${dim}`).toEqual(codesListed(dim));
+      }
+      expect(scan.unpopulatedPeriods, `${name} time`).toEqual(codesListed('time'));
+      compared++;
+    }
+    // Every recorded envelope but the hand-trimmed excerpt carries the list.
+    expect(compared).toBeGreaterThanOrEqual(40);
+  });
+});
+
+/** Every recorded reply here is a live capture of the filters and periods its test sends. */
+describe("EurostatDataService — periods outside a frequency's populated span (#97)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const WINE_TO_US = {
+    partner: ['US'],
+    product: ['2204'],
+    flow: ['2'],
+    indicators: ['VALUE_IN_EUROS'],
+  };
+  const months = (year: number, from: number, to: number) =>
+    Array.from({ length: to - from + 1 }, (_, i) => `${year}-${String(from + i).padStart(2, '0')}`);
+  const years = (from: number, to: number) =>
+    Array.from({ length: to - from + 1 }, (_, i) => String(from + i));
+
+  it('leaves the months past the latest with a cell out of the count (step 1)', async () => {
+    const { result, fetchMock } = await queryReply(
+      'DS-045409',
+      fixture('comext/ds-045409-m-de-fr-it-es-us-2204-since-2026-01'),
+      { freq: ['M'], reporter: ['DE', 'FR', 'IT', 'ES'], ...WINE_TO_US },
+      { since: '2026-01' },
+    );
+    expect(result).toMatchObject({ obsCount: 32, absentCellCount: 0 });
+    expect(result).not.toHaveProperty('absentSeries');
+    expect(result.outsideSpans).toEqual([
+      {
+        frequency: 'M',
+        kind: 'edges',
+        first: '2026-01',
+        last: '2026-08',
+        before: [],
+        after: months(2026, 9, 12),
+      },
+    ]);
+    expect(result.latestWithCell).toBe('2026-08');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('counts the years a series lacks inside the span another series opens (step 3)', async () => {
+    // RS starts in 2000, ME in 2006: ME's 2000–2005 are absent cells, 1996–1999 are not.
+    const { result } = await queryReply(
+      'nama_10_pc',
+      fixture('nama-10-pc-me-rs-last30'),
+      { geo: ['ME', 'RS'], unit: ['CP_PPS_EU27_2020_HAB'], na_item: ['B1GQ'] },
+      { lastN: 30 },
+    );
+    expect(result).toMatchObject({ obsCount: 46, absentCellCount: 6 });
+    expect(result.absentSeries).toEqual({ affected: 1, total: 2 });
+    expect(result.outsideSpans).toEqual([
+      {
+        frequency: 'A',
+        kind: 'edges',
+        first: '2000',
+        last: '2025',
+        before: years(1996, 1999),
+        after: [],
+      },
+    ]);
+    expect(result.unpopulatedPeriods).toEqual(years(1996, 1999));
+  });
+
+  it('settles each frequency of a mixed slice apart', async () => {
+    const { result } = await queryReply(
+      'DS-045409',
+      fixture('comext/ds-045409-de-fr-us-2204-since-2025-01'),
+      { reporter: ['DE', 'FR'], ...WINE_TO_US },
+      { since: '2025-01' },
+    );
+    expect(result.absentCellCount).toBe(0);
+    expect(result).not.toHaveProperty('absentSeries');
+    expect(result.outsideSpans).toEqual([
+      {
+        frequency: 'M',
+        kind: 'edges',
+        first: '2025-01',
+        last: '2026-08',
+        before: [],
+        after: months(2026, 9, 12),
+      },
+      { frequency: 'A', kind: 'edges', first: '2025', last: '2025', before: [], after: ['2026'] },
+    ]);
+    expect(result.latestWithCell).toBe('2026-08');
+  });
+
+  it('tells a gap from a lag by the match, not by the cell', async () => {
+    // NO02 publishes 2020–2021. Beside DE11, which publishes through 2024, its 2022–2024 are
+    // absent cells; alone, they lie past the slice's latest period with a cell.
+    const beside = await queryReply(
+      'nama_10r_2gdp',
+      fixture('nama-10r-2gdp-de11-no02-since-2020'),
+      { unit: ['PPS_HAB_EU27_2020'], geo: ['DE11', 'NO02'] },
+      { since: '2020' },
+    );
+    expect(beside.result.absentCellCount).toBe(3);
+    expect(beside.result.absentSeries).toEqual({ affected: 1, total: 2 });
+    expect(beside.result).not.toHaveProperty('outsideSpans');
+
+    const alone = await queryReply(
+      'nama_10r_2gdp',
+      fixture('nama-10r-2gdp-no02-since-2020'),
+      { unit: ['PPS_HAB_EU27_2020'], geo: ['NO02'] },
+      { since: '2020' },
+    );
+    expect(alone.result.absentCellCount).toBe(0);
+    expect(alone.result.outsideSpans).toEqual([
+      {
+        frequency: 'A',
+        kind: 'edges',
+        first: '2020',
+        last: '2021',
+        before: [],
+        after: years(2022, 2024),
+      },
+    ]);
+  });
+
+  it('leaves the years before the first with a cell out of the count', async () => {
+    const { result } = await queryReply(
+      'nama_10_gdp',
+      fixture('nama-10-gdp-de-1975-to-1995'),
+      { unit: ['CP_MEUR'], na_item: ['B1GQ'], geo: ['DE'] },
+      { since: '1975', until: '1995' },
+    );
+    expect(result).toMatchObject({ obsCount: 5, absentCellCount: 0 });
+    expect(result.outsideSpans).toEqual([
+      {
+        frequency: 'A',
+        kind: 'edges',
+        first: '1991',
+        last: '1995',
+        before: years(1975, 1990),
+        after: [],
+      },
+    ]);
+  });
+
+  it('names both ends of a last-N window', async () => {
+    const { result } = await queryReply(
+      'nama_10r_2gdp',
+      fixture('nama-10r-2gdp-no02-last30'),
+      { unit: ['PPS_HAB_EU27_2020'], geo: ['NO02'] },
+      { lastN: 30 },
+    );
+    expect(result).toMatchObject({ obsCount: 14, absentCellCount: 0 });
+    expect(result.outsideSpans).toEqual([
+      {
+        frequency: 'A',
+        kind: 'edges',
+        first: '2008',
+        last: '2021',
+        before: years(2000, 2007),
+        after: years(2022, 2024),
+      },
+    ]);
+    expect(result.unpopulatedPeriods).toEqual([...years(2000, 2007), ...years(2022, 2024)]);
+  });
+
+  it('names the trailing months of a last-N window and the latest month with a cell', async () => {
+    const { result } = await queryReply(
+      'DS-045409',
+      fixture('comext/ds-045409-m-de-us-2204-last6'),
+      { freq: ['M'], reporter: ['DE'], ...WINE_TO_US },
+      { lastN: 6 },
+    );
+    expect(result).toMatchObject({ obsCount: 2, absentCellCount: 0 });
+    expect(result.outsideSpans).toEqual([
+      {
+        frequency: 'M',
+        kind: 'edges',
+        first: '2026-07',
+        last: '2026-08',
+        before: [],
+        after: months(2026, 9, 12),
+      },
+    ]);
+    expect(result.latestWithCell).toBe('2026-08');
+    expect(result.unpopulatedPeriods).toEqual(months(2026, 9, 12));
+  });
+
+  it('names a frequency with no cell at all, which no series lacks', async () => {
+    const { result } = await queryReply(
+      'test_ds',
+      // Monthly 2026-01–2026-02 both carry cells; the annual 2026 carries none.
+      {
+        ...jsonStat({ geo: ['DE'], time: ['2026-01', '2026-02', '2026'] }),
+        value: { '0': 1, '1': 2 },
+      },
+      {},
+    );
+    expect(result.absentCellCount).toBe(0);
+    expect(result.outsideSpans).toEqual([{ frequency: 'A', kind: 'empty', periods: ['2026'] }]);
+    expect(result.latestWithCell).toBe('2026-02');
+  });
+
+  it('keeps every count the span leaves alone: a covered span, the mixed pair, the #90 slice', async () => {
+    // FR covers 1975–1995, so Germany's 16 missing years stay inside the span.
+    const deFr = await queryReply(
+      'nama_10_gdp',
+      fixture('nama-10-gdp-de-fr-1975-to-1995'),
+      { unit: ['CP_MEUR'], na_item: ['B1GQ'], geo: ['DE', 'FR'] },
+      { since: '1975', until: '1995' },
+    );
+    expect(deFr.result.absentCellCount).toBe(16);
+    expect(deFr.result).not.toHaveProperty('outsideSpans');
+
+    const pair = await queryReply(
+      'DS-045409',
+      fixture('comext/ds-045409-de-fr-2023-06-to-2024'),
+      {
+        reporter: ['DE'],
+        partner: ['FR'],
+        product: ['TOTAL'],
+        flow: ['1'],
+        indicators: ['VALUE_IN_EUROS'],
+      },
+      { since: '2023-06', until: '2024' },
+    );
+    expect(pair.result.absentCellCount).toBe(0);
+    expect(pair.result).not.toHaveProperty('outsideSpans');
+
+    const lfsa = await queryReply(
+      'lfsa_egan',
+      fixture('lfsa-egan-mt-lu-cy-ee-2010-to-2022'),
+      { geo: ['MT', 'LU', 'CY', 'EE'], sex: ['F'], age: ['Y15-24'], unit: ['THS_PER'] },
+      { since: '2010', until: '2022' },
+    );
+    expect(lfsa.result).toMatchObject({ absentCellCount: 27, missingObsCount: 50 });
+    expect(lfsa.result).not.toHaveProperty('outsideSpans');
   });
 });

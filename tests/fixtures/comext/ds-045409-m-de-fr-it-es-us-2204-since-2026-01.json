@@ -1,0 +1,147 @@
+{
+  "version": "2.0",
+  "class": "dataset",
+  "label": "EU trade since 1988 by HS2-4-6 and CN8",
+  "source": "ESTAT",
+  "updated": "2026-10-16T11:00:00+0200",
+  "value": {
+    "0": 4193232,
+    "1": 8222133,
+    "2": 4949154,
+    "3": 6283131,
+    "4": 5670083,
+    "5": 7184002,
+    "6": 6163356,
+    "7": 6396285,
+    "12": 15024128,
+    "13": 21801715,
+    "14": 28295077,
+    "15": 24142139,
+    "16": 24172625,
+    "17": 22774406,
+    "18": 29452883,
+    "19": 18704411,
+    "24": 123463279,
+    "25": 153331622,
+    "26": 175081385,
+    "27": 203404252,
+    "28": 148270733,
+    "29": 201951906,
+    "30": 185938866,
+    "31": 162527241,
+    "36": 105300115,
+    "37": 138154730,
+    "38": 164476760,
+    "39": 156303164,
+    "40": 144850632,
+    "41": 139952600,
+    "42": 148461935,
+    "43": 112117155
+  },
+  "id": ["freq", "reporter", "partner", "product", "flow", "indicators", "time"],
+  "size": [1, 4, 1, 1, 1, 1, 12],
+  "dimension": {
+    "freq": {
+      "label": "Frequency",
+      "category": { "index": { "M": 0 }, "label": { "M": "Monthly" } }
+    },
+    "reporter": {
+      "label": "REPORTER",
+      "category": {
+        "index": { "DE": 0, "ES": 1, "FR": 2, "IT": 3 },
+        "label": {
+          "DE": "Germany (incl. German Democratic Republic 'DD' from 1991)",
+          "ES": "Spain (incl. Canary Islands 'XB' from 1997)",
+          "FR": "France (incl. Saint Barthélemy 'BL' -> 2012; incl. French Guiana 'GF', Guadeloupe 'GP', Martinique 'MQ', Réunion 'RE' from 1997; incl. Mayotte 'YT' from 2014)",
+          "IT": "Italy (incl. San Marino 'SM' -> 1993)"
+        }
+      }
+    },
+    "partner": {
+      "label": "PARTNER",
+      "category": {
+        "index": { "US": 0 },
+        "label": { "US": "United States (incl. Navassa Island (part of 'UM') from 1995 -> 2000)" }
+      }
+    },
+    "product": {
+      "label": "PRODUCT",
+      "category": {
+        "index": { "2204": 0 },
+        "label": {
+          "2204": "Wine of fresh grapes, incl. fortified wines; grape must, partly fermented and of an actual alcoholic strength of > 0,5% vol or grape must with added alcohol of an actual alcoholic strength of > 0,5% vol"
+        }
+      }
+    },
+    "flow": { "label": "FLOW", "category": { "index": { "2": 0 }, "label": { "2": "EXPORT" } } },
+    "indicators": {
+      "label": "INDICATORS",
+      "category": {
+        "index": { "VALUE_IN_EUROS": 0 },
+        "label": { "VALUE_IN_EUROS": "VALUE_IN_EUROS" }
+      }
+    },
+    "time": {
+      "label": "TIME_PERIOD",
+      "category": {
+        "index": {
+          "2026-01": 0,
+          "2026-02": 1,
+          "2026-03": 2,
+          "2026-04": 3,
+          "2026-05": 4,
+          "2026-06": 5,
+          "2026-07": 6,
+          "2026-08": 7,
+          "2026-09": 8,
+          "2026-10": 9,
+          "2026-11": 10,
+          "2026-12": 11
+        },
+        "label": {
+          "2026-01": "2026-01",
+          "2026-02": "2026-02",
+          "2026-03": "2026-03",
+          "2026-04": "2026-04",
+          "2026-05": "2026-05",
+          "2026-06": "2026-06",
+          "2026-07": "2026-07",
+          "2026-08": "2026-08",
+          "2026-09": "2026-09",
+          "2026-10": "2026-10",
+          "2026-11": "2026-11",
+          "2026-12": "2026-12"
+        }
+      }
+    }
+  },
+  "extension": {
+    "lang": "EN",
+    "id": "DS-045409",
+    "agencyId": "ESTAT",
+    "version": "1.0",
+    "datastructure": { "id": "DS-045409", "agencyId": "ESTAT", "version": "6.6" },
+    "annotation": [
+      { "type": "DISSEMINATION_OBJECT_TYPE", "title": "DATASET" },
+      { "type": "DISSEMINATION_TIMESTAMP_DATA", "date": "2026-10-16T11:00:00+0200" },
+      { "type": "DISSEMINATION_TIMESTAMP_GLOBAL", "date": "2026-10-16T11:00:00+0200" },
+      { "type": "DISSEMINATION_TIMESTAMP_PLANNED", "date": "2026-10-16T11:00:00+0200" },
+      {
+        "type": "ESMS_HTML",
+        "title": "Explanatory texts (metadata)",
+        "href": "https://ec.europa.eu/eurostat/cache/metadata/en/ext_go_detail_sims.htm"
+      },
+      { "type": "UPDATE_DATA", "date": "2026-10-16T11:00:00+0200" },
+      { "type": "UPDATE_STRUCTURE", "date": "2026-10-16T11:00:00+0200" }
+    ],
+    "positions-with-no-data": {
+      "freq": [],
+      "reporter": [],
+      "partner": [],
+      "product": [],
+      "flow": [],
+      "indicators": [],
+      "time": [8, 9, 10, 11]
+    }
+  }
+}

@@ -116,7 +116,7 @@ export const eurostatDataframeDrop = tool('eurostat_dataframe_drop', {
 
     if (!dropped) {
       ctx.enrich.notice(
-        `Canvas ${instance.canvasId} holds no table named "${input.table_name}", so nothing was dropped. Names match exactly, case included — eurostat_dataframe_describe lists what is staged.`,
+        `Canvas \`${instance.canvasId}\` holds no table named \`${input.table_name}\`, so nothing was dropped. Names match exactly, case included — eurostat_dataframe_describe lists what is staged.`,
       );
     }
 

@@ -13,9 +13,11 @@ import {
   cutNotice,
   diagnoseEmptyRange,
   frequenciesOf,
+  frequencySpans,
   normalizePeriod,
   oneDayRange,
   periodCuts,
+  periodFrequency,
   resolvePeriods,
 } from '@/services/eurostat-periods.js';
 
@@ -515,6 +517,177 @@ describe('frequenciesOf', () => {
 
   it('skips the blank column of a header-only table and any code of no known shape', () => {
     expect([...frequenciesOf(['', 'H1', '2022-H1', '2022-Z9'])]).toEqual([]);
+  });
+});
+
+describe('periodFrequency', () => {
+  for (const [code, frequency] of [
+    ['2022', 'A'],
+    ['2022-S1', 'S'],
+    ['2022-T2', 'T'],
+    ['2022-Q3', 'Q'],
+    ['2022-q3', 'Q'],
+    ['2022-06', 'M'],
+    ['2022-M06', 'M'],
+    ['2022-W23', 'W'],
+    ['2022-06-15', 'D'],
+    ['2022-D166', 'D'],
+    // Off the calendar: no known shape, or a component that does not exist.
+    ['2022-H1', undefined],
+    ['', undefined],
+    ['2022-13', undefined],
+    ['2021-W53', undefined],
+    ['2023-02-29', undefined],
+  ] as const) {
+    it(`reads "${code}" as ${frequency ?? 'no frequency'}`, () => {
+      expect(periodFrequency(code)).toBe(frequency);
+    });
+  }
+});
+
+describe('frequencySpans', () => {
+  /** The spans as codes, so each case reads as the periods it describes. */
+  const spansOf = (periods: (string | undefined)[], withData: string[]) => {
+    const { frequencies, latest } = frequencySpans(periods, (position) =>
+      withData.includes(periods[position] ?? ''),
+    );
+    if (latest) expect(periods[latest.position]).toBe(latest.code);
+    /** Each listed period carries its own position in the list. */
+    const codes = (listed: Array<{ code: string; position: number }>) =>
+      listed.map(({ code, position }) => {
+        expect(periods[position]).toBe(code);
+        return code;
+      });
+    return {
+      frequencies: frequencies.map((entry) => {
+        if (entry.kind === 'empty') {
+          return { frequency: entry.frequency, empty: codes(entry.periods) };
+        }
+        const inside = codes(entry.inside);
+        expect([entry.first.code, entry.last.code]).toEqual([inside[0], inside.at(-1)]);
+        return {
+          frequency: entry.frequency,
+          before: codes(entry.before),
+          span: inside,
+          after: codes(entry.after),
+        };
+      }),
+      latest: latest?.code,
+    };
+  };
+  const months = (year: number, from = 1, to = 12) =>
+    Array.from({ length: to - from + 1 }, (_, i) => `${year}-${String(from + i).padStart(2, '0')}`);
+  const years = (from: number, to: number) =>
+    Array.from({ length: to - from + 1 }, (_, i) => String(from + i));
+
+  it('leaves the trailing periods no position has data in outside the span', () => {
+    expect(spansOf(months(2026), months(2026, 1, 8))).toEqual({
+      frequencies: [
+        { frequency: 'M', before: [], span: months(2026, 1, 8), after: months(2026, 9, 12) },
+      ],
+      latest: '2026-08',
+    });
+  });
+
+  it('splits leading and trailing periods off both ends, and keeps a gap inside the span', () => {
+    const withData = years(2008, 2021).filter((year) => year !== '2015');
+    expect(spansOf(years(2000, 2024), withData)).toEqual({
+      frequencies: [
+        {
+          frequency: 'A',
+          before: years(2000, 2007),
+          span: years(2008, 2021),
+          after: years(2022, 2024),
+        },
+      ],
+      latest: '2021',
+    });
+  });
+
+  it('orders by the days a period covers, not by its place in the list', () => {
+    // A descending index: chronological order is the reverse of the list's.
+    const periods = years(2001, 2030).reverse();
+    expect(spansOf(periods, ['2001', '2003'])).toEqual({
+      frequencies: [
+        { frequency: 'A', before: [], span: ['2001', '2002', '2003'], after: years(2004, 2030) },
+      ],
+      latest: '2003',
+    });
+  });
+
+  it('gives the same spans for the JSON-stat and the TSV order of a mixed-frequency slice', () => {
+    const withData = [...months(2025), ...months(2026, 1, 8), '2025'];
+    const expected = {
+      frequencies: [
+        {
+          frequency: 'M',
+          before: [],
+          span: [...months(2025), ...months(2026, 1, 8)],
+          after: months(2026, 9, 12),
+        },
+        { frequency: 'A', before: [], span: ['2025'], after: ['2026'] },
+      ],
+      latest: '2026-08',
+    };
+    // JSON-stat: each year's months, then that year. TSV: each year, then its months.
+    const jsonStat = [...months(2025), '2025', ...months(2026), '2026'];
+    const tsv = ['2025', ...months(2025), '2026', ...months(2026)];
+    expect(spansOf(jsonStat, withData)).toEqual(expected);
+    expect(spansOf(tsv, withData)).toEqual(expected);
+  });
+
+  it('lists a frequency with no data without a span, and finest first', () => {
+    expect(spansOf(['2025', '2025-Q1', '2025-Q2', '2025-01'], ['2025-Q1'])).toEqual({
+      frequencies: [
+        { frequency: 'M', empty: ['2025-01'] },
+        { frequency: 'Q', before: [], span: ['2025-Q1'], after: ['2025-Q2'] },
+        { frequency: 'A', empty: ['2025'] },
+      ],
+      latest: '2025-Q1',
+    });
+  });
+
+  it('leaves out a position with no code and one it cannot place on the calendar', () => {
+    const periods = ['2024', '2024-H1', undefined, '2021-W53', '2026'];
+    const { frequencies } = frequencySpans(periods, (position) => position !== 4);
+    const first = { code: '2024', position: 0 };
+    expect(frequencies).toEqual([
+      {
+        frequency: 'A',
+        kind: 'span',
+        before: [],
+        first,
+        inside: [first],
+        last: first,
+        after: [{ code: '2026', position: 4 }],
+      },
+    ]);
+  });
+
+  it('takes the period that ends last as latest, the finer one on a tie', () => {
+    // Annual 2026 ends after 2026-08 does.
+    expect(spansOf(['2026-08', '2026'], ['2026-08', '2026']).latest).toBe('2026');
+    // 2026-12 and 2026 end the same day.
+    expect(spansOf(['2026', '2026-12'], ['2026', '2026-12']).latest).toBe('2026-12');
+    expect(spansOf(['2026-12', '2026'], ['2026', '2026-12']).latest).toBe('2026-12');
+  });
+
+  it('orders days across a month end and a leap day', () => {
+    const days = ['2024-03-01', '2024-02-29', '2024-02-28'];
+    expect(spansOf(days, ['2024-02-28', '2024-02-29'])).toEqual({
+      frequencies: [
+        { frequency: 'D', before: [], span: ['2024-02-28', '2024-02-29'], after: ['2024-03-01'] },
+      ],
+      latest: '2024-02-29',
+    });
+  });
+
+  it('reports no latest and no span when nothing has data, and nothing for an empty list', () => {
+    expect(spansOf(['2024', '2025'], [])).toEqual({
+      frequencies: [{ frequency: 'A', empty: ['2024', '2025'] }],
+      latest: undefined,
+    });
+    expect(frequencySpans([], () => true)).toEqual({ frequencies: [] });
   });
 });
 

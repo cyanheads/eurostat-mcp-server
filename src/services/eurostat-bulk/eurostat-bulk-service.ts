@@ -37,10 +37,18 @@ import {
   OBS_VALUE_COLUMN,
   OBS_VALUE_TEXT_COLUMN,
 } from '@/services/eurostat-codelists.js';
-import { dropUnsetFilters } from '@/services/eurostat-filters.js';
+import type { OutsideSpan } from '@/services/eurostat-data/types.js';
+import { normalizeFilters, unknownDimensionsMessage } from '@/services/eurostat-filters.js';
 import { dataHostFor, isComextDataset } from '@/services/eurostat-hosts.js';
 import { isUpstreamOutage, upstreamOutage } from '@/services/eurostat-outage.js';
-import { frequenciesOf, oneDayRange } from '@/services/eurostat-periods.js';
+import {
+  frequencySpans,
+  type ListedPeriod,
+  oneDayRange,
+  outsideSpanOf,
+  periodFrequency,
+} from '@/services/eurostat-periods.js';
+import { decodeXmlEntities } from '@/services/xml-entities.js';
 import {
   type BulkDownload,
   type BulkRow,
@@ -64,7 +72,8 @@ const CONF_SEPARATOR = '@';
 
 /**
  * Eurostat's marker for a cell with no value: with a flag or status, an observation
- * published without one; with neither, a period the series lacks.
+ * published without one; with neither, a period the series has no cell in — one it lacks,
+ * one no series has an observation in, or one of a frequency it does not carry.
  */
 const MISSING_VALUE = ':';
 
@@ -80,16 +89,6 @@ const TIME_HEADER_SUFFIX = '\\TIME_PERIOD';
  * filter wording.
  */
 const PERIOD_FAULT_CLAUSE = /allowed: TIME_PERIOD: [<>]=/;
-
-/** Minimal XML entity decoding — the five predefined entities SOAP fault strings use. */
-function decodeEntities(text: string): string {
-  return text
-    .replaceAll('&lt;', '<')
-    .replaceAll('&gt;', '>')
-    .replaceAll('&quot;', '"')
-    .replaceAll('&apos;', "'")
-    .replaceAll('&amp;', '&');
-}
 
 /**
  * Translate an XML body from the SDMX endpoint into the declared error contract.
@@ -111,7 +110,7 @@ export function classifyXmlBody(xml: string, datasetCode: string): never {
   }
 
   const code = /<faultcode>\s*(\d+)\s*<\/faultcode>/.exec(xml)?.[1];
-  const detail = decodeEntities(
+  const detail = decodeXmlEntities(
     /<faultstring>([\s\S]*?)<\/faultstring>/.exec(xml)?.[1]?.trim() ?? xml.slice(0, 300),
   );
 
@@ -201,8 +200,8 @@ function classifyFaultBody(err: unknown, datasetCode: string): void {
  * flags is `<obs_flag>` optionally followed by `@<conf_status>` and either part
  * may be empty: `429634.3 `, `3853937.0 p`, `: `, `: @C`. A cell that is empty
  * on both sides of the split yields `undefined` — distinct from `: `, an unflagged
- * `:` that comes back with every field null: a period the series lacks, which the
- * Statistics API has no cell for. A flagged `:` (`: u`, `: @C`) is an observation
+ * `:` that comes back with every field null: a period the series has no cell in, where
+ * the Statistics API has none either. A flagged `:` (`: u`, `: @C`) is an observation
  * Eurostat publishes without a value.
  *
  * A value that is not a number is read by {@link decodeTextValue}: PRODCOM's flag
@@ -273,7 +272,8 @@ export function parseHeader(line: string): TsvHeader {
  *
  * A filter key names its dimension in any case (`GEO` places the same as `geo`),
  * as the Statistics API reads it; keys that differ only in case pool their values.
- * A blank value is unset rather than an empty member of the `+` list.
+ * A blank value is unset rather than an empty member of the `+` list, and a value
+ * holding `+` arrives here already split into its codes.
  *
  * Returns `undefined` when no filter applies. An all-wildcard key is accepted
  * by Eurostat, but omitting the segment asks the same question without staking
@@ -283,7 +283,7 @@ export function buildKeyPath(
   dimensionOrder: string[],
   filters: Record<string, string[]>,
 ): string | undefined {
-  const applied = Object.entries(dropUnsetFilters(filters));
+  const applied = Object.entries(normalizeFilters(filters));
   if (applied.length === 0) return;
 
   const byDimension = new Map<string, string[]>();
@@ -295,7 +295,7 @@ export function buildKeyPath(
   }
   if (unknown.length > 0) {
     throw validationError(
-      `Filter names ${unknown.map((d) => `"${d}"`).join(', ')}, which ${unknown.length === 1 ? 'is not a dimension' : 'are not dimensions'} of this dataset. Filterable dimensions, in key order: ${dimensionOrder.join(', ')}. The time dimension is filtered with since_period/until_period instead.`,
+      `${unknownDimensionsMessage(unknown, dimensionOrder)} The time dimension is filtered with since_period/until_period instead.`,
       { reason: 'invalid_dimension', unknownDimensions: unknown, dimensionOrder },
     );
   }
@@ -485,11 +485,14 @@ export class EurostatBulkService {
         url: url.toString(),
         valueText,
         rows: () =>
-          expandRows(iterator, remainder, header, stats, valueText, oneDay?.date, {
-            datasetCode,
-            maxBytes: bulkMaxBytes,
-            normalizeDeadline,
-          }),
+          expandRows(
+            iterator,
+            remainder,
+            header,
+            stats,
+            { filters: normalizeFilters(filters), onlyPeriod: oneDay?.date, valueText },
+            { datasetCode, maxBytes: bulkMaxBytes, normalizeDeadline },
+          ),
       };
     } catch (error) {
       await decoded?.return(undefined);
@@ -715,57 +718,86 @@ function stripCr(line: string): string {
  * are blank on both sides of the value/flag split are skipped. A `:` is kept: a
  * flagged one is an observation Eurostat publishes without a value, and an
  * unflagged one stays a null row too, though it is no observation — a period the
- * series lacks, or a period of a frequency the series has no observation of. An
- * unflagged `:` adds no period to `periodsSeen`, and adds to `absentCellCount`
- * only when its line carries the column's frequency in another kept cell.
+ * series lacks, a period no line has an observation in, or a period of a frequency
+ * the series has no observation of. An unflagged `:` adds no period to `periodsSeen`.
+ *
+ * The same pass settles what the rows cannot show one at a time. Per frequency
+ * ({@link periodFrequency}), the span runs from the earliest to the latest column any
+ * line has an observation in ({@link frequencySpans}, chronological whatever the column
+ * order). An unflagged `:` adds to `absentCellCount` only inside its column's span, and
+ * only when its line carries that frequency in another kept cell; the columns outside a
+ * span go to `outsideSpans` with their row count. A filter value no line with an
+ * observation carries goes to `emptyValues`, unless the budget cut the transfer short.
  *
  * Only complete lines are parsed. When the byte budget cancels the transfer
  * mid-line the trailing fragment is dropped rather than parsed into a row with
- * silently truncated fields.
+ * silently truncated fields, so every count, span included, describes the lines emitted.
  *
- * `valueText` adds the `obs_value_text` column holding a cell's text value. `onlyPeriod`
- * keeps one period column and drops every other before it reaches a row or a counter.
+ * `request.filters` holds the filters the key was built from, `request.valueText` adds
+ * the `obs_value_text` column holding a cell's text value, and `request.onlyPeriod` keeps
+ * one period column and drops every other before it reaches a row or a counter.
  */
 async function* expandRows(
   chunks: AsyncGenerator<string>,
   remainder: string,
   header: TsvHeader,
   stats: BulkStats,
-  valueText: boolean,
-  onlyPeriod: string | undefined,
+  request: {
+    filters: Record<string, string[]>;
+    onlyPeriod: string | undefined;
+    valueText: boolean;
+  },
   failure: {
     datasetCode: string;
     maxBytes: number;
     normalizeDeadline: (error: unknown) => unknown;
   },
 ): AsyncGenerator<BulkRow> {
-  const seen = new Set<string>();
+  const { filters, onlyPeriod, valueText } = request;
+  const columns = header.periods.length;
   let buf = remainder;
 
   /**
    * Each period column's frequency, as an index into `frequencies` (at most the seven
-   * shapes, so one bit each), or -1 for a code of no known shape, which carries no
-   * frequency and so is never counted absent.
+   * shapes, so one bit each), or -1 for a code {@link periodFrequency} cannot place, which
+   * carries no frequency and so is never counted absent.
    */
   const frequencies: string[] = [];
   const columnFrequency = header.periods.map((period) => {
-    const [frequency] = frequenciesOf([period]);
+    const frequency = periodFrequency(period);
     if (frequency === undefined) return -1;
     const at = frequencies.indexOf(frequency);
     return at === -1 ? frequencies.push(frequency) - 1 : at;
   });
-  /** The current line's unflagged `:` cells, per frequency index; zeroed after any line that has one. */
-  const unflaggedByFrequency = frequencies.map(() => 0);
+  /**
+   * Per column: whether any line has an observation there, its unflagged `:` rows, and
+   * the unflagged `:` rows of lines that carry the column's frequency elsewhere.
+   */
+  const observed = new Uint8Array(columns);
+  const unflaggedRows = new Uint32Array(columns);
+  const lackedRows = new Uint32Array(columns);
+  /** The current line's unflagged `:` columns of a known frequency; emptied after any line that has one. */
+  const unflaggedAt: number[] = [];
+
+  /**
+   * Each filter key on the header column it names, with the values sent, lower-cased, that
+   * no line with an observation has carried yet. A key the header does not name tracks nothing.
+   */
+  const unseenValues = Object.entries(filters).flatMap(([key, values]) => {
+    const column = header.dimensions.findIndex((dim) => dim.toLowerCase() === key.toLowerCase());
+    if (column === -1) return [];
+    return [{ column, key, unseen: new Set(values.map((value) => value.toLowerCase())), values }];
+  });
 
   const emit = function* (line: string): Generator<BulkRow> {
     const trimmed = stripCr(line);
     if (trimmed === '') return;
     const fields = trimmed.split('\t');
     const keyParts = (fields[0] ?? '').split(',');
-    const cellCount = Math.min(fields.length - 1, header.periods.length);
+    const cellCount = Math.min(fields.length - 1, columns);
     /** A bit per frequency index this line carries in a kept cell that is not an unflagged `:`. */
     let carried = 0;
-    let unflagged = false;
+    let hasObservation = false;
 
     for (let i = 0; i < cellCount; i++) {
       const period = header.periods[i] ?? '';
@@ -779,13 +811,12 @@ async function* expandRows(
         parsed.conf === null &&
         parsed.text === undefined
       ) {
-        if (frequency !== -1) {
-          unflaggedByFrequency[frequency] = (unflaggedByFrequency[frequency] ?? 0) + 1;
-          unflagged = true;
-        }
+        unflaggedRows[i] = (unflaggedRows[i] ?? 0) + 1;
+        if (frequency !== -1) unflaggedAt.push(i);
       } else {
         if (frequency !== -1) carried |= 1 << frequency;
-        seen.add(period);
+        observed[i] = 1;
+        hasObservation = true;
       }
       const row: BulkRow = {};
       for (let d = 0; d < header.dimensions.length; d++) {
@@ -806,16 +837,52 @@ async function* expandRows(
       yield row;
     }
 
-    /**
-     * Reached once the consumer has taken the line's last row, before the next line is read.
-     * Lines without an unflagged `:` skip the fold: a per-line reset measurably slows
-     * narrow bodies, where lines vastly outnumber cells.
-     */
-    if (!unflagged) return;
-    for (let f = 0; f < frequencies.length; f++) {
-      if (carried & (1 << f)) stats.absentCellCount += unflaggedByFrequency[f] ?? 0;
+    // Reached once the consumer has taken the line's last row, before the next line is read.
+    if (hasObservation) {
+      for (const { column, unseen } of unseenValues) {
+        if (unseen.size > 0) unseen.delete(keyParts[column]?.trim().toLowerCase() ?? '');
+      }
     }
-    unflaggedByFrequency.fill(0);
+    // Lines without an unflagged `:` skip the fold: a per-line reset measurably slows narrow
+    // bodies, where lines vastly outnumber cells.
+    if (unflaggedAt.length === 0) return;
+    for (const i of unflaggedAt) {
+      if (carried & (1 << (columnFrequency[i] ?? 0))) lackedRows[i] = (lackedRows[i] ?? 0) + 1;
+    }
+    unflaggedAt.length = 0;
+  };
+
+  /** Read the spans off the finished counters, and the filter values no observation carried. */
+  const settle = (): void => {
+    stats.periodsSeen = [...new Set(header.periods.filter((_, i) => observed[i] === 1))].sort();
+
+    // A dropped one-day column belongs to no frequency, so it lies in no span.
+    const kept = header.periods.map((period) =>
+      onlyPeriod === undefined || period === onlyPeriod ? period : undefined,
+    );
+    const rowsAt = (periods: ListedPeriod[]) =>
+      periods.reduce((n, { position }) => n + (unflaggedRows[position] ?? 0), 0);
+    const spans: OutsideSpan[] = [];
+    let outsideRows = 0;
+    for (const entry of frequencySpans(kept, (i) => observed[i] === 1).frequencies) {
+      const outside = outsideSpanOf(entry);
+      if (outside) spans.push(outside);
+      if (entry.kind === 'empty') {
+        outsideRows += rowsAt(entry.periods);
+        continue;
+      }
+      for (const { position } of entry.inside) stats.absentCellCount += lackedRows[position] ?? 0;
+      outsideRows += rowsAt(entry.before) + rowsAt(entry.after);
+    }
+    if (spans.length > 0) stats.outsideSpans = { rowCount: outsideRows, spans };
+
+    if (stats.budgetExceeded) return;
+    const emptyValues: Record<string, string[]> = {};
+    for (const { key, unseen, values } of unseenValues) {
+      const lacking = [...new Set(values)].filter((value) => unseen.has(value.toLowerCase()));
+      if (lacking.length > 0) emptyValues[key] = lacking;
+    }
+    if (Object.keys(emptyValues).length > 0) stats.emptyValues = emptyValues;
   };
 
   /**
@@ -843,7 +910,7 @@ async function* expandRows(
     // body's trailing fragment is not a final line — it is a line cut in half.
     if (!stats.budgetExceeded) yield* emit(buf);
 
-    stats.periodsSeen = [...seen].sort();
+    settle();
     if (stats.budgetExceeded && stats.rowCount === 0)
       throw byteBudgetFailure(failure.datasetCode, stats, failure.maxBytes);
   } catch (error) {

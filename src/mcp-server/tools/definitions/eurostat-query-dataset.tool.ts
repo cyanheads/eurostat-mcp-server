@@ -6,9 +6,19 @@
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { clampReadLimit } from '@/mcp-server/tools/clamp-read-limit.js';
 import { hoistDimensions } from '@/mcp-server/tools/hoist-dimensions.js';
-import { dimensionsToNarrow, narrowingAdvice } from '@/mcp-server/tools/narrowing-advice.js';
+import {
+  dimensionsToNarrow,
+  dimensionValuesForHint,
+  formatValues,
+  narrowingAdvice,
+  RENAME_FILTER_KEYS_HINT,
+  UNKNOWN_FILTER_KEY_WHEN,
+  unmatchedValuesAdvice,
+} from '@/mcp-server/tools/narrowing-advice.js';
+import { countOf, listEmptyValues, spanOf } from '@/mcp-server/tools/notice-text.js';
 import {
   acquireCanvas,
   getCanvas,
@@ -18,19 +28,27 @@ import {
 import {
   getEurostatDataService,
   observationRowSchema,
+  TIME_DIMENSION_KEYS,
 } from '@/services/eurostat-data/eurostat-data-service.js';
 import {
   GEO_LEVEL_VALUES,
+  type GeoLevel,
   type NoResultsDiagnosis,
   OBS_CAP,
-  type UnmatchedValues,
+  type OutsideSpan,
+  type StatisticsDeadlineData,
 } from '@/services/eurostat-data/types.js';
-import { dropUnsetFilters } from '@/services/eurostat-filters.js';
+import {
+  normalizeFilters,
+  unknownDimensionsMessage,
+  unknownFilterKeys,
+} from '@/services/eurostat-filters.js';
 import { isComextDataset } from '@/services/eurostat-hosts.js';
 import { outageAnswer } from '@/services/eurostat-outage.js';
 import {
   cutNotice,
   cutSelector,
+  normalizePeriod,
   PERIOD_FORMS,
   resolvePeriods,
 } from '@/services/eurostat-periods.js';
@@ -62,13 +80,13 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
         .record(z.string(), z.array(z.string()))
         .default({})
         .describe(
-          'Dimension filters as a map of dimension code → array of valid values. Example: {"unit": ["CP_MEUR"], "na_item": ["B1GQ"], "geo": ["DE", "FR"]}. An empty array is treated as no filter for that dimension and is dropped from the request, and so is a blank or whitespace-only value ([""] is no filter, ["", "DE"] is ["DE"]). Dimension codes match in any case ("GEO" is geo). Keys are dimensions only: one naming a request control (lang, format, geoLevel, sinceTimePeriod, untilTimePeriod, lastTimePeriod, in any case) is rejected as invalid_dimension — use the lang, geo_level, since_period, until_period and last_n_periods inputs. Do not include "geo" here if using geo_level, nor "time"/"time_period" if using since_period, until_period or last_n_periods. A value that matches nothing contributes no rows rather than an error; the response names it in unmatchedValues, or in the no_results error when nothing matched at all. eurostat_get_dimension_values lists the valid values.',
+          'Dimension filters as a map of dimension code → array of valid values. Example: {"unit": ["CP_MEUR"], "na_item": ["B1GQ"], "geo": ["DE", "FR"]}. An empty array is treated as no filter for that dimension and is dropped from the request, and so is a blank or whitespace-only value ([""] is no filter, ["", "DE"] is ["DE"]). No Eurostat code contains "+" or ".": a value holding "+" is split into separate values, read as OR (["DE+FR"] is ["DE", "FR"]), and a value holding "." stays one value that matches nothing. Dimension codes match in any case ("GEO" is geo). Keys are dimensions only: one naming a request control (lang, format, geoLevel, sinceTimePeriod, untilTimePeriod, lastTimePeriod, in any case) is rejected as invalid_dimension — use the lang, geo_level, since_period, until_period and last_n_periods inputs. Do not include "geo" here if using geo_level, nor "time"/"time_period" if using since_period, until_period or last_n_periods. A value that matches nothing contributes no rows rather than an error; the response names it in unmatchedValues, or in the no_results error when nothing matched at all. A valid value with no cell in the selected periods contributes no rows either; the response names it in emptyValues. eurostat_get_dimension_values lists the valid values.',
         ),
       geo_level: z
         .enum(GEO_LEVEL_VALUES)
         .optional()
         .describe(
-          'Filter by NUTS hierarchy level. Mutually exclusive with a "geo" key in filters. Options: "aggregate" (EU/EA totals), "country" (41 member/candidate states), "nuts1" (127 major regions), "nuts2" (309 basic regions), "nuts3" (1,343 small regions).',
+          'Filter by NUTS hierarchy level. Mutually exclusive with a "geo" key in filters. Options: "aggregate" (EU/EA totals), "country" (member and candidate states), "nuts1" (major regions), "nuts2" (basic regions), "nuts3" (small regions). How many codes a level holds varies by dataset; a code of the level with no cell in the match is named in emptyValues.',
         ),
       since_period: z
         .string()
@@ -88,7 +106,7 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
         .min(1)
         .optional()
         .describe(
-          "Return only the N most recent dataset time positions. Selected periods without populated cells for this slice are disclosed in a notice on successful queries. N counts back from the dataset's latest period, not from the latest period published for this slice, so a slice that lags can come back empty — increase N, or replace last_n_periods with until_period ending at a period the slice has published. Mutually exclusive with since_period and until_period.",
+          "Return only the N most recent dataset time positions. Selected periods without populated cells for this slice are disclosed in a notice on successful queries, which advises a larger N only when every such period follows the slice's latest period with a cell. N counts back from the dataset's latest period, not from the latest period published for this slice, so a slice that lags can come back empty — increase N, or replace last_n_periods with a since_period/until_period range ending at a period the slice has published (until_period alone selects every period up to it). Mutually exclusive with since_period and until_period.",
         ),
       preview_limit: (clampLimits
         ? z.number().multipleOf(1).min(1)
@@ -231,13 +249,19 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
       absentCellCount: z
         .number()
         .describe(
-          'Periods the matched series lack: for each series (one combination of the non-time dimensions) with at least one cell in the match, the periods of a frequency it carries in which Eurostat publishes no cell for it, with no value and no flag. Absent cells are not observations, so obsCount, missingObsCount, observations and staged rows leave them out. A series lacks no period of a frequency it does not carry: an annual series beside a monthly one lacks no months. 0 when every series has a cell in every period of its frequencies.',
+          "Periods the matched series lack: for each series (one combination of the non-time dimensions) with at least one cell in the match, the periods of a frequency it carries in which Eurostat publishes no cell for it, with no value and no flag. Only periods from that frequency's first to its latest period with a cell in any series count; a period before or after that span, which no series has a cell in, is named in the notice instead. Absent cells are not observations, so obsCount, missingObsCount, observations and staged rows leave them out. A series lacks no period of a frequency it does not carry: an annual series beside a monthly one lacks no months. 0 when every series has a cell in every period of those spans.",
         ),
       unmatchedValues: z
         .record(z.string(), z.array(z.string()))
         .optional()
         .describe(
           'Filter values that matched nothing in the dataset, keyed by dimension code and spelled as sent (matching ignores case). The observations cover only the values that did match. Omitted when every filter value matched.',
+        ),
+      emptyValues: z
+        .record(z.string(), z.array(z.string()))
+        .optional()
+        .describe(
+          'Values the query selects that the dataset has but this match carries no cell for, with no value and no flag in the selected periods, so they contribute no rows. Keyed by dimension code: filter values spelled as sent (matching ignores case), and under geo_level every "geo" code of that level with no cell. Never a value unmatchedValues holds, a time value, or a value of a dimension that neither filters nor geo_level selects. Such a value can carry data in other periods or beside other filter values. Omitted when every selected value has a cell.',
         ),
     }),
     enrichment: {
@@ -258,7 +282,7 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
         .string()
         .optional()
         .describe(
-          'Composed guidance for a period a bound falls inside, which Eurostat excludes, unmatched filter values, selected last_n_periods positions with no populated cells, absent cells (periods a series lacks, with how many series lack any), inline previews, staging and unavailable explicit staging. Period gaps list up to the newest 24 periods with an omitted count; staged matches give the describe-then-query sequence. Omitted when none of these disclosures applies.',
+          "Composed guidance for a period a bound falls inside, which Eurostat excludes, unmatched filter values, values with no cell (emptyValues), selected last_n_periods positions with no populated cells, periods no series has a cell in before or after a frequency's span with cells, absent cells (periods a series lacks inside that span, with how many series lack any), inline previews, staging and unavailable explicit staging. Period gaps list up to the newest 24 periods and values with no cell up to 24, each with an omitted count; staged matches give the describe-then-query sequence. Omitted when none of these disclosures applies.",
         ),
     },
 
@@ -266,11 +290,8 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
       appliedFilters: {
         render: (f) => {
           const parts: string[] = [];
-          const filterKeys = Object.keys(f.filters);
-          if (filterKeys.length > 0) {
-            parts.push(
-              `- **Filters:** ${filterKeys.map((k) => `${k}=[${(f.filters[k] ?? []).join(', ')}]`).join('; ')}`,
-            );
+          if (Object.keys(f.filters).length > 0) {
+            parts.push(`- **Filters:** ${formatValues(f.filters, escapeMarkdownInline)}`);
           }
           if (f.geoLevel) parts.push(`- **Geo level:** ${f.geoLevel}`);
           if (f.sincePeriod || f.untilPeriod) {
@@ -295,9 +316,9 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
       {
         reason: 'no_results',
         code: JsonRpcErrorCode.NotFound,
-        when: 'The query matched no observation cells — including Eurostat HTTP-200 error id 100. The dataset is valid, but no cell carries a value or a status flag for that filter combination and period range. When Eurostat returns the empty table, the error names the filter values that matched nothing (data.unmatchedValues), the selected periods that carry no value (data.matchedPeriods, the newest 24, with data.matchedPeriodCount counting all of them), and, for a range that selected no period, whether it misses the coverage, holds no whole period, or holds no published one. When error id 100 answers a query that set geo_level, the error names geo_level as the likely cause, and lists the dataset\'s dimensions when it has no "geo" dimension.',
+        when: 'The query matched no observation cells — including Eurostat HTTP-200 error id 100. The dataset is valid, but no cell carries a value or a status flag for that filter combination and period range. When Eurostat returns the empty table, the error names the filter values that matched nothing (data.unmatchedValues) and, when the values of the dataset are read within 5 s, the codes and labels of each such dimension holding at most 25, or the total and a value search for each value sent otherwise (data.validValues), the selected periods that carry no value (data.matchedPeriods, the newest 24, with data.matchedPeriodCount counting all of them), and, for a range that selected no period, whether it misses the coverage, holds no whole period, or holds no published one. When error id 100 answers a query that set geo_level, the error names geo_level as the likely cause, and lists the dataset\'s dimensions when it has no "geo" dimension.',
         recovery:
-          'Verify dimension values with eurostat_get_dimension_values and keep the period range inside the dataset coverage, holding a whole period; an unmatched value, an out-of-coverage range and a range inside one period all return no data rather than an error. When the error names geo_level, drop it instead, and filter the "geo" codes the query then returns, or the dimension that holds geography.',
+          'Replace an unmatched value with a code the error lists, or verify dimension values with eurostat_get_dimension_values, and keep the period range inside the dataset coverage, holding a whole period; an unmatched value, an out-of-coverage range and a range inside one period all return no data rather than an error. When the error names geo_level, drop it instead, and filter the "geo" codes the query then returns, or the dimension that holds geography.',
       },
       {
         reason: 'invalid_period',
@@ -316,9 +337,8 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
       {
         reason: 'invalid_dimension',
         code: JsonRpcErrorCode.ValidationError,
-        when: 'A dimension code in filters does not exist in this dataset (HTTP 400, Eurostat error id 150), or a filter key names a request control (lang, format, geoLevel, sinceTimePeriod, untilTimePeriod, lastTimePeriod, in any case) rather than a dimension — rejected before any request, naming the input that sets it.',
-        recovery:
-          'Use eurostat_get_dataset_info to see valid dimension codes for this dataset; set a control through its own input (lang, geo_level, since_period, until_period, last_n_periods), not filters.',
+        when: `${UNKNOWN_FILTER_KEY_WHEN} (HTTP 400, Eurostat error id 150), or only the one key Eurostat names when the dataset's structure cannot be read. A filter key that names a request control (lang, format, geoLevel, sinceTimePeriod, untilTimePeriod, lastTimePeriod, in any case) rather than a dimension fails here too, rejected before any request and naming the input that sets it.`,
+        recovery: `${RENAME_FILTER_KEYS_HINT} When it lists none, eurostat_get_dataset_info lists them. Set a request control through its own input (lang, geo_level, since_period, until_period, last_n_periods), not filters.`,
       },
       {
         reason: 'conflicting_params',
@@ -339,6 +359,13 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
         when: 'The Statistics API answered HTTP 5xx or could not be reached on every attempt of the retry loop. The error is marked retryable, except for HTTP 501, which is marked not retryable.',
         recovery:
           "The failure is on Eurostat's side, not in the request: when the error is marked retryable, call again in a few minutes.",
+      },
+      {
+        reason: 'retry_deadline_exceeded',
+        code: JsonRpcErrorCode.Timeout,
+        when: "The Statistics API did not complete the query within the server's request deadline (30 s by default), every attempt and backoff included: Eurostat can take longer than that to prepare an uncached extraction, or to send a large answer.",
+        recovery:
+          'Repeat the call in a minute or two when Eurostat had not started answering, read the same slice with eurostat_download_dataset on a deployment with a dataframe canvas, or filter the dimensions the query left open.',
       },
     ],
 
@@ -380,33 +407,56 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
         );
       } catch (err) {
         const data = (err as McpError).data as
-          | (NoResultsDiagnosis & { reason?: string; recovery?: { hint?: string } })
+          | (NoResultsDiagnosis &
+              Partial<Omit<StatisticsDeadlineData, 'reason'>> & {
+                reason?: string;
+                recovery?: { hint?: string };
+              })
           | undefined;
         const reason = data?.reason;
         // A rule the service checked before the request names its own remedy; Eurostat's
         // refusals carry none and take the generic one below.
         const serviceHint = data?.recovery?.hint;
         if (data && reason === 'no_results') {
+          // The one extra read this path makes: an empty reply with an envelope names the
+          // unmatched values, and a bare one (geo_level's read below) names none.
+          const metadata =
+            data.unmatchedValues && (await dimensionValuesForHint(input.dataset_code, ctx));
+          const valueAdvice =
+            data.unmatchedValues && metadata
+              ? unmatchedValuesAdvice(input.dataset_code, data.unmatchedValues, metadata)
+              : undefined;
           const explained =
-            explainNoResults(input.dataset_code, data, {
-              lastN: input.last_n_periods,
-              ranged: Boolean(sinceP || untilP),
-            }) ??
+            explainNoResults(
+              input.dataset_code,
+              data,
+              { lastN: input.last_n_periods, ranged: Boolean(sinceP || untilP) },
+              valueAdvice,
+            ) ??
             (input.geo_level
               ? await explainGeoLevel(input.dataset_code, input.geo_level, ctx)
               : undefined);
-          throw ctx.fail('no_results', explained?.message ?? (err as Error).message, {
-            ...(data.unmatchedValues && { unmatchedValues: data.unmatchedValues }),
-            ...(data.matchedPeriods && {
-              matchedPeriods: data.matchedPeriods.slice(-MATCHED_PERIODS_LISTED),
-              matchedPeriodCount: data.matchedPeriods.length,
-            }),
-            recovery: {
-              hint:
-                explained?.hint ??
-                `No observation cells matched. Verify dimension values for "${input.dataset_code}" using eurostat_get_dimension_values, and check the period range is inside the dataset's coverage — an unmatched value and an out-of-coverage range both return no data rather than an error.`,
+          throw ctx.fail(
+            'no_results',
+            explained?.message ?? (err as Error).message,
+            {
+              ...(data.unmatchedValues && { unmatchedValues: data.unmatchedValues }),
+              ...(valueAdvice &&
+                Object.keys(valueAdvice.validValues).length > 0 && {
+                  validValues: valueAdvice.validValues,
+                }),
+              ...(data.matchedPeriods && {
+                matchedPeriods: data.matchedPeriods.slice(-MATCHED_PERIODS_LISTED),
+                matchedPeriodCount: data.matchedPeriods.length,
+              }),
+              recovery: {
+                hint:
+                  explained?.hint ??
+                  `No observation cells matched. Verify dimension values for "${input.dataset_code}" using eurostat_get_dimension_values, and check the period range is inside the dataset's coverage — an unmatched value and an out-of-coverage range both return no data rather than an error.`,
+              },
             },
-          });
+            { literals: valueAdvice?.literals ?? [] },
+          );
         }
         if (reason === 'invalid_period') {
           throw ctx.fail('invalid_period', (err as Error).message);
@@ -414,7 +464,7 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
         if (reason === 'async_response') {
           const dimensions = await dimensionsToNarrow(input.dataset_code, [], ctx);
           const filtered = [
-            ...Object.keys(dropUnsetFilters(input.filters)),
+            ...Object.keys(normalizeFilters(input.filters)),
             ...(input.geo_level ? ['geo'] : []),
           ];
           throw ctx.fail('async_response', (err as Error).message, {
@@ -431,6 +481,30 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
           });
         }
         if (reason === 'invalid_dimension') {
+          // Eurostat's id 150 names one undefined key per reply, so the structure names them all.
+          const order = serviceHint
+            ? undefined
+            : await dimensionsToNarrow(input.dataset_code, [], ctx);
+          const unknown = order
+            ? unknownFilterKeys(
+                order,
+                Object.keys(normalizeFilters(input.filters)).filter(
+                  (key) => !TIME_DIMENSION_KEYS.has(key.toLowerCase()),
+                ),
+              )
+            : [];
+          if (order && unknown.length > 0) {
+            throw ctx.fail(
+              'invalid_dimension',
+              unknownDimensionsMessage(unknown, order),
+              {
+                unknownDimensions: unknown,
+                dimensionOrder: order,
+                recovery: { hint: RENAME_FILTER_KEYS_HINT },
+              },
+              { cause: err, literals: order },
+            );
+          }
           throw ctx.fail('invalid_dimension', (err as Error).message, {
             recovery: {
               hint:
@@ -456,13 +530,35 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
             },
           });
         }
+        if (data && reason === 'retry_deadline_exceeded') {
+          const { deadlineMs, elapsedMs, retryAttempts, headersReceived } = data;
+          const dimensions = await dimensionsToNarrow(input.dataset_code, [], ctx);
+          const advice = deadlineAdvice(input, { sinceP, untilP }, dimensions, {
+            headersReceived,
+            canvas: getCanvas() !== undefined,
+          });
+          throw ctx.fail(
+            'retry_deadline_exceeded',
+            (err as Error).message,
+            { deadlineMs, elapsedMs, retryAttempts, recovery: { hint: advice.hint } },
+            { cause: err, literals: advice.literals },
+          );
+        }
         throw err;
       }
 
       // The service bounds `observations` to the requested preview, so its length says nothing
       // about match size. `obsCount` is the full total and is what truncation turns on.
-      const { absentSeries, appliedFilters, periodCuts, rows, unpopulatedPeriods, ...queryResult } =
-        result;
+      const {
+        absentSeries,
+        appliedFilters,
+        latestWithCell,
+        outsideSpans,
+        periodCuts,
+        rows,
+        unpopulatedPeriods,
+        ...queryResult
+      } = result;
       const truncated = result.obsCount > OBS_CAP;
 
       /**
@@ -528,12 +624,13 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
         const listed = unpopulatedPeriods.slice(-MATCHED_PERIODS_LISTED);
         const omitted = unpopulatedPeriods.length - listed.length;
         notices.push(
-          `${countOf(unpopulatedPeriods.length, 'selected period')} (${listed.join(', ')}${omitted ? `; ${countOf(omitted, 'earlier period')} omitted` : ''}) ${unpopulatedPeriods.length === 1 ? 'carries' : 'carry'} no populated cells anywhere in this match. last_n_periods counts dataset time positions, not periods with populated cells for this slice; preview_limit does not select periods. Increase last_n_periods, or replace last_n_periods with until_period ending at a period this slice has published.`,
+          `${countOf(unpopulatedPeriods.length, 'selected period')} (${listed.join(', ')}${omitted ? `; ${countOf(omitted, 'earlier period')} omitted` : ''}) ${unpopulatedPeriods.length === 1 ? 'carries' : 'carry'} no populated cells anywhere in this match. last_n_periods counts dataset time positions, not periods with populated cells for this slice; preview_limit does not select periods.${lastNAdvice(input.last_n_periods, unpopulatedPeriods, outsideSpans, latestWithCell)}`,
         );
       }
+      if (outsideSpans) notices.push(outsideSpanNotice(outsideSpans));
       if (absentSeries) {
         notices.push(
-          `${countOf(result.absentCellCount, 'absent cell')} in ${absentSeries.affected.toLocaleString()} of ${absentSeries.total.toLocaleString()} series: periods a series lacks at a frequency it carries (no value, no flag). They are not observations: obsCount, missingObsCount, the rows and any staged table leave them out, so a per-period total across series covers only the series present.`,
+          `${countOf(result.absentCellCount, 'absent cell')} in ${absentSeries.affected.toLocaleString('en-US')} of ${absentSeries.total.toLocaleString('en-US')} series: periods a series lacks at a frequency it carries (no value, no flag). They are not observations: obsCount, missingObsCount, the rows and any staged table leave them out, so a per-period total across series covers only the series present.`,
         );
       }
       if (input.stage && !availableCanvas) {
@@ -543,21 +640,22 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
       }
       if (result.unmatchedValues) {
         notices.push(
-          `These filter values matched nothing and contribute no rows: ${formatValues(result.unmatchedValues)}. Check the valid codes for ${joinAnd(Object.keys(result.unmatchedValues))} with eurostat_get_dimension_values.`,
+          `These filter values matched nothing and contribute no rows: ${formatValues(result.unmatchedValues, escapeMarkdownInline)}. Check the valid codes for ${joinAnd(Object.keys(result.unmatchedValues).map((dim) => escapeMarkdownInline(dim)))} with eurostat_get_dimension_values.`,
         );
       }
+      if (result.emptyValues) notices.push(emptyValuesNotice(result.emptyValues));
       if (result.obsCount > result.observations.length) {
         // This dataset's own dimensions: a DS-* flow has no geo, unit, or na_item to name.
         const filterOn = `dimension filters (${result.dimensionsUsed.filter((dim) => dim !== 'time').join(', ')})`;
         notices.push(
           staged
-            ? `preview_limit=${input.preview_limit.toLocaleString()} returns the first ${result.observations.length.toLocaleString()} of ${result.obsCount.toLocaleString()} matched rows inline; it does not reduce the match. All ${staged.stagedRowCount.toLocaleString()} matched rows are staged as table "${staged.tableName}" on canvas "${staged.canvasId}". Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query. Use ${filterOn} or a period range when the match itself should be smaller.`
-            : `preview_limit=${input.preview_limit.toLocaleString()} returns the first ${result.observations.length.toLocaleString()} of ${result.obsCount.toLocaleString()} matched rows inline; it does not reduce the match. ${availableCanvas ? 'Set stage=true to retain every matched row on a dataframe canvas. ' : ''}Use ${filterOn} or a period range to reduce the match itself.`,
+            ? `preview_limit=${input.preview_limit.toLocaleString('en-US')} returns the first ${result.observations.length.toLocaleString('en-US')} of ${result.obsCount.toLocaleString('en-US')} matched rows inline; it does not reduce the match. All ${staged.stagedRowCount.toLocaleString('en-US')} matched rows are staged as table \`${staged.tableName}\` on canvas \`${staged.canvasId}\`. Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query. Use ${filterOn} or a period range when the match itself should be smaller.`
+            : `preview_limit=${input.preview_limit.toLocaleString('en-US')} returns the first ${result.observations.length.toLocaleString('en-US')} of ${result.obsCount.toLocaleString('en-US')} matched rows inline; it does not reduce the match. ${availableCanvas ? 'Set stage=true to retain every matched row on a dataframe canvas. ' : ''}Use ${filterOn} or a period range to reduce the match itself.`,
         );
       }
       if (staged && result.obsCount <= result.observations.length) {
         notices.push(
-          `All ${staged.stagedRowCount.toLocaleString()} matched rows are staged as table "${staged.tableName}" on canvas "${staged.canvasId}". Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query.`,
+          `All ${staged.stagedRowCount.toLocaleString('en-US')} matched rows are staged as table \`${staged.tableName}\` on canvas \`${staged.canvasId}\`. Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query.`,
         );
       }
       if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
@@ -584,7 +682,12 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
       ];
       if (result.unmatchedValues) {
         lines.push(
-          `**Unmatched filter values:** ${formatValues(result.unmatchedValues)} — these matched nothing, so the rows cover only the other values; check them with eurostat_get_dimension_values`,
+          `**Unmatched filter values:** ${formatValues(result.unmatchedValues, escapeMarkdownInline)} — these matched nothing, so the rows cover only the other values; check them with eurostat_get_dimension_values`,
+        );
+      }
+      if (result.emptyValues) {
+        lines.push(
+          `**Values with no cell:** ${formatValues(result.emptyValues, escapeMarkdownInline)} — in the dataset but with no value or flag in this match, so the rows cover only the other values`,
         );
       }
       if (result.obsCount > result.observations.length) {
@@ -629,11 +732,66 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
 /** Default-on read-limit policy; startup selects the deployment policy explicitly. */
 export const eurostatQueryDataset = createEurostatQueryDataset(true);
 
-/** `geo=[DE, XX]; age=[ZZZ]` — the same rendering the applied-filters trailer uses. */
-function formatValues(values: UnmatchedValues): string {
-  return Object.entries(values)
-    .map(([dim, codes]) => `${dim}=[${codes.join(', ')}]`)
-    .join('; ');
+/** The values a query selects with no cell in the match. */
+function emptyValuesNotice(values: Record<string, string[]>): string {
+  const { list, total } = listEmptyValues(values);
+  const one = total === 1;
+  return `${countOf(total, 'value')} the query selects ${one ? 'exists' : 'exist'} in the dataset but ${one ? 'has' : 'have'} no cell in this match, so ${one ? 'it contributes' : 'they contribute'} no rows: ${list}. A value can still carry data in other periods or beside other filter values.`;
+}
+
+/**
+ * Name each frequency's periods that no series has a cell in, outside the span from its first
+ * to its latest period with one: those `absentCellCount` leaves out.
+ */
+function outsideSpanNotice(spans: OutsideSpan[]): string {
+  const carry = (periods: string[]) =>
+    `${spanOf(periods)} ${periods.length === 1 ? 'carries' : 'carry'} no cell in any series`;
+  const clauses = spans.flatMap((span) => {
+    if (span.kind === 'empty') {
+      return [
+        `${carry(span.periods)}, the only ${span.periods.length === 1 ? 'period' : 'periods'} of its frequency in this match`,
+      ];
+    }
+    return [
+      ...(span.before.length > 0
+        ? [`${carry(span.before)}, before the first period with one (${span.first})`]
+        : []),
+      ...(span.after.length > 0
+        ? [`${carry(span.after)}, after the latest period with one (${span.last})`]
+        : []),
+    ];
+  });
+  return `${clauses.join('; ')}. absentCellCount leaves such periods out: it counts only periods from a frequency's first to its latest period with a cell.`;
+}
+
+/**
+ * The closing advice of the last-N notice. A larger N reaches only earlier periods, so it is
+ * advised only when every empty selected period follows its frequency's span (or belongs to a
+ * frequency with no cell in the window); when the slice starts inside the window, the notice
+ * says so instead, and an empty period inside a span gets no advice. With one frequency the
+ * empty tail is exactly `trailing` positions, so N + trailing ends the window at `latest`.
+ * The alternative is a range: `until_period` excludes `last_n_periods`, so alone it would
+ * select every period up to `latest`.
+ */
+function lastNAdvice(
+  lastN: number,
+  unpopulated: string[],
+  outside: OutsideSpan[] | undefined,
+  latest: string | undefined,
+): string {
+  if (outside?.some((span) => span.kind === 'edges' && span.before.length > 0)) {
+    return ' This slice starts later than the selection, so a larger last_n_periods only reaches earlier periods.';
+  }
+  const trailing = (outside ?? []).reduce(
+    (n, span) => n + (span.kind === 'empty' ? span.periods.length : span.after.length),
+    0,
+  );
+  if (!latest || trailing !== unpopulated.length) return '';
+  const raise =
+    outside?.length === 1 && outside[0]?.kind === 'edges'
+      ? `Set last_n_periods to ${lastN + trailing} for the ${lastN} periods ending at ${latest}`
+      : 'Increase last_n_periods';
+  return ` ${raise}, or set a since_period/until_period range ending at ${latest}, the latest period with a cell in this match; until_period alone selects every period up to it.`;
 }
 
 function joinAnd(items: string[]): string {
@@ -641,14 +799,6 @@ function joinAnd(items: string[]): string {
     ? (items[0] ?? '')
     : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
 }
-
-/** `2026-08`, or `1975 – 1980` for several periods. */
-function spanOf(periods: string[]): string {
-  return periods.length === 1 ? (periods[0] ?? '') : `${periods[0]} – ${periods.at(-1)}`;
-}
-
-const countOf = (n: number, noun: string): string =>
-  `${n.toLocaleString()} ${noun}${n === 1 ? '' : 's'}`;
 
 /**
  * Turn the diagnosis an empty JSON-stat match carries into a message and a
@@ -659,11 +809,14 @@ const countOf = (n: number, noun: string): string =>
  * by how the caller chose them: `last_n_periods` counts back from the dataset's
  * latest period rather than the slice's, an explicit range can fall outside a
  * slice's narrower coverage, and with neither the combination itself is empty.
+ * `valueAdvice`, when the dataset's values were read, replaces the generic pointer for
+ * every unmatched dimension but those it left `unresolved`.
  */
 function explainNoResults(
   datasetCode: string,
   diagnosis: NoResultsDiagnosis,
   periods: { lastN: number | undefined; ranged: boolean },
+  valueAdvice: { sentences: string[]; unresolved: string[] } | undefined,
 ): { hint: string; message: string } | undefined {
   const { unmatchedValues, matchedPeriods, emptyRange } = diagnosis;
   if (!unmatchedValues && !matchedPeriods && !emptyRange) return;
@@ -674,9 +827,13 @@ function explainNoResults(
     found.push(
       `These filter values match nothing in "${datasetCode}": ${formatValues(unmatchedValues)}.`,
     );
-    next.push(
-      `Check the valid codes for ${joinAnd(Object.keys(unmatchedValues))} with eurostat_get_dimension_values.`,
-    );
+    const unchecked = valueAdvice?.unresolved ?? Object.keys(unmatchedValues);
+    next.push(...(valueAdvice?.sentences ?? []));
+    if (unchecked.length > 0) {
+      next.push(
+        `Check the valid codes for ${joinAnd(unchecked)} with eurostat_get_dimension_values.`,
+      );
+    }
   }
   if (emptyRange) {
     const { oldest, latest } = emptyRange.coverage;
@@ -723,7 +880,7 @@ function explainNoResults(
         `${empty} for this slice: last_n_periods counts back from the dataset's latest period, not from the latest period published for this slice.`,
       );
       next.push(
-        'Raise last_n_periods, or replace it with an until_period ending at a period this slice has published.',
+        'Raise last_n_periods, or replace it with a since_period/until_period range ending at a period this slice has published; until_period alone selects every period up to it.',
       );
     } else if (periods.ranged) {
       found.push(
@@ -775,4 +932,92 @@ async function explainGeoLevel(
     message: `${message} "${datasetCode}" has no "geo" dimension; its dimensions are ${listed}.`,
     hint: `Drop geo_level. To select geography, filter whichever of ${listed} holds it, with codes from eurostat_get_dimension_values.`,
   };
+}
+
+/**
+ * The recovery for a query that outlasted the Statistics API deadline, built from its input,
+ * with each route offered only where it works.
+ *
+ * A repeat helps only a deadline that cut Eurostat off before it answered: it goes on
+ * preparing the extraction and caches it, while an answer cut mid-transfer takes as long
+ * again. The bulk endpoint serves the same slice, but without a canvas the download keeps
+ * only its preview, so the route needs one, and it takes neither `last_n_periods`,
+ * `geo_level` nor a time filter: each becomes the period inputs or `filters.geo`, and with no
+ * `geo` dimension (or none known) `geo_level` has no download equivalent. Narrowing names the
+ * dimensions the query left open, as a too-large refusal does. `literals` holds the values
+ * the hint quotes for sending back.
+ */
+function deadlineAdvice(
+  input: {
+    dataset_code: string;
+    filters: Record<string, string[]>;
+    geo_level?: GeoLevel | undefined;
+    last_n_periods?: number | undefined;
+  },
+  periods: { sinceP: string | undefined; untilP: string | undefined },
+  dimensions: string[] | undefined,
+  state: { canvas: boolean; headersReceived: boolean | undefined },
+): { hint: string; literals: string[] } {
+  const code = input.dataset_code;
+  const applied = normalizeFilters(input.filters);
+  const keys = Object.keys(applied);
+  const timeKey = keys.find((key) => TIME_DIMENSION_KEYS.has(key.toLowerCase()));
+  const literals = [code];
+  const sentences: string[] = [];
+  if (state.headersReceived === false) {
+    sentences.push(
+      'Eurostat goes on preparing the extraction after the request is dropped and caches it, so repeat this call in a minute or two.',
+    );
+  }
+  if (state.canvas && (!input.geo_level || dimensions?.includes('geo'))) {
+    const quoted = (value: string) => {
+      literals.push(value);
+      return `"${value}"`;
+    };
+    const parts = [`dataset_code "${code}"`];
+    if (keys.some((key) => key !== timeKey)) parts.push('the same filters');
+    if (input.geo_level) {
+      parts.push(
+        `filters.geo set to the codes eurostat_get_dimension_values lists for dimension "geo" at geo_level "${input.geo_level}"`,
+      );
+    }
+    if (periods.sinceP) parts.push(`since_period ${quoted(periods.sinceP)}`);
+    if (periods.untilP) parts.push(`until_period ${quoted(periods.untilP)}`);
+    if (input.last_n_periods) {
+      parts.push(
+        input.last_n_periods === 1
+          ? 'since_period set to the latest period eurostat_get_dimension_values lists for dimension "time"'
+          : `since_period set to the earliest of the last ${input.last_n_periods} periods eurostat_get_dimension_values lists for dimension "time"`,
+      );
+    }
+    if (timeKey) {
+      const span = periodSpan(applied[timeKey] ?? []);
+      parts.push(
+        span
+          ? `since_period ${quoted(span.since)} and until_period ${quoted(span.until)} in place of filters.${timeKey}`
+          : `since_period/until_period in place of filters.${timeKey}`,
+      );
+    }
+    sentences.push(
+      `The bulk endpoint serves the same slice: call eurostat_download_dataset with ${joinAnd(parts)}.`,
+    );
+  }
+  sentences.push(narrowingAdvice(code, dimensions, [...keys, ...(input.geo_level ? ['geo'] : [])]));
+  return { hint: sentences.join(' '), literals };
+}
+
+/**
+ * The range spanning a time filter's periods, as the bounds to send, or `undefined` when one
+ * is not a period literal this server reads.
+ */
+function periodSpan(values: string[]): { since: string; until: string } | undefined {
+  let first: { firstDay: number; period: string } | undefined;
+  let last: { lastDay: number; period: string } | undefined;
+  for (const value of values) {
+    const period = normalizePeriod(value.trim());
+    if ('problem' in period) return;
+    if (!first || period.firstDay < first.firstDay) first = period;
+    if (!last || period.lastDay > last.lastDay) last = period;
+  }
+  return first && last ? { since: first.period, until: last.period } : undefined;
 }

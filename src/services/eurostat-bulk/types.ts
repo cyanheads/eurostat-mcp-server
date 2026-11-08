@@ -5,6 +5,8 @@
  * @module services/eurostat-bulk/types
  */
 
+import type { OutsideSpan } from '@/services/eurostat-data/types.js';
+
 /**
  * One non-blank TSV cell flattened from the wide layout into a dataframe row.
  *
@@ -44,9 +46,12 @@ export interface BulkStats {
   /**
    * Emitted rows holding an unflagged `:` — no value, flag, status or text — in a period
    * whose frequency (read off the period code's shape) the same line carries in a row
-   * that is not one: periods the series lacks, which the Statistics API has no cell for.
-   * An unflagged `:` at a period of a frequency the line has no observation of (the
-   * padding of a mixed-frequency slice, or a series that is `:` throughout) is left out. Part of {@link rowCount} and {@link missingCount}.
+   * that is not one, inside that frequency's span: from its first to its latest period
+   * any emitted line has an observation in. These are periods the series lacks, which the
+   * Statistics API has no cell for. A period outside the span is in {@link outsideSpans}
+   * instead. An unflagged `:` at a period of a frequency the line has no observation of
+   * (the padding of a mixed-frequency slice, or a series that is `:` throughout) is left
+   * out. Part of {@link rowCount} and {@link missingCount}.
    */
   absentCellCount: number;
   /**
@@ -59,10 +64,25 @@ export interface BulkStats {
   /** Whether the response body arrived gzip-compressed. */
   compressed: boolean;
   /**
+   * Filter values no emitted line carrying an observation holds, keyed by filter key, in the
+   * spelling sent and each once (matching ignores case). Eurostat fails a request naming an
+   * unknown code, so each is a value the dataset has with no observation in the range.
+   * Unset when every value has one, and on a transfer the byte budget cut short, whose
+   * unread lines could hold any of them.
+   */
+  emptyValues?: Record<string, string[]>;
+  /**
    * Emitted rows carrying no numeric value: observations published without a number (a
    * flagged `:`, a text value) and the rows of unflagged `:` cells.
    */
   missingCount: number;
+  /**
+   * Per frequency, finest first, the periods no emitted line has an observation in outside
+   * that frequency's span (or every period of a frequency with none), and `rowCount`, the
+   * emitted rows at those periods: unflagged `:` cells all, left out of
+   * {@link absentCellCount}. Unset when every kept period lies inside its frequency's span.
+   */
+  outsideSpans?: { rowCount: number; spans: OutsideSpan[] };
   /**
    * Distinct periods of the emitted rows that carry an observation — a value, a flag, a
    * status or a text value — ascending. An unflagged `:` adds none.
@@ -70,7 +90,8 @@ export interface BulkStats {
   periodsSeen: string[];
   /**
    * Rows emitted, one per non-blank cell: the observations, flagged `:` cells included,
-   * and the unflagged `:` cells, which are not observations.
+   * and the unflagged `:` cells, which are not observations — {@link absentCellCount}'s,
+   * {@link outsideSpans}' and the padding of a frequency a series has no observation of.
    */
   rowCount: number;
 }

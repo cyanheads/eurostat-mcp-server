@@ -314,6 +314,58 @@ describe('eurostat_query_dataset on DS-* codes (#46)', () => {
   });
 });
 
+describe('eurostat_query_dataset with a dotted DS-045409 product code (#100, #104)', () => {
+  const FILTERS = {
+    freq: ['A'],
+    reporter: ['DE'],
+    partner: ['US'],
+    flow: ['2'],
+    indicators: ['VALUE_IN_EUROS'],
+  };
+
+  it('returns the 2204 rows and names 2204.21, which no code matches, as unmatched', async () => {
+    upstream.statistics['DS-045409'] = {
+      body: comextFixture('ds-045409-a-de-us-2204-and-2204-21-since-2024.json'),
+    };
+    const result = await runToolContract(eurostatQueryDataset, {
+      dataset_code: 'DS-045409',
+      filters: { ...FILTERS, product: ['2204', '2204.21'] },
+      since_period: '2024',
+    });
+    expect(result.isError).not.toBe(true);
+    expect(structured(result)).toMatchObject({
+      obsCount: 2,
+      unmatchedValues: { product: ['2204.21'] },
+    });
+    const sent = requests().find((r) => r.route === 'statistics')?.url.searchParams;
+    expect(sent?.getAll('product')).toEqual(['2204', '2204.21']);
+  });
+
+  it('fails a lone dotted code naming the code to write, over a product list above 25 codes', async () => {
+    upstream.statistics['DS-045409'] = {
+      body: comextFixture('ds-045409-a-de-us-2204-21-since-2024.json'),
+    };
+    upstream.productCount = 30;
+    const result = await runToolContract(eurostatQueryDataset, {
+      dataset_code: 'DS-045409',
+      filters: { ...FILTERS, product: ['2204.21'] },
+      since_period: '2024',
+    });
+    expect(errorData(result)).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: {
+        reason: 'no_results',
+        unmatchedValues: { product: ['2204.21'] },
+        validValues: { product: { totalCount: 30 } },
+      },
+    });
+    const hint =
+      '"product" has 30 codes, too many to list here. No Eurostat code contains ".". Write "220421" for "2204.21" in filters.product.';
+    expect(hintOf(result)).toBe(hint);
+    expect(text(result)).toContain('Write "`220421`" for "`2204.21`" in filters.`product`.');
+  });
+});
+
 // ---------------------------------------------------------------------------
 
 describe('eurostat_download_dataset on DS-* codes and fault 413 (#46)', () => {
@@ -421,6 +473,67 @@ describe('eurostat_download_dataset on DS-* codes and fault 413 (#46)', () => {
     expect(hintOf(result)).toContain('Filter on freq, partner, product —');
     // The structure definition was read once, for the key, and reused for the hint.
     expect(requests().filter((r) => r.route === 'datastructure')).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('eurostat_download_dataset on a dotted DS-045409 product code (#100)', () => {
+  const FILTERS = {
+    freq: ['A'],
+    reporter: ['DE'],
+    partner: ['US'],
+    flow: ['2'],
+    indicators: ['VALUE_IN_EUROS'],
+  };
+
+  it('rejects "2204.21" before any request, naming 220421 as the code to write', async () => {
+    const result = await runToolContract(eurostatDownloadDataset, {
+      dataset_code: 'DS-045409',
+      filters: { ...FILTERS, product: ['2204.21'] },
+      since_period: '2024',
+    });
+    // Not the structure read either: a dotted value fails before the key is built.
+    expect(requests()).toEqual([]);
+    expect(errorData(result)).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message:
+        'A filter value contains ".", so nothing was sent to Eurostat: "2204.21" in filters.product.',
+      data: { reason: 'invalid_dimension' },
+    });
+    expect(hintOf(result)).toContain('Write "220421" for "2204.21" in filters.product.');
+    expect(hintOf(result)).not.toContain('without filters');
+    // The code to write renders as a code span, so it reads back exactly.
+    expect(text(result)).toContain('Write "`220421`" for "`2204.21`"');
+  });
+
+  it('downloads "220421" over the recorded reply', async () => {
+    upstream.tsv['DS-045409'] = { body: comextFixture('ds-045409-a-de-us-220421-since-2024.tsv') };
+    const result = await runToolContract(eurostatDownloadDataset, {
+      dataset_code: 'DS-045409',
+      filters: { ...FILTERS, product: ['220421'] },
+      since_period: '2024',
+    });
+    expect(result.isError).not.toBe(true);
+    expect(requests().map((r) => `${r.host}:${r.route}`)).toEqual([
+      'comext:datastructure',
+      'comext:data',
+    ]);
+    const data = requests().find((r) => r.route === 'data');
+    expect(decodeURIComponent(data?.url.pathname ?? '')).toMatch(
+      /\/DS-045409\/A\.DE\.US\.220421\.2\.VALUE_IN_EUROS$/,
+    );
+    // 2024 and 2025 carry values; 2026 is an unflagged ":" the series lacks.
+    const { observations, rowCount } = structured<{
+      observations: Array<Record<string, unknown>>;
+      rowCount: number;
+    }>(result);
+    expect(rowCount).toBe(3);
+    expect(observations.map((r) => [r.product, r.time, r.obs_value])).toEqual([
+      ['220421', '2024', 82345277],
+      ['220421', '2025', 66833630],
+      ['220421', '2026', null],
+    ]);
   });
 });
 
@@ -606,10 +719,10 @@ describe('eurostat_get_dimension_values paging long lists (#46, #64)', () => {
     );
     expect(counted.rows).toEqual([{ n: '37069', last: 'P037068' }]);
     expect(structured<{ notice: string }>(result).notice).toContain(
-      `Every one of the 37,069 values is staged as table "${body.tableName}"`,
+      `Every one of the 37,069 values is staged as table \`${body.tableName}\``,
     );
     expect(text(result)).toContain(
-      `Every one of the 37,069 values is staged as table "${body.tableName}"`,
+      `Every one of the 37,069 values is staged as table \`${body.tableName}\``,
     );
   });
 
@@ -665,6 +778,10 @@ describe('eurostat_get_dimension_values paging long lists (#46, #64)', () => {
 // ---------------------------------------------------------------------------
 
 describe('search and browse over both sources (#46, #45)', () => {
+  /** The stub serves no dimension value index, so a search that matches nothing closes with this (#103). */
+  const VALUES_UNSEARCHED =
+    'Dimension value labels were not searched because their index has not loaded yet; it loads in the background, so the same search may later find datasets through them.';
+
   it('finds the trade collections searching "comext"', async () => {
     const result = await runToolContract(eurostatSearchDatasets, { query: 'comext' });
     const codes = structured<{ datasets: Array<{ code: string }> }>(result).datasets.map(
@@ -699,8 +816,7 @@ describe('search and browse over both sources (#46, #45)', () => {
 
   it('names the dead words, then the broaden hint, when no word of the query matches (#92)', async () => {
     const result = await runToolContract(eurostatSearchDatasets, { query: 'zebra crossings' });
-    const hint =
-      '"zebra" and "crossings" match no dataset label, theme breadcrumb, or code. Try a broader term or use eurostat_browse_themes to explore themes without text search.';
+    const hint = `"zebra" and "crossings" match no dataset label, theme breadcrumb, or code. Try a broader term or use eurostat_browse_themes to explore themes without text search. ${VALUES_UNSEARCHED}`;
     expect(hintOf(result)).toBe(hint);
     expect(text(result)).toContain(`Recovery: ${hint}`);
   });
@@ -714,7 +830,7 @@ describe('search and browse over both sources (#46, #45)', () => {
       data: { reason: 'no_match' },
     });
     expect(hintOf(result)).toBe(
-      'Broadening will not find DS-056120: a collection on neither list is not disseminated. Search for its subject instead — "prodcom" or "CN8", for example — to find the DS-* collections Eurostat does disseminate. "DS-056120" and "overnight" match no dataset label, theme breadcrumb, or code. Search again without them.',
+      `Broadening will not find DS-056120: a collection on neither list is not disseminated. Search for its subject instead — "prodcom" or "CN8", for example — to find the DS-* collections Eurostat does disseminate. "DS-056120" and "overnight" match no dataset label, theme breadcrumb, or code. Search again without them. ${VALUES_UNSEARCHED}`,
     );
   });
 
@@ -744,9 +860,13 @@ describe('search and browse over both sources (#46, #45)', () => {
       const result = await runToolContract(eurostatSearchDatasets, {
         query: 'Enterprise statistics by size class and NACE Rev.2 activity',
       });
+      /**
+       * In tier order (#101): sbs_sc_ovw's label holds the phrase, both egr_mne_* labels hold
+       * every word, and sbs_ovw_smc has "statistics" only in its breadcrumb.
+       */
       expect(
         structured<{ datasets: Array<{ code: string }> }>(result).datasets.map((d) => d.code),
-      ).toEqual(['sbs_sc_ovw', 'sbs_ovw_smc', 'egr_mne_n2sc', 'egr_mne_empw']);
+      ).toEqual(['sbs_sc_ovw', 'egr_mne_n2sc', 'egr_mne_empw', 'sbs_ovw_smc']);
       expect(text(result)).toContain('**Code:** sbs_sc_ovw');
     });
 
@@ -759,7 +879,7 @@ describe('search and browse over both sources (#46, #45)', () => {
         data: { reason: 'no_match' },
       });
       expect(hintOf(result)).toBe(
-        'Without "rates": 7 matches. Without "sex": 3 matches. Without "annual": 4 matches. Search again without one of those words to see its matches.',
+        `Without "rates": 7 matches. Without "sex": 3 matches. Without "annual": 4 matches. Search again without one of those words to see its matches. ${VALUES_UNSEARCHED}`,
       );
       expect(text(result)).toContain('Without "annual": 4 matches.');
     });
@@ -773,8 +893,7 @@ describe('search and browse over both sources (#46, #45)', () => {
         message: 'No datasets matched "tourism overnight stays".',
         data: { reason: 'no_match' },
       });
-      const hint =
-        '"overnight" and "stays" match no dataset label, theme breadcrumb, or code. Search again without them.';
+      const hint = `"overnight" and "stays" match no dataset label, theme breadcrumb, or code. Search again without them. ${VALUES_UNSEARCHED}`;
       expect(hintOf(result)).toBe(hint);
       expect(text(result)).toContain(`Recovery: ${hint}`);
     });
@@ -790,7 +909,7 @@ describe('search and browse over both sources (#46, #45)', () => {
       ],
     ])('names the dead words of "%s" in query order, each once (#92)', async (query, hint) => {
       const result = await runToolContract(eurostatSearchDatasets, { query });
-      expect(hintOf(result)).toBe(hint);
+      expect(hintOf(result)).toBe(`${hint} ${VALUES_UNSEARCHED}`);
     });
   });
 
@@ -848,7 +967,7 @@ describe('search and browse over both sources (#46, #45)', () => {
         query: 'prodcom zebra crossings',
       });
       expect(hintOf(result)).toBe(
-        'The Comext dataflow list could not be loaded, so the DS-* collections (detailed trade and PRODCOM) were not searched; the merge is retried about once a minute. eurostat_get_dataset_info reads a DS-* code directly. Try a broader term or use eurostat_browse_themes to explore themes without text search.',
+        `The Comext dataflow list could not be loaded, so the DS-* collections (detailed trade and PRODCOM) were not searched; the merge is retried about once a minute. eurostat_get_dataset_info reads a DS-* code directly. Try a broader term or use eurostat_browse_themes to explore themes without text search. ${VALUES_UNSEARCHED}`,
       );
     });
 
@@ -857,7 +976,7 @@ describe('search and browse over both sources (#46, #45)', () => {
         query: 'prodcom zebra crossings',
       });
       expect(hintOf(result)).toBe(
-        '"zebra" and "crossings" match no dataset label, theme breadcrumb, or code. Search again without them.',
+        `"zebra" and "crossings" match no dataset label, theme breadcrumb, or code. Search again without them. ${VALUES_UNSEARCHED}`,
       );
     });
 

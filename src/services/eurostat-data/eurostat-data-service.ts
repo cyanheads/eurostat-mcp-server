@@ -10,6 +10,7 @@ import {
   McpError,
   notFound,
   serviceUnavailable,
+  timeout,
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
@@ -26,16 +27,18 @@ import {
   OBS_VALUE_COLUMN,
   OBS_VALUE_TEXT_COLUMN,
 } from '@/services/eurostat-codelists.js';
-import { dropUnsetFilters } from '@/services/eurostat-filters.js';
+import { normalizeFilters } from '@/services/eurostat-filters.js';
 import { dataHostFor, isComextDataset } from '@/services/eurostat-hosts.js';
 import { isUpstreamOutage, upstreamOutage } from '@/services/eurostat-outage.js';
 import {
   diagnoseEmptyRange,
-  frequenciesOf,
+  frequencySpans,
   oneDayRange,
+  outsideSpanOf,
   type PeriodCoverage,
   type PeriodRange,
   periodCuts,
+  periodFrequency,
 } from '@/services/eurostat-periods.js';
 import { awaitShared } from '@/services/shared-load.js';
 import {
@@ -49,11 +52,14 @@ import {
   GEO_LEVEL_VALUES,
   type GeoLevel,
   type JsonStatResponse,
+  type ListedValue,
   type NoResultsDiagnosis,
   OBS_CAP,
   type Observation,
   type ObservationRow,
+  type OutsideSpan,
   type QueryExecution,
+  type StatisticsDeadlineData,
   type UnmatchedValues,
 } from './types.js';
 
@@ -94,8 +100,11 @@ const CONTROL_INPUTS = new Map<string, string | undefined>([
   ['lasttimeperiod', 'last_n_periods'],
 ]);
 
-/** Filter keys that select the time dimension itself, lower-case. */
-const TIME_DIMENSION_KEYS = new Set(['time', 'time_period']);
+/**
+ * Filter keys that select the time dimension itself, lower-case. Valid on a query though no
+ * structure lists them: the key order excludes time.
+ */
+export const TIME_DIMENSION_KEYS: ReadonlySet<string> = new Set(['time', 'time_period']);
 
 /** The dataset-scoped SDMX 2.1 structure resources read from Eurostat. */
 type SdmxStructureResource = 'contentconstraint' | 'dataflow' | 'datastructure';
@@ -173,6 +182,53 @@ export function findUnmatchedValues(
     if (missing.length > 0) unmatched[key] = missing;
   }
   return Object.keys(unmatched).length > 0 ? unmatched : undefined;
+}
+
+/**
+ * The dimensions whose values the query selects, as the reply names them: each filtered
+ * dimension but time, matched to its key in any case, and `geo` under `geo_level`.
+ */
+function selectedDimensions(
+  sent: Record<string, string[]>,
+  geoLevel: GeoLevel | undefined,
+  data: JsonStatResponse,
+): string[] {
+  const keys = Object.keys(sent).filter((key) => !TIME_DIMENSION_KEYS.has(key.toLowerCase()));
+  return (data.id ?? []).filter(
+    (dim) =>
+      (geoLevel !== undefined && dim === 'geo') ||
+      keys.some((key) => key.toLowerCase() === dim.toLowerCase()),
+  );
+}
+
+/**
+ * Values the query selects that the reply lists but no cell of the match carries, from the
+ * codes no cell reaches in each dimension {@link selectedDimensions} names.
+ *
+ * Filter values follow {@link findUnmatchedValues}'s rules — key and value matched in any
+ * case, reported under the key and in the spelling sent, each once — and the two never
+ * share a value: one has no index entry, the other has an entry and no cell. Under
+ * `geo_level`, which sends no `geo` value, every `geo` code of the level without a cell is
+ * listed, in index order.
+ */
+function findEmptyValues(
+  sent: Record<string, string[]>,
+  geoLevel: GeoLevel | undefined,
+  data: JsonStatResponse,
+  emptyCodes: Map<string, string[]>,
+): Record<string, string[]> | undefined {
+  const empty: Record<string, string[]> = {};
+  for (const [key, values] of Object.entries(sent)) {
+    const dim = data.id?.find((id) => id.toLowerCase() === key.toLowerCase());
+    const codes = dim === undefined ? undefined : emptyCodes.get(dim);
+    if (!codes?.length) continue;
+    const lacking = new Set(codes.map((code) => code.toLowerCase()));
+    const found = [...new Set(values)].filter((v) => lacking.has(v.toLowerCase()));
+    if (found.length > 0) empty[key] = found;
+  }
+  const geoCodes = geoLevel ? emptyCodes.get('geo') : undefined;
+  if (geoCodes?.length) empty.geo = geoCodes;
+  return Object.keys(empty).length > 0 ? empty : undefined;
 }
 
 /**
@@ -379,9 +435,10 @@ export class EurostatDataService {
    *
    * The load is shared by every caller of the dataset, so it runs without a caller's
    * signal and is bounded by its timeouts alone: a caller that cancels stops waiting
-   * without failing the others or the entry.
+   * without failing the others or the entry. The result is frozen and shared; read it,
+   * never edit it.
    */
-  private getSdmxMetadata(datasetCode: string, ctx: Context): Promise<SdmxDatasetMetadata> {
+  getSdmxMetadata(datasetCode: string, ctx: Context): Promise<SdmxDatasetMetadata> {
     return awaitShared(ctx.signal, () => {
       const key = `${dataHostFor(datasetCode)} ${datasetCode.toLowerCase()}`;
       const now = Date.now();
@@ -458,12 +515,19 @@ export class EurostatDataService {
    * One Statistics API request, retried on transient failures. A 5xx or an unreachable
    * host that outlasts the retries fails as a retryable `upstream_fault`; a call the
    * caller cancelled keeps its cancellation.
+   *
+   * A request that outlasts the deadline fails as `retry_deadline_exceeded`, named for
+   * the dataset and carrying {@link StatisticsDeadlineData}: whether the last request had
+   * its headers tells a deadline that cut Eurostat off while it prepared the extraction
+   * from one that cut the answer arriving.
    */
   private fetchJson(url: URL, datasetCode: string, ctx: Context): Promise<JsonStatResponse> {
     const { requestTimeoutMs } = getServerConfig();
     const fetchCtx = withExtra(ctx, { endpoint: 'statistics-data' });
+    let headersReceived = false;
     return withRetry(
       async (attempt) => {
+        headersReceived = false;
         let response: Awaited<ReturnType<typeof fetchWithTimeout>>;
         try {
           response = await fetchWithTimeout(url.toString(), requestTimeoutMs, fetchCtx, {
@@ -490,6 +554,8 @@ export class EurostatDataService {
             err instanceof McpError
               ? (err.data as { errorSource?: string; body?: string } | undefined)
               : undefined;
+          // A non-2xx status is an answer: its headers arrived.
+          if (errData?.errorSource === 'FetchHttpError') headersReceived = true;
           if (errData?.errorSource === 'FetchHttpError' && typeof errData.body === 'string') {
             let parsed: JsonStatResponse | undefined;
             try {
@@ -509,6 +575,7 @@ export class EurostatDataService {
           }
           throw err;
         }
+        headersReceived = true;
         const text = await response.text();
         if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text)) {
           throw serviceUnavailable(
@@ -535,6 +602,25 @@ export class EurostatDataService {
       },
     ).catch((error: unknown) => {
       if (ctx.signal.aborted) throw error;
+      if (error instanceof McpError && error.data?.reason === 'retry_deadline_exceeded') {
+        const { deadlineMs, elapsedMs, retryAttempts } = error.data as {
+          deadlineMs: number;
+          elapsedMs: number;
+          retryAttempts: number;
+        };
+        throw timeout(
+          `Eurostat's Statistics API did not complete a query of dataset "${datasetCode}" within its ${deadlineMs.toLocaleString('en-US')} ms deadline (${retryAttempts} attempt${retryAttempts === 1 ? '' : 's'}).`,
+          {
+            reason: 'retry_deadline_exceeded',
+            datasetCode,
+            deadlineMs,
+            elapsedMs,
+            retryAttempts,
+            headersReceived,
+          } satisfies StatisticsDeadlineData,
+          { cause: error },
+        );
+      }
       throw (
         upstreamOutage(error, "Eurostat's Statistics API", `a query of dataset "${datasetCode}"`, {
           datasetCode,
@@ -647,15 +733,29 @@ export class EurostatDataService {
    * The same pass counts the cells the match lacks. A series is one combination of the
    * non-time coordinates — a cell's linear index with its time coordinate removed — and a
    * series with at least one cell lacks each period of a frequency it carries in which it
-   * has no cell in either map. Frequency is the period code's shape ({@link frequenciesOf}),
-   * so a monthly series beside an annual one lacks none of the annual periods, and a code of
-   * no known shape is a period no series lacks.
+   * has no cell in either map, inside that frequency's populated span: from its first to
+   * its latest period with a cell in any series ({@link frequencySpans}). A period outside
+   * the span is one no series has a cell in — a host padding the range, a slice that starts
+   * later or lags the dataset — and is returned in `outsideSpans` rather than counted.
+   * Frequency is the period code's shape ({@link periodFrequency}), so a monthly series
+   * beside an annual one lacks none of the annual periods, and a code of no known shape is a
+   * period no series lacks.
+   *
+   * It also records, for each dimension in `tracked`, which index positions a cell reaches,
+   * and returns the codes at the positions none does.
    */
-  private scanCells(data: JsonStatResponse): {
+  private scanCells(
+    data: JsonStatResponse,
+    tracked: readonly string[] = [],
+  ): {
     absentCellCount: number;
     absentSeries?: { affected: number; total: number };
+    /** Per tracked dimension the reply carries, the index codes no cell reaches, in index order. */
+    emptyCodes: Map<string, string[]>;
+    latestWithCell?: string;
     missingObsCount: number;
     obsCount: number;
+    outsideSpans: OutsideSpan[];
     timeCodes: string[];
     unpopulatedPeriods: string[];
   } {
@@ -664,9 +764,10 @@ export class EurostatDataService {
     const value = data.value ?? {};
     const status = data.status ?? {};
     const totalCells = sizes.reduce((a, b) => a * b, 1);
+    const strides = this.computeStrides(sizes);
 
     const timeDim = dims.indexOf('time');
-    const timeStride = timeDim >= 0 ? (this.computeStrides(sizes)[timeDim] ?? 1) : 1;
+    const timeStride = timeDim >= 0 ? (strides[timeDim] ?? 1) : 1;
     const timeSize = timeDim >= 0 ? (sizes[timeDim] ?? 0) : 0;
     const timeSeen = new Uint8Array(timeSize);
 
@@ -676,6 +777,12 @@ export class EurostatDataService {
       if (pos >= 0 && pos < timeSize) timeCodeAt[pos] = code;
     }
 
+    const seenIn = tracked.flatMap((dim) => {
+      const d = dims.indexOf(dim);
+      const size = sizes[d] ?? 0;
+      return d < 0 ? [] : [{ dim, seen: new Uint8Array(size), size, stride: strides[d] ?? 1 }];
+    });
+
     // Each time position's frequency, as a slot whose positions `periodsInSlot` counts.
     // Codes of no known shape share the slot keyed ''.
     const slotOf = new Map<string, number>();
@@ -683,7 +790,7 @@ export class EurostatDataService {
     const periodsInSlot: number[] = [];
     for (let pos = 0; pos < timeSize; pos++) {
       const code = timeCodeAt[pos];
-      const [frequency = ''] = code === undefined ? [] : frequenciesOf([code]);
+      const frequency = (code === undefined ? undefined : periodFrequency(code)) ?? '';
       let slot = slotOf.get(frequency);
       if (slot === undefined) {
         slot = periodsInSlot.push(0) - 1;
@@ -712,6 +819,7 @@ export class EurostatDataService {
       if (!Number.isInteger(idx) || idx < 0 || idx >= totalCells) return;
       obsCount++;
       if (missing) missingObsCount++;
+      for (const { seen, size, stride } of seenIn) seen[Math.floor(idx / stride) % size] = 1;
       if (timeSize === 0) return;
       const pos = Math.floor(idx / timeStride) % timeSize;
       timeSeen[pos] = 1;
@@ -728,6 +836,19 @@ export class EurostatDataService {
       if (!(key in value)) count(key, true);
     }
 
+    // Every cell of a frequency lies inside its span, so a series lacks the span's periods
+    // less the cells it has there.
+    const { frequencies, latest } = frequencySpans(timeCodeAt, (pos) => timeSeen[pos] === 1);
+    const spanInSlot = periodsInSlot.map(() => 0);
+    const outsideSpans: OutsideSpan[] = [];
+    for (const entry of frequencies) {
+      const outside = outsideSpanOf(entry);
+      if (outside) outsideSpans.push(outside);
+      if (entry.kind === 'empty') continue;
+      const slot = slotOf.get(entry.frequency);
+      if (slot !== undefined) spanInSlot[slot] = entry.inside.length;
+    }
+
     let absentCellCount = 0;
     let seriesWithCells = 0;
     let affectedSeries = 0;
@@ -739,7 +860,7 @@ export class EurostatDataService {
           const cells = cellsBySeriesSlot[first + slot] ?? 0;
           if (cells === 0) continue;
           carried = true;
-          if (slot !== unknownSlot) absent += (periodsInSlot[slot] ?? 0) - cells;
+          if (slot !== unknownSlot) absent += (spanInSlot[slot] ?? 0) - cells;
         }
         if (carried) seriesWithCells++;
         if (absent > 0) {
@@ -756,6 +877,15 @@ export class EurostatDataService {
       if (timeSeen[pos]) timeCodes.push(code ?? String(pos));
       else if (code !== undefined) unpopulatedPeriods.push(code);
     }
+    const emptyCodes = new Map(
+      seenIn.map(({ dim, seen }) => [
+        dim,
+        Object.entries(data.dimension?.[dim]?.category?.index ?? {})
+          .filter(([, position]) => seen[position] === 0)
+          .sort(([, a], [, b]) => a - b)
+          .map(([code]) => code),
+      ]),
+    );
     return {
       obsCount,
       missingObsCount,
@@ -763,6 +893,9 @@ export class EurostatDataService {
       ...(absentCellCount > 0 && {
         absentSeries: { affected: affectedSeries, total: seriesWithCells },
       }),
+      emptyCodes,
+      ...(latest && { latestWithCell: latest.code }),
+      outsideSpans,
       timeCodes: timeCodes.sort(),
       unpopulatedPeriods,
     };
@@ -911,8 +1044,9 @@ export class EurostatDataService {
     const xml = await this.fetchSdmxXml('datastructure', datasetCode, ctx, ctx.signal, deadlineMs);
     const order = parseSdmx(datasetCode, () => parseSdmxDimensionOrder(xml));
     if (order.length === 0) {
+      // A DS-* collection refuses an unfiltered download as too large, so none is offered there.
       throw serviceUnavailable(
-        `Eurostat reported no dimensions for dataset "${datasetCode}", so a positional filter key cannot be built. Retry without filters to download the whole dataset.`,
+        `Eurostat reported no dimensions for dataset "${datasetCode}", so a positional filter key cannot be built. ${isComextDataset(datasetCode) ? 'Re-read the dimensions with eurostat_get_dataset_info.' : 'Retry without filters to download the whole dataset.'}`,
         { reason: 'upstream_fault', datasetCode },
       );
     }
@@ -925,6 +1059,8 @@ export class EurostatDataService {
    * Values come from the dataset's content constraint, not from a populated observation
    * slice. For `geo`, the requested hierarchy level is applied locally and defaults to
    * `country`; the effective level is returned so an omitted default is still visible.
+   * `listedValues` is the list the default does not narrow: every geo level when none
+   * was requested, each code carrying its level.
    */
   async getDimensionValues(
     datasetCode: string,
@@ -984,12 +1120,21 @@ export class EurostatDataService {
       );
     }
 
+    const listedValues: ListedValue[] =
+      dimension === 'geo'
+        ? (geoLevel ? filteredValues : values).map(({ code, label }) => ({
+            code,
+            label,
+            level: metadata.geoLevelsByCode[code] ?? null,
+          }))
+        : filteredValues;
     return {
       dimensionCode: dimension,
       dimensionLabel: dimDef.label,
       ...(effectiveGeoLevel && { geoLevel: effectiveGeoLevel }),
       values: filteredValues,
       totalCount: filteredValues.length,
+      listedValues,
     };
   }
 
@@ -1015,7 +1160,7 @@ export class EurostatDataService {
     // Blank values and zero-length arrays place no restriction on the request. Drop them once,
     // up front, so the checks below, the request URL, the log line, and the applied filters
     // echoed back to the caller all describe the same query.
-    const appliedFilters = dropUnsetFilters(filters);
+    const appliedFilters = normalizeFilters(filters);
 
     ctx.log.info('Querying dataset', {
       datasetCode,
@@ -1119,9 +1264,12 @@ export class EurostatDataService {
       missingObsCount,
       absentCellCount,
       absentSeries,
+      emptyCodes,
+      latestWithCell,
+      outsideSpans,
       timeCodes,
       unpopulatedPeriods,
-    } = this.scanCells(data);
+    } = this.scanCells(data, selectedDimensions(appliedFilters, geoLevel, data));
 
     const oldest = this.extractAnnotation(data, 'OBS_PERIOD_OVERALL_OLDEST', 'title');
     const latest = this.extractAnnotation(data, 'OBS_PERIOD_OVERALL_LATEST', 'title');
@@ -1148,6 +1296,7 @@ export class EurostatDataService {
       );
     }
     const unmatchedValues = findUnmatchedValues(appliedFilters, data);
+    const emptyValues = findEmptyValues(appliedFilters, geoLevel, data, emptyCodes);
 
     const observations = this.decodeObservations(data, Math.min(previewLimit, OBS_CAP));
 
@@ -1173,7 +1322,9 @@ export class EurostatDataService {
       ...(absentSeries && { absentSeries }),
       appliedFilters,
       ...(unmatchedValues && { unmatchedValues }),
+      ...(emptyValues && { emptyValues }),
       ...(lastN && unpopulatedPeriods.length > 0 && { unpopulatedPeriods }),
+      ...(outsideSpans.length > 0 && { outsideSpans, ...(latestWithCell && { latestWithCell }) }),
       ...(cuts.length > 0 && { periodCuts: cuts }),
       rows: () => this.iterateRows(data, dimensionsUsed, isComextDataset(datasetCode)),
     };

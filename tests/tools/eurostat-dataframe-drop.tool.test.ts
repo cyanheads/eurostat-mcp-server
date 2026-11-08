@@ -191,7 +191,7 @@ describe('eurostatDataframeDrop', () => {
     });
     const text = textOf(result);
     expect(text).toContain('**Dropped:** false');
-    expect(text).toMatch(/holds no table named "df_absent01".*eurostat_dataframe_describe/s);
+    expect(text).toMatch(/holds no table named `df_absent01`.*eurostat_dataframe_describe/s);
   });
 
   it('reports an unknown canvas as not found rather than minting an empty one', async () => {
@@ -350,6 +350,40 @@ describe('eurostatDataframeDrop', () => {
       expect(text).toContain('df_abcd1234');
       expect(text).toContain(`**Dropped:** ${dropped}`);
       expect(text).toContain('2026-08-05T00:00:00.000Z');
+    }
+  });
+});
+
+describe('eurostatDataframeDrop — names Markdown reads as emphasis', () => {
+  // Underscores at both ends: in running text, Markdown reads either name as emphasis.
+  const ID = '_abcdefgh_';
+
+  it('renders the canvas ID and the table name as code spans in the nothing-dropped notice', async () => {
+    // A canvas of the real registry, answering under an ID the registry would never mint.
+    const instance = await canvas.acquire(undefined, ctx());
+    await stage(instance, 'df_keep0005');
+    const renamed = new Proxy(instance, {
+      get: (target, key) => {
+        if (key === 'canvasId') return ID;
+        const value: unknown = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    setCanvas({ acquire: async () => renamed } as never);
+    try {
+      const result = await runToolContract(
+        eurostatDataframeDrop,
+        { canvas_id: ID, table_name: '__absent__' },
+        { context: { tenantId: 'default' } },
+      );
+      expect(result.structuredContent).toMatchObject({ dropped: false, canvasId: ID });
+      const { notice } = result.structuredContent as { notice: string };
+      const named =
+        'Canvas `_abcdefgh_` holds no table named `__absent__`, so nothing was dropped.';
+      expect(notice).toMatch(/^Canvas `_abcdefgh_` holds no table named `__absent__`, so nothing/);
+      expect(textOf(result)).toContain(`> ${named}`);
+    } finally {
+      setCanvas(canvas);
     }
   });
 });

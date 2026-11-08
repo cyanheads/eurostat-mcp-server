@@ -16,6 +16,7 @@ import * as serverConfig from '@/config/server-config.js';
 import { eurostatQueryDataset } from '@/mcp-server/tools/definitions/eurostat-query-dataset.tool.js';
 import { hoistDimensions } from '@/mcp-server/tools/hoist-dimensions.js';
 import { setCanvas } from '@/services/canvas-accessor.js';
+import { sdmxDataStructureXml } from '../fixtures/eurostat-sdmx-metadata.js';
 import { withRealCanvas } from '../helpers/real-canvas.js';
 
 // Only the accessor is replaced — the tool also imports the real row builder and column
@@ -101,11 +102,24 @@ describe('eurostatQueryDataset', () => {
 
   it('composes last-N selected-period gaps with clamp, unmatched and preview notices on both surfaces', async () => {
     setCanvas(undefined);
+    // Thirty selected years, cells only in 1996–1999: the 26 empty ones trail the span.
+    const trailing = Array.from({ length: 26 }, (_, i) => String(2000 + i));
     vi.mocked(getEurostatDataService).mockReturnValue({
       queryDataset: vi.fn().mockResolvedValue({
         ...mockQueryResult,
         obsCount: 600,
-        unpopulatedPeriods: Array.from({ length: 26 }, (_, i) => String(2000 + i)),
+        unpopulatedPeriods: trailing,
+        outsideSpans: [
+          {
+            frequency: 'A',
+            kind: 'edges',
+            first: '1996',
+            last: '1999',
+            before: [],
+            after: trailing,
+          },
+        ],
+        latestWithCell: '1999',
         unmatchedValues: { geo: ['XX'] },
       }),
     } as never);
@@ -120,13 +134,20 @@ describe('eurostatQueryDataset', () => {
     expect(notice).toContain('2002, 2003');
     expect(notice).toContain('2025');
     expect(notice).toContain('2 earlier periods omitted');
-    expect(notice).toMatch(/replace last_n_periods with until_period/i);
+    expect(notice).toContain(
+      'Set last_n_periods to 56 for the 30 periods ending at 1999, or set a since_period/until_period range ending at 1999, the latest period with a cell in this match; until_period alone selects every period up to it.',
+    );
+    expect(notice).toContain(
+      '2000 – 2025 carry no cell in any series, after the latest period with one (1999).',
+    );
     expect(notice).toContain('preview_limit requested 1000; applied 500');
     expect(notice).toContain('geo=[XX]');
     expect(notice).toContain('first 3 of 600');
     expect(notice).toContain('staging is unavailable');
     expect(contentText(result)).toContain(notice);
     expect(result.structuredContent).not.toHaveProperty('unpopulatedPeriods');
+    expect(result.structuredContent).not.toHaveProperty('outsideSpans');
+    expect(result.structuredContent).not.toHaveProperty('latestWithCell');
   });
 
   it('reports only the filters the service actually applied', async () => {
@@ -964,7 +985,7 @@ describe('eurostatQueryDataset — dataframe spillover (#8)', () => {
       expect(tableName).toMatch(/^df_[0-9a-f]{8}$/);
       // pastCap() fills 2050 for G0 alone, so the other 99 geos each lack that period (#90).
       expect(notice).toBe(
-        `99 absent cells in 99 of 100 series: periods a series lacks at a frequency it carries (no value, no flag). They are not observations: obsCount, missingObsCount, the rows and any staged table leave them out, so a per-period total across series covers only the series present. preview_limit=3 returns the first 3 of 5,001 matched rows inline; it does not reduce the match. All 5,001 matched rows are staged as table "${tableName}" on canvas "${canvasId}". Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query. Use dimension filters (geo) or a period range when the match itself should be smaller.`,
+        `99 absent cells in 99 of 100 series: periods a series lacks at a frequency it carries (no value, no flag). They are not observations: obsCount, missingObsCount, the rows and any staged table leave them out, so a per-period total across series covers only the series present. preview_limit=3 returns the first 3 of 5,001 matched rows inline; it does not reduce the match. All 5,001 matched rows are staged as table \`${tableName}\` on canvas \`${canvasId}\`. Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query. Use dimension filters (geo) or a period range when the match itself should be smaller.`,
       );
       const text = contentText(result);
       expect(text).toContain(
@@ -1177,6 +1198,16 @@ const jsonReply = (body: object, status = 200) =>
 const unmockedFetch = async (input: unknown): Promise<Response> => {
   throw new Error(`Unmocked fetch: ${String(input)}`);
 };
+
+/**
+ * {@link unmockedFetch}, except that every SDMX structure read answers 404 at once: a
+ * failure whose hint reads the dataset's structure then keeps its generic hint without
+ * waiting out the read's retries.
+ */
+const noStructure = async (input: unknown): Promise<Response> =>
+  new URL(String(input)).pathname.includes('/sdmx/2.1/')
+    ? new Response('<fault/>', { status: 404 })
+    : unmockedFetch(input);
 
 const contentText = (result: { content: Array<{ type: string; text?: string }> }) =>
   result.content.map((block) => block.text ?? '').join('\n');
@@ -1595,7 +1626,9 @@ describe('eurostatQueryDataset — period inputs and filter matching (real servi
       fixtureName: string,
       input: Record<string, unknown>,
     ): Promise<{ data: Record<string, unknown>; message: string; hint: string; text: string }> => {
-      fetchMock.mockImplementationOnce(async () => jsonReply(envelope(fixtureName)));
+      fetchMock
+        .mockImplementation(noStructure)
+        .mockImplementationOnce(async () => jsonReply(envelope(fixtureName)));
       const result = await runToolContract(eurostatQueryDataset, {
         dataset_code: 'une_rt_m',
         ...input,
@@ -1674,7 +1707,9 @@ describe('eurostatQueryDataset — period inputs and filter matching (real servi
       expect(message).toContain('The last period (2026-08) carries no value for this slice');
       expect(message).toMatch(/counts back from the dataset's latest period/);
       expect(hint).toMatch(/last_n_periods/);
-      expect(hint).toMatch(/until_period/);
+      // until_period excludes last_n_periods, so alone it would select the whole history.
+      expect(hint).toContain('a since_period/until_period range ending at a period');
+      expect(hint).toContain('until_period alone selects every period up to it');
       expect(hint).not.toContain('eurostat_get_dimension_values');
     });
 
@@ -2050,20 +2085,25 @@ describe('eurostatQueryDataset — period inputs and filter matching (real servi
       expect(sent[1]?.getAll('time_period')).toEqual(['2024-01']);
     });
 
-    it('keeps the dataset-info hint for an unknown dimension Eurostat rejects', async () => {
-      fetchMock.mockImplementationOnce(async () =>
-        jsonReply(
-          {
-            error: [
+    it('names an unknown dimension Eurostat rejects beside the dimensions its structure lists (#104)', async () => {
+      const structure = sdmxDataStructureXml(
+        ['freq', 's_adj', 'age', 'unit', 'sex', 'geo'].map((id, i) => ({ id, position: i + 1 })),
+      );
+      fetchMock.mockImplementation(async (input: unknown) =>
+        new URL(String(input)).pathname.includes('/sdmx/2.1/datastructure/')
+          ? new Response(structure)
+          : jsonReply(
               {
-                status: 400,
-                id: 150,
-                label: 'INVALID_QUERY_DIMENSION: Dimension "PRECISION" is not defined',
+                error: [
+                  {
+                    status: 400,
+                    id: 150,
+                    label: 'INVALID_QUERY_DIMENSION: Dimension "PRECISION" is not defined',
+                  },
+                ],
               },
-            ],
-          },
-          400,
-        ),
+              400,
+            ),
       );
       const result = await runToolContract(eurostatQueryDataset, {
         dataset_code: 'une_rt_m',
@@ -2071,13 +2111,19 @@ describe('eurostatQueryDataset — period inputs and filter matching (real servi
       });
       expect(result.structuredContent).toMatchObject({
         error: {
+          code: JsonRpcErrorCode.ValidationError,
+          message:
+            'Filter names "precision", which is not a dimension of this dataset. Filterable dimensions, in key order: freq, s_adj, age, unit, sex, geo.',
           data: {
             reason: 'invalid_dimension',
-            recovery: { hint: expect.stringContaining('eurostat_get_dataset_info') },
+            unknownDimensions: ['precision'],
+            recovery: {
+              hint: 'Rename each filter key the error names to one of the dimensions it lists.',
+            },
           },
         },
       });
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -3015,7 +3061,7 @@ describe('eurostatQueryDataset — what Eurostat keeps of a period range (#84, #
         dimension: { geo: { category: { index: Record<string, number> } } };
       };
       body.dimension.geo.category.index = {};
-      fetchMock.mockImplementationOnce(async () => jsonReply(body));
+      fetchMock.mockImplementation(noStructure).mockImplementationOnce(async () => jsonReply(body));
       const failure = failureOf(
         await runToolContract(eurostatQueryDataset, {
           dataset_code: 'nama_10_gdp',
@@ -3431,6 +3477,253 @@ describe('eurostatQueryDataset — geo_level behind a bare NO_RESULTS (#85)', ()
 });
 
 // ---------------------------------------------------------------------------
+// A query that outlasts the Statistics API deadline (#98) — the real service with
+// fetch stubbed per route and the clock faked, so the 30 s deadline and the 5 s
+// structure read run as in production.
+// ---------------------------------------------------------------------------
+
+describe('eurostatQueryDataset — a query that outlasts the Statistics API deadline (#98)', () => {
+  const STEP_2 = {
+    dataset_code: 'DS-045409',
+    filters: { freq: ['M'], flow: ['2'], product: ['2204'], indicators: ['VALUE_IN_EUROS'] },
+    since_period: '2025-01',
+  };
+  const REPEAT =
+    'Eurostat goes on preparing the extraction after the request is dropped and caches it, so repeat this call in a minute or two.';
+  const STEP_2_ROUTE =
+    'The bulk endpoint serves the same slice: call eurostat_download_dataset with dataset_code "DS-045409", the same filters and since_period "2025-01".';
+  const STEP_2_NARROW =
+    'Filter on reporter, partner — the dimensions of "DS-045409" this request left unfiltered — or narrow since_period/until_period.';
+  const GENERIC_NARROW = (code: string) =>
+    `Add dimension filters — eurostat_get_dataset_info lists the dimensions of "${code}" — or a narrower since_period/until_period range.`;
+
+  let fetchMock: ReturnType<typeof vi.fn>;
+  const isStructure = (input: unknown) =>
+    new URL(String(input)).pathname.includes('/sdmx/2.1/datastructure/');
+  const structureReads = () => fetchMock.mock.calls.filter(([input]) => isStructure(input)).length;
+  const fixtureXml = (name: string) => async () =>
+    new Response(readFileSync(new URL(`../fixtures/${name}.xml`, import.meta.url), 'utf8'));
+
+  /** A request that never answers: it settles only when its signal aborts. */
+  const silent = (_input: unknown, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+    });
+  /** A 200 whose headers arrive at once and whose body never ends until the signal aborts. */
+  const stalledBody = async (_input: unknown, init?: RequestInit) =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"version":"2.0"'));
+          init?.signal?.addEventListener('abort', () => controller.error(init.signal?.reason), {
+            once: true,
+          });
+        },
+      }),
+      { headers: { 'content-type': 'application/json' } },
+    );
+
+  /** The Statistics API answers with `onQuery`; the structure endpoint with `onStructure`. */
+  const serve = (
+    onQuery: (input: unknown, init?: RequestInit) => Promise<Response>,
+    onStructure: (input: unknown, init?: RequestInit) => Promise<Response>,
+  ) =>
+    fetchMock.mockImplementation(async (input: unknown, init?: RequestInit) =>
+      isStructure(input) ? onStructure(input, init) : onQuery(input, init),
+    );
+
+  const errorOf = (result: { structuredContent?: unknown }) =>
+    (
+      result.structuredContent as {
+        error: { code: number; message: string; data: Record<string, unknown> };
+      }
+    ).error;
+  const hintOf = (result: { structuredContent?: unknown }) =>
+    (errorOf(result).data.recovery as { hint: string }).hint;
+
+  /** Run the call past the 30 s deadline and the 5 s hint read. */
+  const settled = async (input: Record<string, unknown>) => {
+    const pending = runToolContract(eurostatQueryDataset, input as never);
+    await vi.advanceTimersByTimeAsync(40_000);
+    return pending;
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(getEurostatDataService).mockReturnValue(
+      new EurostatDataService({} as never, {} as never),
+    );
+    // Presence alone decides the route; nothing is staged on an error.
+    setCanvas({} as DataCanvas);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    setCanvas(undefined);
+  });
+
+  it('declares retry_deadline_exceeded as a Timeout', () => {
+    expect(
+      eurostatQueryDataset.errors?.find(({ reason }) => reason === 'retry_deadline_exceeded'),
+    ).toMatchObject({ code: JsonRpcErrorCode.Timeout });
+  });
+
+  it('fails the step-2 query with the repeat, the download route and its open dimensions, on both surfaces', async () => {
+    serve(silent, fixtureXml('comext/ds-045409-datastructure'));
+    const result = await settled(STEP_2);
+
+    const error = errorOf(result);
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      message:
+        'Eurostat\'s Statistics API did not complete a query of dataset "DS-045409" within its 30,000 ms deadline (1 attempt).',
+      data: { reason: 'retry_deadline_exceeded', deadlineMs: 30_000, retryAttempts: 1 },
+    });
+    // The fake clock stops the silent request at the deadline, so the elapsed time is the deadline.
+    expect(error.data.elapsedMs).toBe(30_000);
+    expect(error.message).not.toContain('fetchJsonStat');
+    expect(hintOf(result)).toBe(`${REPEAT} ${STEP_2_ROUTE} ${STEP_2_NARROW}`);
+    const text = contentText(result as never);
+    expect(text).toContain('within its 30,000 ms deadline');
+    expect(text).not.toContain('fetchJsonStat');
+    expect(text).toContain(`Recovery: ${REPEAT}`);
+    expect(text).toContain('call eurostat_download_dataset with dataset_code "`DS-045409`"');
+    expect(text).toContain('since_period "`2025-01`"');
+    expect(text).toContain('Filter on reporter, partner');
+    expect(text).toContain('reason retry_deadline_exceeded');
+    expect(structureReads()).toBe(1);
+  });
+
+  it('drops the repeat when the headers arrived and the body was still streaming', async () => {
+    serve(stalledBody, fixtureXml('comext/ds-045409-datastructure'));
+    const result = await settled(STEP_2);
+    expect(errorOf(result).data.reason).toBe('retry_deadline_exceeded');
+    expect(hintOf(result)).toBe(`${STEP_2_ROUTE} ${STEP_2_NARROW}`);
+    expect(contentText(result as never)).not.toContain('minute');
+  });
+
+  it('offers no download route without a dataframe canvas', async () => {
+    setCanvas(undefined);
+    serve(silent, fixtureXml('comext/ds-045409-datastructure'));
+    const result = await settled(STEP_2);
+    expect(hintOf(result)).toBe(`${REPEAT} ${STEP_2_NARROW}`);
+    expect(contentText(result as never)).not.toContain('eurostat_download_dataset');
+  });
+
+  it.each([
+    [
+      1,
+      'since_period set to the latest period eurostat_get_dimension_values lists for dimension "time"',
+    ],
+    [
+      6,
+      'since_period set to the earliest of the last 6 periods eurostat_get_dimension_values lists for dimension "time"',
+    ],
+  ])('turns last_n_periods %i into a since_period to look up', async (lastN, period) => {
+    serve(silent, fixtureXml('comext/ds-045409-datastructure'));
+    const { since_period: _since, ...rest } = STEP_2;
+    const result = await settled({ ...rest, last_n_periods: lastN });
+    expect(hintOf(result)).toBe(
+      `${REPEAT} The bulk endpoint serves the same slice: call eurostat_download_dataset with dataset_code "DS-045409", the same filters and ${period}. ${STEP_2_NARROW}`,
+    );
+  });
+
+  it('turns geo_level into the filters.geo codes of that level on a dataset with geo', async () => {
+    serve(silent, fixtureXml('nama-10-gdp-datastructure'));
+    const result = await settled({
+      dataset_code: 'nama_10_gdp',
+      filters: { unit: ['CP_MEUR'], na_item: ['B1GQ'] },
+      geo_level: 'nuts2',
+      since_period: '2020',
+    });
+    expect(hintOf(result)).toBe(
+      `${REPEAT} The bulk endpoint serves the same slice: call eurostat_download_dataset with dataset_code "nama_10_gdp", the same filters, filters.geo set to the codes eurostat_get_dimension_values lists for dimension "geo" at geo_level "nuts2" and since_period "2020". Filter on freq — the dimensions of "nama_10_gdp" this request left unfiltered — or narrow since_period/until_period.`,
+    );
+  });
+
+  it('offers no route for geo_level on a dataset without a geo dimension', async () => {
+    serve(silent, fixtureXml('comext/ds-045409-datastructure'));
+    const result = await settled({ ...STEP_2, geo_level: 'country' });
+    expect(hintOf(result)).toBe(
+      `${REPEAT} Filter on reporter, partner — the dimensions of "DS-045409" this request left unfiltered — or narrow since_period/until_period.`,
+    );
+  });
+
+  it('moves filters.time to since_period and until_period', async () => {
+    serve(silent, fixtureXml('nama-10-gdp-datastructure'));
+    const result = await settled({
+      dataset_code: 'nama_10_gdp',
+      filters: { unit: ['CP_MEUR'], geo: ['DE'], time: ['2023', '2021', '2022'] },
+    });
+    expect(hintOf(result)).toBe(
+      `${REPEAT} The bulk endpoint serves the same slice: call eurostat_download_dataset with dataset_code "nama_10_gdp", the same filters and since_period "2021" and until_period "2023" in place of filters.time. Filter on freq, na_item — the dimensions of "nama_10_gdp" this request left unfiltered — or narrow since_period/until_period.`,
+    );
+    const text = contentText(result as never);
+    expect(text).toContain('since_period "`2021`" and until_period "`2023`"');
+  });
+
+  it('keeps the generic narrowing sentence when the structure read fails, and settles inside 35 s', async () => {
+    serve(silent, async () => new Response('Service Unavailable', { status: 503 }));
+    let settledAt: number | undefined;
+    const pending = runToolContract(eurostatQueryDataset, STEP_2).finally(() => {
+      settledAt = Date.now();
+    });
+    const startedAt = Date.now();
+    await vi.advanceTimersByTimeAsync(40_000);
+    const result = await pending;
+    expect(hintOf(result)).toBe(`${REPEAT} ${STEP_2_ROUTE} ${GENERIC_NARROW('DS-045409')}`);
+    expect((settledAt ?? Number.POSITIVE_INFINITY) - startedAt).toBeLessThanOrEqual(35_000);
+  });
+
+  it('settles at the request deadline plus the 5 s hint read when both hang, under the 60 s client default', async () => {
+    serve(silent, silent);
+    let settled = false;
+    const pending = runToolContract(eurostatQueryDataset, STEP_2).finally(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(34_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(settled).toBe(true);
+    const result = await pending;
+    expect(errorOf(result).data.reason).toBe('retry_deadline_exceeded');
+    expect(hintOf(result)).toBe(`${REPEAT} ${STEP_2_ROUTE} ${GENERIC_NARROW('DS-045409')}`);
+    expect(structureReads()).toBe(1);
+  });
+
+  it.each([
+    ['during the query', 10_000],
+    ['during the hint read', 32_000],
+  ])('reaches the caller as a cancellation when cancelled %s', async (_when, at) => {
+    serve(silent, silent);
+    const controller = new AbortController();
+    /**
+     * The handler, not runToolContract: the contract runner reports anything thrown after
+     * the abort as RequestCancelled, so only the handler's own throw shows what the
+     * catch did with it.
+     */
+    const outcome = Promise.resolve(
+      eurostatQueryDataset.handler(
+        eurostatQueryDataset.input.parse(STEP_2),
+        createMockContext({ signal: controller.signal, errors: eurostatQueryDataset.errors }),
+      ),
+    ).then(
+      () => undefined,
+      (error: unknown) => error as { code?: number; data?: { reason?: string } },
+    );
+    await vi.advanceTimersByTimeAsync(at);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(60_000);
+    const error = await outcome;
+    expect(error?.code).toBe(JsonRpcErrorCode.RequestCancelled);
+    expect(error?.data?.reason).not.toBe('retry_deadline_exceeded');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Periods a series lacks (#90) — the real service on recorded replies, staged on a
 // real canvas.
 // ---------------------------------------------------------------------------
@@ -3493,7 +3786,7 @@ describe('eurostatQueryDataset — periods a series lacks (#90)', () => {
     });
     expect(out.observations).toHaveLength(2);
     expect(out.notice).toContain(
-      `preview_limit=2 returns the first 2 of 26 matched rows inline; it does not reduce the match. All 26 matched rows are staged as table "${out.tableName}" on canvas "${out.canvasId}". Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query. Use dimension filters (freq, unit, na_item, geo) or a period range when the match itself should be smaller.`,
+      `preview_limit=2 returns the first 2 of 26 matched rows inline; it does not reduce the match. All 26 matched rows are staged as table \`${out.tableName}\` on canvas \`${out.canvasId}\`. Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query. Use dimension filters (freq, unit, na_item, geo) or a period range when the match itself should be smaller.`,
     );
     expect(contentText(result)).toContain(out.notice as string);
     expect(contentText(result)).toContain(
@@ -3586,7 +3879,37 @@ describe('eurostatQueryDataset — periods a series lacks (#90)', () => {
     expect(contentText(result)).toContain('| **Absent cells:** 0');
   });
 
-  it('writes one absent cell in the singular, beside the last-N sentence for the same period', async () => {
+  it('writes one absent cell in the singular, beside the last-N and trailing-period sentences', async () => {
+    // DE has 2024–2026; FR has 2024 and 2026 and lacks 2025, inside the span. No series has 2027.
+    fetchMock.mockImplementation(async () =>
+      jsonReply({
+        label: 'Test dataset',
+        id: ['geo', 'time'],
+        size: [2, 4],
+        dimension: {
+          geo: { label: 'geo', category: { index: { DE: 0, FR: 1 } } },
+          time: { label: 'time', category: { index: { 2024: 0, 2025: 1, 2026: 2, 2027: 3 } } },
+        },
+        value: { '0': 1, '1': 2, '2': 3, '4': 4, '6': 5 },
+      }),
+    );
+    const result = await runToolContract(eurostatQueryDataset, {
+      dataset_code: 'nama_10_gdp',
+      last_n_periods: 4,
+    });
+    const out = structured(result);
+    expect(out).toMatchObject({ absentCellCount: 1, obsCount: 5 });
+    expect(out.notice).toContain(
+      '1 selected period (2027) carries no populated cells anywhere in this match. last_n_periods counts dataset time positions, not periods with populated cells for this slice; preview_limit does not select periods. Set last_n_periods to 5 for the 4 periods ending at 2026, or set a since_period/until_period range ending at 2026, the latest period with a cell in this match; until_period alone selects every period up to it.',
+    );
+    expect(out.notice).toContain(
+      "2027 carries no cell in any series, after the latest period with one (2026). absentCellCount leaves such periods out: it counts only periods from a frequency's first to its latest period with a cell.",
+    );
+    expect(out.notice).toContain(absentSentence('1 absent cell', 1, 2));
+    expect(contentText(result)).toContain(out.notice as string);
+  });
+
+  it('leaves a trailing selected period out of absentCellCount and names it instead', async () => {
     serve('une-rt-m-geo-de-lower-last3');
     const result = await runToolContract(eurostatQueryDataset, {
       dataset_code: 'une_rt_m',
@@ -3594,10 +3917,17 @@ describe('eurostatQueryDataset — periods a series lacks (#90)', () => {
       last_n_periods: 3,
     });
     const out = structured(result);
-    expect(out).toMatchObject({ absentCellCount: 1, obsCount: 2 });
+    expect(out).toMatchObject({ absentCellCount: 0, obsCount: 2 });
     expect(out.notice).toContain('1 selected period (2026-08) carries no populated cells');
-    expect(out.notice).toContain(absentSentence('1 absent cell', 1, 1));
-    expect(contentText(result)).toContain(absentSentence('1 absent cell', 1, 1));
+    expect(out.notice).toContain(
+      'Set last_n_periods to 4 for the 3 periods ending at 2026-07, or set a since_period/until_period range ending at 2026-07, the latest period with a cell',
+    );
+    expect(out.notice).toContain(
+      '2026-08 carries no cell in any series, after the latest period with one (2026-07).',
+    );
+    expect(out.notice).not.toMatch(/absent cell/);
+    expect(contentText(result)).toContain('**Absent cells:** 0');
+    expect(contentText(result)).toContain(out.notice as string);
   });
 
   it('renders absentCellCount in format() whatever its value', () => {
@@ -3613,5 +3943,781 @@ describe('eurostatQueryDataset — periods a series lacks (#90)', () => {
         `**Observations:** 3 (1 missing) | **Period:** 2023 – 2023 | **Absent cells:** ${absentCellCount}`,
       );
     }
+  });
+});
+
+/** Every recorded reply here is a live capture of the filters and periods its test sends. */
+describe('eurostatQueryDataset — values and periods with no cell (#96, #97)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(getEurostatDataService).mockReturnValue(
+      new EurostatDataService({} as never, {} as never),
+    );
+    setCanvas(undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const serve = (name: string) =>
+    fetchMock.mockImplementation(async () => jsonReply(envelope(name)));
+  const run = async (name: string, input: Record<string, unknown>) => {
+    serve(name);
+    const result = await runToolContract(eurostatQueryDataset, input as never);
+    expect(result.isError).not.toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const out = result.structuredContent as Record<string, unknown> & { notice?: string };
+    return { out, notice: out.notice ?? '', text: contentText(result) };
+  };
+  const UNIT = { unit: ['PPS_HAB_EU27_2020'] };
+  const WINE_TO_US = {
+    partner: ['US'],
+    product: ['2204'],
+    flow: ['2'],
+    indicators: ['VALUE_IN_EUROS'],
+  };
+
+  describe('values with no cell (#96)', () => {
+    it('names them on both surfaces (step 1)', async () => {
+      const { out, notice, text } = await run('nama-10r-2gdp-de11-no02-ch01-last1', {
+        dataset_code: 'nama_10r_2gdp',
+        filters: { ...UNIT, geo: ['DE11', 'NO02', 'CH01'] },
+        last_n_periods: 1,
+      });
+      expect(out).toMatchObject({
+        emptyValues: { geo: ['NO02', 'CH01'] },
+        obsCount: 1,
+        absentCellCount: 0,
+      });
+      expect(out).not.toHaveProperty('unmatchedValues');
+      expect(notice).toBe(
+        '2 values the query selects exist in the dataset but have no cell in this match, so they contribute no rows: geo=[NO02, CH01]. A value can still carry data in other periods or beside other filter values.',
+      );
+      expect(text).toContain(
+        '**Values with no cell:** geo=[NO02, CH01] — in the dataset but with no value or flag in this match, so the rows cover only the other values',
+      );
+      expect(text).toContain(notice);
+    });
+
+    it('lists 24 in the notice and every one in the field and in content[] (step 3)', async () => {
+      const { out, notice, text } = await run('nama-10r-2gdp-nuts2-last1', {
+        dataset_code: 'nama_10r_2gdp',
+        filters: UNIT,
+        geo_level: 'nuts2',
+        last_n_periods: 1,
+      });
+      const geo = (out.emptyValues as { geo: string[] }).geo;
+      expect(out.obsCount).toBe(276);
+      expect(geo).toHaveLength(33);
+      expect(notice).toContain(
+        `33 values the query selects exist in the dataset but have no cell in this match, so they contribute no rows: geo=[${geo.slice(0, 24).join(', ')}] (9 more omitted; emptyValues lists all 33).`,
+      );
+      expect(notice).not.toContain(geo[24] as string);
+      expect(text).toContain(`**Values with no cell:** geo=[${geo.join(', ')}]`);
+    });
+
+    it('names an unmatched and an empty value apart, each in its own sentence and line', async () => {
+      const { out, notice, text } = await run('nama-10r-2gdp-de11-xx99-ch01-last1', {
+        dataset_code: 'nama_10r_2gdp',
+        filters: { ...UNIT, geo: ['DE11', 'XX99', 'CH01'] },
+        last_n_periods: 1,
+      });
+      expect(out).toMatchObject({
+        unmatchedValues: { geo: ['XX99'] },
+        emptyValues: { geo: ['CH01'] },
+      });
+      expect(notice).toContain(
+        'These filter values matched nothing and contribute no rows: geo=[XX99].',
+      );
+      expect(notice).toContain(
+        '1 value the query selects exists in the dataset but has no cell in this match, so it contributes no rows: geo=[CH01].',
+      );
+      expect(text).toContain('**Unmatched filter values:** geo=[XX99]');
+      expect(text).toContain('**Values with no cell:** geo=[CH01]');
+      expect(text).toContain(notice);
+    });
+
+    it('discloses an empty value and trailing periods together', async () => {
+      // NO02 publishes 2020–2021 and CH01 nothing; no series has 2022–2024.
+      const { out, notice, text } = await run('nama-10r-2gdp-no02-ch01-since-2020', {
+        dataset_code: 'nama_10r_2gdp',
+        filters: { ...UNIT, geo: ['NO02', 'CH01'] },
+        since_period: '2020',
+      });
+      expect(out).toMatchObject({
+        emptyValues: { geo: ['CH01'] },
+        absentCellCount: 0,
+        obsCount: 2,
+      });
+      expect(notice).toContain(
+        '2022 – 2024 carry no cell in any series, after the latest period with one (2021).',
+      );
+      expect(notice).toContain('geo=[CH01]');
+      expect(notice).not.toMatch(/absent cell|last_n_periods/);
+      expect(text).toContain(notice);
+    });
+
+    it('omits the field and its line when every selected value has a cell', async () => {
+      const { out, text } = await run('nama-10-gdp-de-fr-1975-to-1995', {
+        dataset_code: 'nama_10_gdp',
+        filters: { geo: ['DE', 'FR'], unit: ['CP_MEUR'], na_item: ['B1GQ'] },
+        since_period: '1975',
+        until_period: '1995',
+      });
+      expect(out).not.toHaveProperty('emptyValues');
+      expect(text).not.toContain('Values with no cell');
+    });
+
+    it('lists the first 24 values across dimensions, and says nothing is omitted at exactly 24', async () => {
+      const codes = (prefix: string, n: number) =>
+        Array.from({ length: n }, (_, i) => `${prefix}${String(i).padStart(2, '0')}`);
+      const noticeFor = async (emptyValues: Record<string, string[]>) => {
+        vi.mocked(getEurostatDataService).mockReturnValue({
+          queryDataset: vi.fn().mockResolvedValue({ ...mockQueryResult, emptyValues }),
+        } as never);
+        const result = await runToolContract(eurostatQueryDataset, { dataset_code: 'nama_10_gdp' });
+        return {
+          notice: (result.structuredContent as { notice: string }).notice,
+          text: contentText(result),
+        };
+      };
+
+      // 20 + 5 values: the notice runs out of room four values into the second dimension.
+      const over = await noticeFor({ unit: codes('U', 20), geo: codes('G', 5) });
+      expect(over.notice).toContain(
+        `25 values the query selects exist in the dataset but have no cell in this match, so they contribute no rows: unit=[${codes('U', 20).join(', ')}]; geo=[G00, G01, G02, G03] (1 more omitted; emptyValues lists all 25).`,
+      );
+      expect(over.text).toContain(
+        `**Values with no cell:** unit=[${codes('U', 20).join(', ')}]; geo=[${codes('G', 5).join(', ')}]`,
+      );
+
+      const exactly = await noticeFor({ geo: codes('G', 24) });
+      expect(exactly.notice).toContain(`geo=[${codes('G', 24).join(', ')}].`);
+      expect(exactly.notice).not.toContain('omitted');
+    });
+
+    it('advertises emptyValues as an optional output field', () => {
+      const parsed = eurostatQueryDataset.output.parse({
+        ...mockQueryResult,
+        emptyValues: { geo: ['CH01'] },
+      });
+      expect(parsed.emptyValues).toEqual({ geo: ['CH01'] });
+      expect(eurostatQueryDataset.output.parse(mockQueryResult)).not.toHaveProperty('emptyValues');
+    });
+  });
+
+  describe("periods outside a frequency's span (#97)", () => {
+    it('leaves the padded months out of absentCellCount and names them (step 1)', async () => {
+      const { out, notice, text } = await run(
+        'comext/ds-045409-m-de-fr-it-es-us-2204-since-2026-01',
+        {
+          dataset_code: 'DS-045409',
+          filters: { freq: ['M'], reporter: ['DE', 'FR', 'IT', 'ES'], ...WINE_TO_US },
+          since_period: '2026-01',
+        },
+      );
+      expect(out).toMatchObject({ absentCellCount: 0, obsCount: 32 });
+      expect(notice).toContain(
+        "2026-09 – 2026-12 carry no cell in any series, after the latest period with one (2026-08). absentCellCount leaves such periods out: it counts only periods from a frequency's first to its latest period with a cell.",
+      );
+      expect(notice).not.toMatch(/absent cells? in/);
+      expect(text).toContain('**Absent cells:** 0');
+      expect(text).toContain(notice);
+    });
+
+    it('names leading years and says the slice starts later, with no advice to raise N (step 3)', async () => {
+      const { out, notice } = await run('nama-10-pc-me-rs-last30', {
+        dataset_code: 'nama_10_pc',
+        filters: { geo: ['ME', 'RS'], unit: ['CP_PPS_EU27_2020_HAB'], na_item: ['B1GQ'] },
+        last_n_periods: 30,
+      });
+      expect(out).toMatchObject({ absentCellCount: 6, obsCount: 46 });
+      expect(notice).toContain(
+        '4 selected periods (1996, 1997, 1998, 1999) carry no populated cells anywhere in this match. last_n_periods counts dataset time positions, not periods with populated cells for this slice; preview_limit does not select periods. This slice starts later than the selection, so a larger last_n_periods only reaches earlier periods.',
+      );
+      expect(notice).toContain(
+        '1996 – 1999 carry no cell in any series, before the first period with one (2000).',
+      );
+      expect(notice).toContain('6 absent cells in 1 of 2 series');
+      expect(notice).not.toMatch(/Increase last_n_periods|Set last_n_periods to/);
+    });
+
+    it('advises the N that ends at the latest month with a cell, or a range ending there, for trailing months', async () => {
+      const { out, notice } = await run('comext/ds-045409-m-de-us-2204-last6', {
+        dataset_code: 'DS-045409',
+        filters: { freq: ['M'], reporter: ['DE'], ...WINE_TO_US },
+        last_n_periods: 6,
+      });
+      expect(out).toMatchObject({ absentCellCount: 0, obsCount: 2 });
+      expect(notice).toContain(
+        '4 selected periods (2026-09, 2026-10, 2026-11, 2026-12) carry no populated cells',
+      );
+      // 6 + the 4 empty trailing months: the ten latest positions end with 2026-03 – 2026-08.
+      expect(notice).toContain(
+        'Set last_n_periods to 10 for the 6 periods ending at 2026-08, or set a since_period/until_period range ending at 2026-08, the latest period with a cell in this match; until_period alone selects every period up to it.',
+      );
+      expect(notice).toContain('2026-09 – 2026-12 carry no cell in any series');
+    });
+
+    it('names both ends of a last-N window, with no advice to raise N', async () => {
+      const { out, notice } = await run('nama-10r-2gdp-no02-last30', {
+        dataset_code: 'nama_10r_2gdp',
+        filters: { ...UNIT, geo: ['NO02'] },
+        last_n_periods: 30,
+      });
+      expect(out.absentCellCount).toBe(0);
+      expect(notice).toContain(
+        '2000 – 2007 carry no cell in any series, before the first period with one (2008); 2022 – 2024 carry no cell in any series, after the latest period with one (2021).',
+      );
+      expect(notice).toContain('This slice starts later than the selection');
+      expect(notice).not.toMatch(/Increase last_n_periods|Set last_n_periods to/);
+    });
+
+    it('names each frequency of a mixed slice apart', async () => {
+      const { out, notice } = await run('comext/ds-045409-de-fr-us-2204-since-2025-01', {
+        dataset_code: 'DS-045409',
+        filters: { reporter: ['DE', 'FR'], ...WINE_TO_US },
+        since_period: '2025-01',
+      });
+      expect(out.absentCellCount).toBe(0);
+      expect(notice).toContain(
+        '2026-09 – 2026-12 carry no cell in any series, after the latest period with one (2026-08); 2026 carries no cell in any series, after the latest period with one (2025).',
+      );
+    });
+
+    it('names a frequency with no cell in the window, and still advises a larger N', async () => {
+      // A last-N window over a mixed slice: monthly cells through 2026-08, no annual cell.
+      vi.mocked(getEurostatDataService).mockReturnValue({
+        queryDataset: vi.fn().mockResolvedValue({
+          ...mockQueryResult,
+          unpopulatedPeriods: ['2026-09', '2026-10', '2026-11', '2026-12', '2026'],
+          outsideSpans: [
+            {
+              frequency: 'M',
+              kind: 'edges',
+              first: '2026-07',
+              last: '2026-08',
+              before: [],
+              after: ['2026-09', '2026-10', '2026-11', '2026-12'],
+            },
+            { frequency: 'A', kind: 'empty', periods: ['2026'] },
+          ],
+          latestWithCell: '2026-08',
+        }),
+      } as never);
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'DS-045409',
+        last_n_periods: 7,
+      });
+      const { notice } = result.structuredContent as { notice: string };
+      expect(notice).toContain(
+        '2026-09 – 2026-12 carry no cell in any series, after the latest period with one (2026-08); 2026 carries no cell in any series, the only period of its frequency in this match.',
+      );
+      // Two frequencies share the window's positions, so no exact N is given.
+      expect(notice).toContain(
+        'Increase last_n_periods, or set a since_period/until_period range ending at 2026-08, the latest period with a cell in this match; until_period alone selects every period up to it.',
+      );
+      expect(contentText(result)).toContain(notice);
+    });
+
+    it('gives no advice for an empty period inside the span, and counts it as absent', async () => {
+      // DE and FR both have 2024 and 2026 and lack 2025.
+      fetchMock.mockImplementation(async () =>
+        jsonReply({
+          label: 'Test dataset',
+          id: ['geo', 'time'],
+          size: [2, 3],
+          dimension: {
+            geo: { label: 'geo', category: { index: { DE: 0, FR: 1 } } },
+            time: { label: 'time', category: { index: { 2024: 0, 2025: 1, 2026: 2 } } },
+          },
+          value: { '0': 1, '2': 2, '3': 3, '5': 4 },
+        }),
+      );
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'nama_10_gdp',
+        last_n_periods: 3,
+      });
+      const { notice } = result.structuredContent as { notice: string };
+      expect(result.structuredContent).toMatchObject({ absentCellCount: 2 });
+      expect(notice).toContain(
+        '1 selected period (2025) carries no populated cells anywhere in this match. last_n_periods counts dataset time positions, not periods with populated cells for this slice; preview_limit does not select periods. 2 absent cells in 2 of 2 series',
+      );
+      expect(notice).not.toMatch(/Increase last_n_periods|starts later|no cell in any series/);
+    });
+
+    it('gives no advice when one empty period follows the span and another lies inside it', async () => {
+      // DE and FR both have 2024 and 2026, lack 2025, and have no 2027 cell.
+      fetchMock.mockImplementation(async () =>
+        jsonReply({
+          label: 'Test dataset',
+          id: ['geo', 'time'],
+          size: [2, 4],
+          dimension: {
+            geo: { label: 'geo', category: { index: { DE: 0, FR: 1 } } },
+            time: {
+              label: 'time',
+              category: { index: { 2024: 0, 2025: 1, 2026: 2, 2027: 3 } },
+            },
+          },
+          value: { '0': 1, '2': 2, '4': 3, '6': 4 },
+        }),
+      );
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'nama_10_gdp',
+        last_n_periods: 4,
+      });
+      const { notice } = result.structuredContent as { notice: string };
+      expect(result.structuredContent).toMatchObject({ absentCellCount: 2 });
+      expect(notice).toContain(
+        '2 selected periods (2025, 2027) carry no populated cells anywhere in this match.',
+      );
+      expect(notice).toContain(
+        '2027 carries no cell in any series, after the latest period with one (2026).',
+      );
+      expect(notice).not.toMatch(/Increase last_n_periods|starts later/);
+      expect(contentText(result)).toContain(notice);
+    });
+  });
+});
+
+describe('eurostatQueryDataset — filter text in authored Markdown', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(getEurostatDataService).mockReturnValue(
+      new EurostatDataService({} as never, {} as never),
+    );
+    setCanvas(undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  // A link, strong emphasis, and a second line that opens a list item, as a caller sends them.
+  const LIVE = ['a](http://x)', '**b**', 'c\n- d'];
+  // The same three values escaped, so a CommonMark parse reads each back as sent.
+  const ESCAPED = 'a\\](http://x), \\*\\*b\\*\\*, c\\\n\\- d';
+
+  it('escapes unmatched values in the notice, the format() line and the filters trailer', async () => {
+    fetchMock.mockImplementationOnce(async () =>
+      jsonReply(envelope('une-rt-m-geo-de-xx-since-2024-01')),
+    );
+    const result = await runToolContract(eurostatQueryDataset, {
+      dataset_code: 'une_rt_m',
+      filters: { ...DE_UNEMPLOYMENT, geo: ['DE', ...LIVE] },
+      since_period: '2024-01',
+    });
+    expect(result.isError).not.toBe(true);
+    const out = result.structuredContent as {
+      notice: string;
+      unmatchedValues: Record<string, string[]>;
+      appliedFilters: { filters: Record<string, string[]> };
+    };
+    expect(out.unmatchedValues).toEqual({ geo: LIVE });
+    expect(out.appliedFilters.filters.geo).toEqual(['DE', ...LIVE]);
+    expect(out.notice).toContain(
+      `These filter values matched nothing and contribute no rows: geo=[${ESCAPED}]. Check the valid codes for geo with eurostat_get_dimension_values.`,
+    );
+    const text = contentText(result);
+    expect(text).toContain(
+      `**Unmatched filter values:** geo=[${ESCAPED}] — these matched nothing, so the rows cover only the other values`,
+    );
+    // The notice's second line is quoted on its own; its dash stays text, not a list item.
+    expect(text).toContain('> \\- d]. Check the valid codes for geo');
+    expect(text).toContain(
+      `- **Filters:** geo=[DE, ${ESCAPED}]; unit=[PC_ACT]; s_adj=[SA]; age=[TOTAL]; sex=[T]`,
+    );
+  });
+
+  it('escapes values with no cell, and a filter key, in both notice sentences and both format() lines', async () => {
+    vi.mocked(getEurostatDataService).mockReturnValue({
+      queryDataset: vi.fn().mockResolvedValue({
+        ...mockQueryResult,
+        appliedFilters: { geo: ['DE', ...LIVE], _k_: ['v'] },
+        unmatchedValues: { _k_: ['v'] },
+        emptyValues: { geo: LIVE },
+      }),
+    } as never);
+    const result = await runToolContract(eurostatQueryDataset, {
+      dataset_code: 'nama_10_gdp',
+      filters: { geo: ['DE', ...LIVE], _k_: ['v'] },
+    });
+    expect(result.isError).not.toBe(true);
+    const out = result.structuredContent as {
+      notice: string;
+      emptyValues: Record<string, string[]>;
+      unmatchedValues: Record<string, string[]>;
+    };
+    expect(out.emptyValues).toEqual({ geo: LIVE });
+    expect(out.unmatchedValues).toEqual({ _k_: ['v'] });
+    expect(out.notice).toContain(
+      'These filter values matched nothing and contribute no rows: \\_k\\_=[v]. Check the valid codes for \\_k\\_ with eurostat_get_dimension_values.',
+    );
+    expect(out.notice).toContain(
+      `3 values the query selects exist in the dataset but have no cell in this match, so they contribute no rows: geo=[${ESCAPED}]. A value can still carry data in other periods or beside other filter values.`,
+    );
+    const text = contentText(result);
+    expect(text).toContain('**Unmatched filter values:** \\_k\\_=[v] — these matched nothing');
+    expect(text).toContain(
+      `**Values with no cell:** geo=[${ESCAPED}] — in the dataset but with no value or flag in this match`,
+    );
+    expect(text).toContain(`- **Filters:** geo=[DE, ${ESCAPED}]; \\_k\\_=[v]`);
+  });
+});
+
+describe('eurostatQueryDataset — a staged canvas ID in the notice', () => {
+  // Underscores at both ends: in running text, Markdown reads the ID as emphasis.
+  const ID = '_abcdefgh_';
+  let canvas: DataCanvas;
+  let teardown: () => Promise<void>;
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    ({ canvas, teardown } = withRealCanvas());
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(getEurostatDataService).mockReturnValue(
+      new EurostatDataService({} as never, {} as never),
+    );
+  });
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    await teardown();
+  });
+
+  /** A real canvas answering every acquire under `id`, which the registry would never mint. */
+  const underId = async (id: string): Promise<DataCanvas> => {
+    const instance = await canvas.acquire(undefined, createMockContext({ tenantId: 'default' }));
+    const renamed = new Proxy(instance, {
+      get: (target, key) => {
+        if (key === 'canvasId') return id;
+        const value: unknown = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    return { acquire: async () => renamed } as never;
+  };
+
+  for (const [label, previewLimit] of [
+    ['beside an inline prefix', 2],
+    ['with every row inline', 100],
+  ] as const) {
+    it(`renders the canvas ID and table name as code spans ${label}`, async () => {
+      setCanvas(await underId(ID));
+      fetchMock.mockImplementationOnce(async () =>
+        jsonReply(envelope('une-rt-m-geo-de-xx-since-2024-01')),
+      );
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'une_rt_m',
+        filters: DE_UNEMPLOYMENT,
+        since_period: '2024-01',
+        preview_limit: previewLimit,
+        stage: true,
+        canvas_id: ID,
+      });
+      expect(result.isError).not.toBe(true);
+      const out = result.structuredContent as {
+        canvasId: string;
+        notice: string;
+        tableName: string;
+      };
+      expect(out.canvasId).toBe(ID);
+      const staged = `All 31 matched rows are staged as table \`${out.tableName}\` on canvas \`${ID}\`. Call eurostat_dataframe_describe`;
+      expect(out.notice).toContain(staged);
+      expect(contentText(result)).toContain(staged);
+      expect(contentText(result)).not.toContain(`"${ID}"`);
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Filter keys and values the dataset does not have (#104), and "+" in a value (#100) —
+// the real service with fetch routed per endpoint, over replies recorded live. The reads
+// themselves (deadline, failure, cancellation, cache) are tabled in narrowing-advice.test.ts;
+// these prove the tool reaches them on each side of each branch.
+// ---------------------------------------------------------------------------
+
+describe('eurostatQueryDataset — naming the dimensions and codes a filter missed (#104, #100)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  type Route = 'contentconstraint' | 'dataflow' | 'datastructure' | 'statistics';
+  const routeOf = (input: unknown): Route =>
+    (new URL(String(input)).pathname.match(/\/sdmx\/2\.1\/([a-z]+)\//)?.[1] as Route) ??
+    'statistics';
+  const recorded = (name: string) => async () =>
+    new Response(readFileSync(new URL(`../fixtures/${name}`, import.meta.url), 'utf8'));
+  /** The Statistics API answers `body`; a structure route answers from `structures`, else 404. */
+  const serve = (
+    body: object,
+    status: number,
+    structures: Partial<Record<Route, (input: unknown, init?: RequestInit) => Promise<Response>>>,
+  ) =>
+    fetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const route = routeOf(input);
+      if (route === 'statistics') return jsonReply(body, status);
+      return structures[route]?.(input, init) ?? new Response('<fault/>', { status: 404 });
+    });
+  const reads = (route: Route) =>
+    fetchMock.mock.calls.filter(([input]) => routeOf(input) === route).length;
+  const errorOf = (result: { structuredContent?: unknown }) =>
+    (
+      result.structuredContent as {
+        error: { code: number; message: string; data: Record<string, unknown> };
+      }
+    ).error;
+  const hintOf = (result: { structuredContent?: unknown }) =>
+    (errorOf(result).data.recovery as { hint: string }).hint;
+
+  beforeEach(() => {
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(getEurostatDataService).mockReturnValue(
+      new EurostatDataService({} as never, {} as never),
+    );
+    setCanvas(undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  describe('filter keys ilc_li02 has no dimension for', () => {
+    const REJECTED = envelope('ilc-li02-fr-indic-il-incgrp-150');
+    const STALE = { geo: ['FR'], indic_il: ['LI_R_MD60'], incgrp: ['TOTAL'] };
+    const ORDER = ['freq', 'statinfo', 'unit', 'rskpovth', 'sex', 'age', 'geo'];
+    const MESSAGE =
+      'Filter names "indic_il", "incgrp", which are not dimensions of this dataset. Filterable dimensions, in key order: freq, statinfo, unit, rskpovth, sex, age, geo.';
+    const RENAME = 'Rename each filter key the error names to one of the dimensions it lists.';
+
+    it('names both in one error with the key order, on both surfaces', async () => {
+      serve(REJECTED, 400, { datastructure: recorded('ilc-li02-datastructure.xml') });
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'ilc_li02',
+        filters: STALE,
+      });
+      expect(errorOf(result)).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        message: MESSAGE,
+        data: {
+          reason: 'invalid_dimension',
+          unknownDimensions: ['indic_il', 'incgrp'],
+          dimensionOrder: ORDER,
+          recovery: { hint: RENAME },
+        },
+      });
+      const text = contentText(result as never);
+      expect(text).toContain(
+        'Filterable dimensions, in key order: `freq`, `statinfo`, `unit`, `rskpovth`, `sex`, `age`, `geo`.',
+      );
+      expect(text).toContain(`Recovery: ${RENAME}`);
+      expect(reads('statistics')).toBe(1);
+      expect(reads('datastructure')).toBe(1);
+    });
+
+    it('lists no time key when filters.time sits beside them', async () => {
+      serve(REJECTED, 400, { datastructure: recorded('ilc-li02-datastructure.xml') });
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'ilc_li02',
+        filters: { ...STALE, time: ['2020'] },
+      });
+      expect(errorOf(result)).toMatchObject({
+        message: MESSAGE,
+        data: { unknownDimensions: ['indic_il', 'incgrp'] },
+      });
+    });
+
+    it.each([
+      ['the structure cannot be read', STALE, {}],
+      [
+        'the structure lists every filter key',
+        { geo: ['FR'], statinfo: ['X'] },
+        { datastructure: recorded('ilc-li02-datastructure.xml') },
+      ],
+    ])("keeps Eurostat's one-key error when %s", async (_name, filters, structures) => {
+      serve(REJECTED, 400, structures);
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'ilc_li02',
+        filters,
+      });
+      const error = errorOf(result);
+      expect(error.data.reason).toBe('invalid_dimension');
+      expect(error.message).toContain('Dimension "INDIC_IL" is not defined');
+      expect(error.data).not.toHaveProperty('unknownDimensions');
+      expect(hintOf(result)).toBe(
+        'Use eurostat_get_dataset_info to see valid dimension codes for "ilc_li02".',
+      );
+      expect(reads('datastructure')).toBe(1);
+    });
+  });
+
+  describe('filter values hlth_cd_apr has no code for', () => {
+    const VALUES = {
+      dataflow: recorded('dimension-values/hlth-cd-apr-dataflow.xml'),
+      contentconstraint: recorded('dimension-values/hlth-cd-apr-constraint.xml'),
+    };
+
+    it('lists the three mortalit codes with their labels on both surfaces', async () => {
+      serve(envelope('hlth-cd-apr-fi-prev'), 200, VALUES);
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'hlth_cd_apr',
+        filters: { geo: ['FI'], mortalit: ['PREV'] },
+      });
+      const listed =
+        '"mortalit" has 3 codes: TOTAL (Total), PRVT (Preventable mortality), TRT (Treatable mortality).';
+      expect(errorOf(result)).toMatchObject({
+        code: JsonRpcErrorCode.NotFound,
+        message:
+          'No observations matched. These filter values match nothing in "hlth_cd_apr": mortalit=[PREV].',
+        data: {
+          reason: 'no_results',
+          unmatchedValues: { mortalit: ['PREV'] },
+          validValues: {
+            mortalit: {
+              totalCount: 3,
+              values: [
+                { code: 'TOTAL', label: 'Total' },
+                { code: 'PRVT', label: 'Preventable mortality' },
+                { code: 'TRT', label: 'Treatable mortality' },
+              ],
+            },
+          },
+          recovery: { hint: listed },
+        },
+      });
+      expect(contentText(result as never)).toContain(
+        'Recovery: "mortalit" has 3 codes: `TOTAL` (Total), `PRVT` (Preventable mortality), `TRT` (Treatable mortality).',
+      );
+    });
+
+    it.each([
+      [
+        'XX',
+        'hlth-cd-apr-xx-prvt',
+        'Find the code for "XX" with eurostat_get_dimension_values, dimension "geo" and filter "XX", adding geo_level for a code below country level.',
+      ],
+      [
+        'F.I',
+        'hlth-cd-apr-f-dot-i-prvt',
+        'No Eurostat code contains ".", and "F.I" without its dots may not be a code of "hlth_cd_apr" either. Find the code with eurostat_get_dimension_values, dimension "geo" and filter "FI".',
+      ],
+    ])(
+      'gives geo, above 25 codes, its total over every level and no codes, for %s',
+      async (value, fixture, next) => {
+        serve(envelope(fixture), 200, VALUES);
+        const result = await runToolContract(eurostatQueryDataset, {
+          dataset_code: 'hlth_cd_apr',
+          filters: { geo: [value], mortalit: ['PRVT'] },
+        });
+        const hint = `"geo" has 38 codes, too many to list here. ${next}`;
+        expect(errorOf(result).data).toMatchObject({
+          unmatchedValues: { geo: [value] },
+          validValues: { geo: { totalCount: 38 } },
+        });
+        expect(hintOf(result)).toBe(hint);
+        const text = contentText(result as never);
+        // The key and the value are sent back to eurostat_get_dimension_values: code spans.
+        expect(text).toContain('Recovery: "`geo`" has 38 codes, too many to list here.');
+        expect(text).toContain(`"\`${value}\`"`);
+        expect(text).not.toContain('EU27');
+      },
+    );
+
+    it('keeps the generic pointer when the values cannot be read', async () => {
+      serve(envelope('hlth-cd-apr-fi-prev'), 200, {});
+      const result = await runToolContract(eurostatQueryDataset, {
+        dataset_code: 'hlth_cd_apr',
+        filters: { geo: ['FI'], mortalit: ['PREV'] },
+      });
+      expect(errorOf(result).data).not.toHaveProperty('validValues');
+      expect(hintOf(result)).toBe(
+        'Check the valid codes for mortalit with eurostat_get_dimension_values.',
+      );
+      expect(reads('dataflow')).toBe(1);
+    });
+
+    describe('when the values read does not answer', () => {
+      /** A request that never answers: it settles only when its signal aborts. */
+      const hang = (_input: unknown, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+            once: true,
+          });
+        });
+      const input = { dataset_code: 'hlth_cd_apr', filters: { geo: ['FI'], mortalit: ['PREV'] } };
+
+      beforeEach(() => {
+        vi.useFakeTimers();
+        vi.spyOn(serverConfig, 'getServerConfig').mockReturnValue({
+          ...serverConfig.getServerConfig(),
+          requestTimeoutMs: 600_000,
+          metadataTimeoutMs: 600_000,
+        });
+        serve(envelope('hlth-cd-apr-fi-prev'), 200, { dataflow: hang, contentconstraint: hang });
+      });
+      afterEach(() => {
+        vi.useRealTimers();
+        vi.restoreAllMocks();
+      });
+
+      it('keeps the generic pointer at 5 s', async () => {
+        let settled = false;
+        const pending = runToolContract(eurostatQueryDataset, input).finally(() => {
+          settled = true;
+        });
+        await vi.advanceTimersByTimeAsync(4_999);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(settled).toBe(true);
+        const result = await pending;
+        expect(errorOf(result).data).toMatchObject({ reason: 'no_results' });
+        expect(errorOf(result).data).not.toHaveProperty('validValues');
+        expect(hintOf(result)).toBe(
+          'Check the valid codes for mortalit with eurostat_get_dimension_values.',
+        );
+      });
+
+      it('reaches the caller as a cancellation when the call is cancelled during the read', async () => {
+        const controller = new AbortController();
+        // The handler, not runToolContract, which reports anything thrown after an abort as cancelled.
+        const outcome = Promise.resolve(
+          eurostatQueryDataset.handler(
+            eurostatQueryDataset.input.parse(input),
+            createMockContext({ signal: controller.signal, errors: eurostatQueryDataset.errors }),
+          ),
+        ).then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        await vi.advanceTimersByTimeAsync(1_000);
+        controller.abort();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(await outcome).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+      });
+    });
+  });
+
+  it('reads "DE+FR" as DE and FR, and echoes them as two values (#100)', async () => {
+    serve(envelope('nama-10-gdp-de-fr-since-2024'), 200, {});
+    const result = await runToolContract(eurostatQueryDataset, {
+      dataset_code: 'nama_10_gdp',
+      filters: { unit: ['CP_MEUR'], na_item: ['B1GQ'], geo: ['DE+FR'] },
+      since_period: '2024',
+    });
+    expect(result.isError).not.toBe(true);
+    const out = result.structuredContent as Record<string, unknown>;
+    expect(out).toMatchObject({
+      obsCount: 4,
+      appliedFilters: { filters: { geo: ['DE', 'FR'] } },
+    });
+    expect(out).not.toHaveProperty('unmatchedValues');
+    expect(new URL(String(fetchMock.mock.calls[0]?.[0])).searchParams.getAll('geo')).toEqual([
+      'DE',
+      'FR',
+    ]);
   });
 });

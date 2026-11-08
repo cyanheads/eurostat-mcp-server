@@ -168,7 +168,7 @@ export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
       `# ${result.label}`,
       `**Code:** ${result.code}`,
       `**Period:** ${start || end ? `${start ?? UNREPORTED} – ${end ?? UNREPORTED}` : UNREPORTED}`,
-      `**Observations:** ${result.obsCount?.toLocaleString() ?? UNREPORTED}`,
+      `**Observations:** ${result.obsCount?.toLocaleString('en-US') ?? UNREPORTED}`,
       `**Last updated:** ${result.lastUpdated ?? UNREPORTED}`,
     ];
     if (result.metadataUrl) lines.push(`**Metadata:** ${result.metadataUrl}`);

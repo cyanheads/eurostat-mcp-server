@@ -233,3 +233,34 @@ describe('eurostatDataframeDescribe', () => {
     expect(text).not.toContain('expiresAt:');
   });
 });
+
+describe('eurostatDataframeDescribe — a canvas ID Markdown reads as emphasis', () => {
+  // Underscores at both ends: in running text, Markdown reads the ID as emphasis.
+  const ID = '_abcdefgh_';
+
+  it('renders the ID as a code span in the empty-canvas notice', async () => {
+    // An empty canvas of the real registry, answering under an ID the registry would never mint.
+    const instance = await canvas.acquire(undefined, ctx());
+    const renamed = new Proxy(instance, {
+      get: (target, key) => {
+        if (key === 'canvasId') return ID;
+        const value: unknown = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    setCanvas({ acquire: async () => renamed } as never);
+    try {
+      const result = await runToolContract(
+        eurostatDataframeDescribe,
+        { canvas_id: ID },
+        { context: { tenantId: 'default' } },
+      );
+      const { notice } = result.structuredContent as { notice: string };
+      expect(notice).toMatch(/^Canvas `_abcdefgh_` holds no tables\. /);
+      const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+      expect(text).toContain('> Canvas `_abcdefgh_` holds no tables.');
+    } finally {
+      setCanvas(canvas);
+    }
+  });
+});

@@ -1,9 +1,12 @@
 /**
  * @fileoverview Local check of the period literals `since_period`/`until_period`
  * carry, run by both data tools before any request reaches Eurostat, and the calendar
- * reasoning over those bounds: which periods they exclude, and when they name one day.
+ * reasoning over those bounds and over the periods a match carries: which periods the
+ * bounds exclude, when they name one day, and which span of each frequency has data.
  * @module services/eurostat-periods
  */
+
+import type { OutsideSpan } from '@/services/eurostat-data/types.js';
 
 /**
  * The accepted forms, as the tools' descriptions and recovery hints state them.
@@ -378,6 +381,135 @@ export function frequenciesOf(periods: readonly string[]): Set<string> {
     frequencies.add(letter?.toUpperCase() ?? (day ? 'D' : month ? 'M' : 'A'));
   }
   return frequencies;
+}
+
+/** Frequency codes finest first, the order {@link frequencySpans} lists them in. */
+const FINEST_FIRST = ['D', 'W', 'M', 'Q', 'T', 'S', 'A'];
+
+/** A period code's frequency and the days it covers, or `undefined` for one off the calendar. */
+function placePeriod(
+  code: string,
+): { firstDay: number; frequency: string; lastDay: number } | undefined {
+  const period = normalizePeriod(code);
+  if ('problem' in period) return;
+  const [frequency] = frequenciesOf([code]);
+  return frequency === undefined ? undefined : { ...period, frequency };
+}
+
+/**
+ * A period code's frequency — A, S, T, Q, M, W or D, read from its shape as
+ * {@link frequenciesOf} reads it — or `undefined` for a code this module cannot place
+ * on the calendar: one of no known shape, or one naming a component that does not
+ * exist. {@link frequencySpans} leaves exactly those codes out.
+ */
+export const periodFrequency = (code: string): string | undefined => placePeriod(code)?.frequency;
+
+/** A period of a list, by its code and its position in the list. */
+export interface ListedPeriod {
+  code: string;
+  position: number;
+}
+
+/**
+ * One frequency's periods in a list, split by the span its periods with data cover. Every
+ * list is chronological. `empty`: none of the frequency's periods has data. `span`:
+ * `inside` runs from `first`, the earliest period with data, to `last`, the latest, both
+ * included and any gap between them too; `before` and `after` are the periods either
+ * side, none of which has data.
+ */
+export type FrequencySpan = { frequency: string } & (
+  | { kind: 'empty'; periods: ListedPeriod[] }
+  | {
+      after: ListedPeriod[];
+      before: ListedPeriod[];
+      first: ListedPeriod;
+      inside: ListedPeriod[];
+      kind: 'span';
+      last: ListedPeriod;
+    }
+);
+
+/** The periods of `span` that lie outside the span its data covers, or `undefined` when none do. */
+export function outsideSpanOf(span: FrequencySpan): OutsideSpan | undefined {
+  const { frequency } = span;
+  const codes = (periods: ListedPeriod[]) => periods.map(({ code }) => code);
+  if (span.kind === 'empty') return { frequency, kind: 'empty', periods: codes(span.periods) };
+  if (span.before.length === 0 && span.after.length === 0) return;
+  return {
+    frequency,
+    kind: 'edges',
+    first: span.first.code,
+    last: span.last.code,
+    before: codes(span.before),
+    after: codes(span.after),
+  };
+}
+
+/**
+ * Where each period of a list (a reply's time positions, a table's period columns)
+ * stands against the periods that carry data, per frequency.
+ *
+ * Periods are compared only within their own frequency, by the days they cover, so
+ * the list's own order never matters: the JSON-stat index puts annual 2025 after
+ * 2025-12, a TSV header puts it before 2025-01, and both give the same spans. A
+ * position whose code is unset or that {@link periodFrequency} cannot place belongs
+ * to no frequency.
+ *
+ * Returns the frequencies finest first, and `latest`: the period with data that ends
+ * last across frequencies (the finer one on a tie), absent when no period has data.
+ */
+export function frequencySpans(
+  periods: readonly (string | undefined)[],
+  hasData: (position: number) => boolean,
+): { frequencies: FrequencySpan[]; latest?: ListedPeriod } {
+  const placed = new Map<string, Array<ListedPeriod & { day: number }>>();
+  let latest: (ListedPeriod & { fineness: number; lastDay: number }) | undefined;
+  const fineness = (frequency: string) => FINEST_FIRST.indexOf(frequency);
+  periods.forEach((code, position) => {
+    if (code === undefined) return;
+    const period = placePeriod(code);
+    if (!period) return;
+    const { firstDay, frequency, lastDay } = period;
+    const entries = placed.get(frequency) ?? [];
+    if (entries.length === 0) placed.set(frequency, entries);
+    entries.push({ code, day: firstDay, position });
+    if (!hasData(position)) return;
+    const candidate = { code, fineness: fineness(frequency), lastDay, position };
+    if (
+      !latest ||
+      lastDay > latest.lastDay ||
+      (lastDay === latest.lastDay && candidate.fineness < latest.fineness)
+    ) {
+      latest = candidate;
+    }
+  });
+
+  const frequencies = [...placed]
+    .sort(([a], [b]) => fineness(a) - fineness(b))
+    .map(([frequency, entries]): FrequencySpan => {
+      const ordered = entries
+        .sort((a, b) => a.day - b.day)
+        .map(({ code, position }) => ({ code, position }));
+      const populated = ({ position }: ListedPeriod) => hasData(position);
+      const from = ordered.findIndex(populated);
+      const to = ordered.findLastIndex(populated);
+      const first = ordered[from];
+      const last = ordered[to];
+      if (!first || !last) return { frequency, kind: 'empty', periods: ordered };
+      return {
+        frequency,
+        kind: 'span',
+        before: ordered.slice(0, from),
+        first,
+        inside: ordered.slice(from, to + 1),
+        last,
+        after: ordered.slice(to + 1),
+      };
+    });
+  return {
+    frequencies,
+    ...(latest && { latest: { code: latest.code, position: latest.position } }),
+  };
 }
 
 /**

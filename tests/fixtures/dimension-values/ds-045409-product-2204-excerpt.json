@@ -1,0 +1,886 @@
+[
+  ["220291XX", "Trade of  subheading 220291, not elsewhere specified"],
+  ["220299", "Non-alcoholic beverages (excl. water, fruit or vegetable juices, milk and beer)"],
+  [
+    "22029911",
+    "Soya-based beverages with a protein content of >=2,8 % by weight, not containing alcohol, milk, milk products or fats derived therefrom"
+  ],
+  [
+    "22029915",
+    "Soya-based beverages with a protein content of <2,8% by weight and beverages based on nuts of Chapter 8, cereals of Chapter 10 or seeds of Chapter 12, not containing alcohol, milk, milk products or fats derived therefrom"
+  ],
+  [
+    "22029919",
+    "Non-alcoholic beverages, not containing milk, milk products and fats derived therefrom (excl. water, fruit or vegetable juices, beer and beverages based on soya or on nuts of Ch 8, cereals of Ch 10 or seeds of Ch 12)"
+  ],
+  ["22029991", "Non-alcoholic beverages containing < 0,2% fats derived from milk or milk products"],
+  [
+    "22029995",
+    "Non-alcoholic beverages containing >= 0,2% but < 2% fats derived from milk or milk products"
+  ],
+  ["22029999", "Non-alcoholic beverages containing >= 2% fats derived from milk or milk products"],
+  ["220299XX", "Trade of  subheading 220299, not elsewhere specified"],
+  ["2202XX", "Trade of heading 2202, not elsewhere specified"],
+  ["2202XXXX", "Trade of heading 2202, not elsewhere specified"],
+  ["2203", "Beer made from malt"],
+  ["220300", "Beer made from malt"],
+  ["22030001", "Beer made from malt, in bottles holding <= 10 l"],
+  ["22030009", "Beer made from malt, in containers holding <= 10 l (excl. in bottles)"],
+  ["22030010", "Malt beer, in containers holding > 10 l"],
+  ["22030090", "Malt beer, in containers holding =< 10 l"],
+  ["220300XX", "Trade of  subheading 220300, not elsewhere specified"],
+  ["2203XX", "Trade of heading 2203, not elsewhere specified"],
+  ["2203XXXX", "Trade of heading 2203, not elsewhere specified"],
+  [
+    "2204",
+    "Wine of fresh grapes, incl. fortified wines; grape must, partly fermented and of an actual alcoholic strength of > 0,5% vol or grape must with added alcohol of an actual alcoholic strength of > 0,5% vol"
+  ],
+  ["220410", "Sparkling wine of fresh grapes"],
+  ["22041011", "Champagne, with PDO"],
+  ["22041013", "Cava, with PDO"],
+  ["22041015", "Prosecco, with PDO"],
+  [
+    "22041019",
+    "Sparkling wine of fresh grapes of actual alcoholic strength of >= 8,5% vol (excl. champagne)"
+  ],
+  ["22041090", "Sparkling wine of fresh grapes of actual alcoholic strength of < 8.5 % vol"],
+  ["22041091", "Asti spumante, with PDO"],
+  [
+    "22041093",
+    "Sparkling wine of fresh grapes with a protected designation of origin \"PDO\" (excl. Asti spumante, Champagne, Cava and Prosecco)(2017-2500);Sparkling wine of fresh grapes with a protected designation of origin (PDO) (excl. Asti spumante and Champagne)(2010-2016)"
+  ],
+  ["22041094", "Sparkling wine of fresh grapes with a protected geographical indication (PGI)"],
+  ["22041096", "Varietal sparkling wines of fresh grapes without PDO and PGI"],
+  ["22041098", "Sparkling wine of fresh grapes (excl. varietal wines)"],
+  [
+    "22041099",
+    "Sparkling wine of fresh grapes and of actual alcoholic strength of < 8,5% vol (excl. Asti spumante)"
+  ],
+  ["220410XX", "Trade of  subheading 220410, not elsewhere specified"],
+  [
+    "220421",
+    "Wine of fresh grapes, incl. fortified wines, and grape must whose fermentation has been arrested by the addition of alcohol, in containers of <= 2 l (excl. sparkling wine)"
+  ],
+  [
+    "22042106",
+    "Wine of fresh grapes, incl. fortified wines, in bottles with \"mushrooms\" stoppers held in place by ties or fastenings, holding <= 2 l; wine otherwise put up with an excess pressure due to carbon dioxide in solution of >= 1 bar but < 3 bar measured at 20°C, in containers holding <= 2 l (excl. sparkling wine), with a protected designation of origin (PDO)"
+  ],
+  [
+    "22042107",
+    "Wine of fresh grapes, incl. fortified wines, in bottles with \"mushrooms\" stoppers held in place by ties or fastenings, holding <= 2 l; wine otherwise put up with an excess pressure due to carbon dioxide in solution of >= 1 bar but < 3 bar measured at 20°C, in containers holding <= 2 l (excl. sparkling wine), with a protected geographical indication (PGI)"
+  ],
+  [
+    "22042108",
+    "Wine of fresh grapes, incl. fortified wines, in bottles with \"mushrooms\" stoppers held in place by ties or fastenings, holding <= 2 l; wine otherwise put up with an excess pressure due to carbon dioxide in solution of >= 1 bar but < 3 bar measured at 20°C, in containers holding <= 2 l (excl. sparkling wine), varietal wines without PDO or PGI"
+  ],
+  [
+    "22042109",
+    "Other wine of fresh grapes, incl. fortified wines, in bottles with \"mushrooms\" stoppers held in place by ties or fastenings, holding <= 2 l; wine otherwise put up with an excess pressure due to carbon dioxide in solution of >= 1 bar but < 3 bar measured at 20°C, in containers holding <= 2 l (excl. sparkling wine and varietal wines)"
+  ],
+  [
+    "22042110",
+    "Wine of fresh grapes, incl. fortified wines, in bottles with \"mushrooms\" stoppers held in place by ties or fastenings, holding <= 2 l; wine otherwise put up with an excess pressure due to carbon dioxide in solution of >= 1 bar but < 3 bar measured at 20°C, in containers holding <= 2 l (excl. sparkling wine)"
+  ],
+  [
+    "22042111",
+    "White wines produced in Alsace, in containers holding <= 2 l and of an actual alcoholic strength by volume of <= 15% vol, with PDO (excl. sparkling wine and semi-sparkling wine)(2010-2500);Quality white wines produced in Alsace, in containers holding <= 2 l and of an actual alcoholic strength of by volume of <= 13% vol (excl. sparkling wine and semi-sparkling wine)(1995-2009)"
+  ],
+  [
+    "22042112",
+    "White wines produced in Bordeaux, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (excl. sparkling wine and semi-sparkling wine)(2010-2500);Quality white wines produced in Bordeaux, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (excl. sparkling wine and semi-sparkling wine)(1995-2009)"
+  ],
+  [
+    "22042113",
+    "White wines produced in Burgundy, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (excl. sparkling wine and semi-sparkling wine)(2010-2500);Quality white wines produced in Burgundy, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (excl. sparkling wine and semi-sparkling wine)(1995-2009)"
+  ],
+  [
+    "22042117",
+    "White wines produced in Val de Loire, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (excl. sparkling wine and semi-sparkling wine)(2010-2500);Quality white wines produced in Val de Loire, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (excl. sparkling wine and semi-sparkling wine)(1995-2009)"
+  ],
+  [
+    "22042118",
+    "White wines produced in Mosel, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (excl. sparkling wine and semi-sparkling wine)(2010-2500);Quality white wines produced in Mosel-Saar-Ruwer, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (excl. sparkling wine and semi-sparkling wine)(1995-2009)"
+  ],
+  [
+    "22042119",
+    "White wines produced in Pfalz, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (excl. sparkling wine and semi-sparkling wine)(2010-2500);Quality white wines produced in Pfalz, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (excl. sparkling wine and semi-sparkling wine)(1995-2009)"
+  ],
+  [
+    "22042121",
+    "Quality white wine produced in specified regions, in containers holding =< 2 l, of actual alcoholic strength of =< 13 % vol"
+  ],
+  [
+    "22042122",
+    "White wines produced in Rheinhessen, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (excl. sparkling wine and semi-sparkling wine)(2010-2500);Quality white wines produced in Rheinhessen, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (excl. sparkling wine and semi-sparkling wine)(1995-2009)"
+  ],
+  [
+    "22042123",
+    "White wines produced in Tokaj \"e.g. Aszu, Szamorodni, Máslás, Fordítás\", in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (excl. sparkling wine and semi-sparkling wine)(2010-2500);Quality white wines produced in Tokaj \"e.g. Aszu, Szamorodni, Máslás, Fordítás\", in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (excl. sparkling wine and semi-sparkling wine)(2005-2009);Quality wine produced in specified regions, in containers holding =< 2 l, of actual alcoholic strength of =< 13 % vol (excl. white)(1988-1994)"
+  ],
+  [
+    "22042124",
+    "White wines produced in Lazio {Latium}, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (excl. sparkling wine and semi-sparkling wine)(2010-2500);Quality white wines produced in Lazio {Latium}, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (excl. sparkling wine and semi-sparkling wine)(1995-2009)"
+  ],
+  [
+    "22042125",
+    "White wine of fresh grapes, in containers holding =< 2 l, of actual alcoholic strength of =< 13 % vol (excl. quality wine produced in specified regions)"
+  ],
+  [
+    "22042126",
+    "White wines produced in Toscana {Tuscany}, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (excl. sparkling wine and semi-sparkling wine)(2010-2500);Quality white wines produced in Toscana {Tuscany}, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (excl. sparkling wine and semi-sparkling wine)(1995-2009)"
+  ],
+  [
+    "22042127",
+    "White wines produced in Trentino, Alto Adige and Friuli, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (excl. sparkling wine and semi-sparkling wine)(2010-2500);Quality white wines produced in Trentino, Alto Adige and Friuli, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (excl. sparkling wine and semi-sparkling wine)(1995-2009)"
+  ],
+  [
+    "22042128",
+    "White wines produced in Veneto, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (excl. sparkling wine and semi-sparkling wine)(2010-2500);Quality white wines produced in Veneto, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (excl. sparkling wine and semi-sparkling wine)(1995-2009)"
+  ],
+  [
+    "22042129",
+    "Wine of fresh grapes, incl. fortified wines, and grape must whose fermentation has been arrested by the addition of alcohol, in containers of =< 2 l, of actual alcoholic strength of =< 13 % vol (excl. sparkling wine, quality wine produced in specified regions and white wine in general)"
+  ],
+  [
+    "22042131",
+    "White wines produced in Sicilia, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (excl. sparkling wine and semi-sparkling wine)(2017-2500);Quality white wine from specified regions, in containers holding =< 2 l, of actual alcoholic strength of > 13 % but =< 15 % vol(1988-1994)"
+  ],
+  [
+    "22042132",
+    "White wines of the \"vinho verde\" category, produced in EU, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (excl. sparkling wine and semi-sparkling wine)(2010-2500);Quality white wines of the \"vinho verde\" category, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (excl. sparkling wine and semi-sparkling wine)(1995-2009)"
+  ],
+  [
+    "22042133",
+    "Quality wine from specified regions, in containers holding =< 2 l, of actual alcoholic strength of > 13 % but =< 15 % vol (excl. white)"
+  ],
+  [
+    "22042134",
+    "White wines produced in Penedés, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (excl. sparkling wine and semi-sparkling wine)(2010-2500);Quality white wines produced in Penedés, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (excl. sparkling wine and semi-sparkling wine)(1995-2009)"
+  ],
+  [
+    "22042135",
+    "White wine from fresh grapes, in containers holding =< 2 l, of actual alcoholic strength of > 13 % but =< 15 % vol (excl. quality wine from specified regions)"
+  ],
+  [
+    "22042136",
+    "White wines produced in Rioja, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (excl. sparkling wine and semi-sparkling wine)(2010-2500);Quality white wines produced in Rioja, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (excl. sparkling wine and semi-sparkling wine)(1995-2009)"
+  ],
+  [
+    "22042137",
+    "White wines produced in Valencia, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (excl. sparkling wine and semi-sparkling wine)(2010-2500);Quality white wines produced in Valencia, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (excl. sparkling wine and semi-sparkling wine)(1995-2009)"
+  ],
+  [
+    "22042138",
+    "White wines produced in EU, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than Alsace, Bordeaux, Bourgogne, Val de Loire, Mosel, Pfalz, Rheinhessen, Tokaj, Lazio, Toscana, Trentino, Alto Adige, Friuli, Veneto, Sicilia, vinho verde, Penedés, Rioja, Valencia, sparkling wine and semi-sparkling wine)(2017-2500);White wines produced in EU, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than Alsace, Bordeaux, Bourgogne, Val de Loire, Mosel, Pfalz, Rheinhessen, Tokaj, Lazio, Toscana, Trentino, Alto Adige, Friuli, Veneto, vinho verde, Penedés, Rioja, Valencia, sparkling wine and semi-sparkling wine)(2010-2016);Quality white wines produced in specified regions, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (other than Alsace, Bordeaux, Burgundy, Val de Loire, Mosel-Saar-Ruwer, Pfalz, Rheinhessen, Tokaj, Lazio, Toscana, Trentino, Alto Adige, Friuli, Veneto, vinho verde, Penedés, Rioja, Valencia, sparkling wine and semi-sparkling wine)(1995-2009)"
+  ],
+  [
+    "22042139",
+    "Wine of fresh grapes, incl. fortified wines, and grape must whose fermentation has been arrested by the addition of alcohol, in containers of =< 2 l, of actual alcoholic strength of > 13 % but =< 15 % vol (excl. sparkling wine, quality wine produced in specified regions and white wine in general)"
+  ],
+  [
+    "22042141",
+    "Port, madeira, sherry, tokay and setubal muscatel, of actual alcoholic strength of > 15 % but =< 18 % vol, in containers holding =< 2 l"
+  ],
+  [
+    "22042142",
+    "Wines produced in Bordeaux, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine, semi-sparkling wine and white wine)(2010-2500);Quality wines produced in Bordeaux, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine and general white wine)(1995-2009)"
+  ],
+  [
+    "22042143",
+    "Wines produced in Bourgogne (Burgundy), in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine, semi-sparkling wine and white wine)(2010-2500);Quality wines produced in Burgundy, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine and general white wine)(1995-2009)"
+  ],
+  [
+    "22042144",
+    "Wines produced in Beaujolais, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine, semi-sparkling wine and white wine)(2010-2500);Quality wines produced in Beaujolais, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine and general white wine)(1995-2009)"
+  ],
+  [
+    "22042146",
+    "Wines produced in Vallée du Rhône, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine, semi-sparkling wine and white wine)(2015-2500);Wines produced in Côtes-du-Rhône, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine, semi-sparkling wine and white wine)(2010-2014);Quality wines produced in Côtes-du-Rhône, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine and general white wine)(1995-2009)"
+  ],
+  [
+    "22042147",
+    "Wines produced in Languedoc-Roussillon, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine, semi-sparkling wine and white wine)(2010-2500);Quality wines produced in Languedoc-Roussillon, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine and general white wine)(1995-2009)"
+  ],
+  [
+    "22042148",
+    "Wines produced in Val de Loire, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine, semi-sparkling wine and white wine)(2010-2500);Quality wines produced in Val de Loire, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine and general white wine)(1995-2009)"
+  ],
+  [
+    "22042149",
+    "Wine of fresh grapes, incl. fortified wines, in containers holding =< 2 l, of actual alcoholic strength of > 15 % but =< 18 % vol (excl. sparkling wine, quality wine produced in specified regions, white wine in general, port, madeira, sherry, tokay and setubal muscatel)"
+  ],
+  [
+    "22042151",
+    "Port, madeira, sherry, tokay and setubal muscatel, of actual alcoholic strength of > 18 % but =< 22 % vol, in containers holding =< 2 l"
+  ],
+  [
+    "22042159",
+    "Wine of fresh grapes, incl. fortified wines, in containers holding =< 2 l, of actual alcoholic strength of > 18 % but =< 22 % vol (excl. sparkling wine, quality wine produced in specified regions, white wine in general, port, madeira, sherry, tokay and setubal muscatel)"
+  ],
+  [
+    "22042161",
+    "Wines produced in Sicilia, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine, semi-sparkling wine and white wine)"
+  ],
+  [
+    "22042162",
+    "Wines produced in Piemonte {Piedmont}, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine, semi-sparkling wine and white wine)(2010-2500);Quality wines produced in Piemonte {Piedmont}, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine and general white wine)(1995-2009)"
+  ],
+  [
+    "22042166",
+    "Wines produced in Toscana {Tuscany}, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine, semi-sparkling wine and white wine)(2010-2500);Quality wines produced in Toscana {Tuscany}, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine and general white wine)(1995-2009)"
+  ],
+  [
+    "22042167",
+    "Wines produced in Trentino and Alto Adige, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine, semi-sparkling wine and white wine)(2010-2500);Quality wines produced in Trentino and Alto Adige, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine and general white wine)(1995-2009)"
+  ],
+  [
+    "22042168",
+    "Wines produced in Veneto, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine, semi-sparkling wine and white wine)(2010-2500);Quality wines produced in Veneto, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine and general white wine)(1995-2009)"
+  ],
+  [
+    "22042169",
+    "Wines produced in Dão, Bairrada and Douro, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine, semi-sparkling wine and white wine)(2010-2500);Quality wines produced in Dao, Bairrada and Douro, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine and general white wine)(1995-2009)"
+  ],
+  [
+    "22042171",
+    "Wines produced in Navarra, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine, semi-sparkling wine and white wine)(2010-2500);Quality wines produced in Navarra, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine and general white wine)(1995-2009)"
+  ],
+  [
+    "22042174",
+    "Wines produced in Penedés, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine, semi-sparkling wine and white wine)(2010-2500);Quality wines produced in Penedés, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine and general white wine)(1995-2009)"
+  ],
+  [
+    "22042176",
+    "Wines produced in Rioja, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine, semi-sparkling wine and white wine)(2010-2500);Quality wines produced in Rioja, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine and general white wine)(1995-2009)"
+  ],
+  [
+    "22042177",
+    "Wines produced in Valdepeñas, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine, semi-sparkling wine and white wine)(2010-2500);Quality wines produced in Valdepeñas, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine and general white wine)(1995-2009)"
+  ],
+  [
+    "22042178",
+    "Wines produced in EU, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than Bordeaux, Bourgogne, Beaujolais, Vallée du Rhône, Languedoc-Roussillon, Val de Loire, Sicilia, Piemonte, Toscana, Trentino, Alto Adige, Veneto, Dão, Bairrada, Douro, Navarra, Penedés, Rioja, Valdepeñas, sparkling wine, semi-sparkling wine and white wine)(2017-2500);Wines produced in EU, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than Bordeaux, Bourgogne, Beaujolais, Vallée du Rhône, Languedoc-Roussillon, Val de Loire, Piemonte, Toscana, Trentino, Alto Adige, Veneto, Dão, Bairrada, Douro, Navarra, Penedés, Rioja, Valdepeñas, sparkling wine, semi-sparkling wine and white wine)(2015-2016);Wines produced in the Community, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than Bordeaux, Bourgogne, Beaujolais, Côtes-du-Rhône, Languedoc-Roussillon, Val de Loire, Piemonte, Toscana, Trentino, Alto Adige, Veneto, Dão, Bairrada, Douro, Navarra, Penedés, Rioja, Valdepeñas, sparkling wine, semi-sparkling wine and white wine)(2010-2014);Quality wines produced in specified regions, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (other than Bordeaux, Burgundy, Beaujolais, Côtes-du-Rhône, Languedoc-Roussillon, Val de Loire, Piemonte, Toscana, Trentino, Alto Adige, Veneto, Dao, Bairrada, Douro, Navarra, Penedés, Rioja, Valdepeñas, sparkling wine, semi-sparkling wine and general white wine)(1995-2009)"
+  ],
+  [
+    "22042179",
+    "White wine produced in EU, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PGI (other than sparkling wine and semi-sparkling wine)(2010-2500);White wine of fresh grapes, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine and quality wines produced in specified regions)(2005-2009);White wine of fresh grapes, in containers holding <= 2 l and of an actual alcoholic strength by volume of <= 13% vol (other than sparkling wine, semi-sparkling wine and quality wines produced in specified regions)(1995-2004)"
+  ],
+  [
+    "22042180",
+    "Wine produced in EU, in containers holding <= 2 l and of an actual alcoholic strength of <= 15% vol, with PGI (other than sparkling wine, semi-sparkling wine and white wine)(2010-2500);Wine of fresh grapes, incl. wine and grape must with fermentation arrested or interrupted by the addition of alcohol, in containers holding <= 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine, quality wines produced in specified regions and general white wine)(1995-2009)"
+  ],
+  [
+    "22042181",
+    "Varietal white wines without PDO and PGI, produced in EU, in containers holding <= 2 l and of an actual alcoholic strength of <=15% vol (other than sparkling wine and semi-sparkling wine)(2010-2500);Quality white wines produced in Tokaj \"e.g. Aszu, Szamorodni, Máslás, Fordítás\", in containers holding <= 2 l and of an actual alcoholic strength of > 13% vol to 15% vol(2005-2009);Quality white wines produced in specified regions, in containers holding <= 2 l and of an actual alcoholic strength by volume of > 13% vol to 15% vol(1995-2004)"
+  ],
+  [
+    "22042182",
+    "Varietal wines without PDO and PGI, produced in EU, in containers holding <= 2 l and of an actual alcoholic strength of <=15% vol (other than sparkling wine, semi-sparkling wine and white wine)(2010-2500);Quality white wines produced in specified regions, in containers holding <= 2 l and of an actual alcoholic strength of > 13% vol to 15% vol (other than Tokaj, sparkling wine and semi-sparkling wine)(2005-2009);Quality wines produced in specified regions, in containers holding <= 2 l and of an actual alcoholic strength by volume of > 13% vol to 15% vol (other than sparkling wine, semi-sparkling wine and general white wine)(1995-2004)"
+  ],
+  [
+    "22042183",
+    "White wines produced in EU, in containers holding <= 2 l and of an actual alcoholic strength of <=15% vol (other than sparkling wine, semi-sparkling wine and varietal wines)(2010-2500);Quality wines produced in specified regions, in containers holding <= 2 l and of an actual alcoholic strength of > 13% vol to 15% vol (other than sparkling wine, semi-sparkling wine and general white wine)(2005-2009);White wine of fresh grapes, in containers holding <= 2 l and of an actual alcoholic strength by volume of > 13% vol to 15% vol (other than sparkling wine, semi-sparkling wine and quality wines produced in specified regions)(1995-2004)"
+  ],
+  [
+    "22042184",
+    "Wines produced in EU, in containers holding <= 2 l and of an actual alcoholic strength of <=15% vol (other than sparkling wine, semi-sparkling wine, white wine and varietal wines)(2010-2500);White wine of fresh grapes, in containers holding <= 2 l and of an actual alcoholic strength of > 13% vol to 15% vol (other than sparkling wine, semi-sparkling wine and quality wines produced in specified regions)(2005-2009);Wine of fresh grapes, incl. fortified wine and grape must with fermentation arrested or interrupted by the addition of alcohol, in containers holding <= 2 l and of an actual alcoholic strength by volume of > 13% vol to 15% vol (other than sparkling wine, semi-sparkling wine, quality wines produced in specified regions and general white wine)(1995-2004)"
+  ],
+  [
+    "22042185",
+    "Madeira and Setubal muscatel, in containers holding <= 2 l and of an actual alcoholic strength of > 15% vol, with PDO or PGI(2010-2500);Wine of fresh grapes, incl. fortified wine and grape must with fermentation arrested or interrupted by the addition of alcohol, in containers holding <= 2 l and of an actual alcoholic strength of > 13% vol to 15% vol (other than sparkling wine, semi-sparkling wine, quality wines produced in specified regions and general white wine)(2005-2009)"
+  ],
+  [
+    "22042186",
+    "Sherry, in containers holding <= 2 l and of an actual alcoholic strength of > 15% vol, with PDO or PGI"
+  ],
+  [
+    "22042187",
+    "Marsala, in containers holding <= 2 l and of an actual alcoholic strength of > 15% vol, with PDO or PGI(2010-2500);Marsala, in containers holding <= 2 l and of an actual alcoholic strength of > 15% vol to 18% vol(1995-2009)"
+  ],
+  [
+    "22042188",
+    "Samos and Muscat de Lemnos, in containers holding <= 2 l and of an actual alcoholic strength of > 15% vol, with PDO or PGI(2010-2500);Samos and Muscat de Lemnos, in containers holding <= 2 l and of an actual alcoholic strength of > 15% vol to 18% vol(1995-2009)"
+  ],
+  [
+    "22042189",
+    "Port, in containers holding <= 2 l and of an actual alcoholic strength of > 15% vol, with PDO or PGI(2010-2500);Port, in containers holding <= 2 l and of an actual alcoholic strength of > 15% vol to 18% vol(1995-2009)"
+  ],
+  [
+    "22042190",
+    "Wines produced in EU, in containers holding <= 2 l and of an actual alcoholic strength of > 15% vol, with PDO or PGI (other than Port, Madeira, Sherry, Marsala, Samos, Muscat de Lemnos and Setubal muscatel)(2017-2500);Wines produced in EU, in containers holding <= 2 l and of an actual alcoholic strength of > 15% vol to 22% vol, with PDO or PGI (other than Port, Madeira, Sherry, Marsala, Samos, Muscat de Lemnos and Setubal muscatel)(2010-2016);Wine of fresh grapes, incl. fortified wines, in containers holding =< 2 l, of actual alcoholic strength of > 22 % vol (excl. sparkling wine)(1988-1994)"
+  ],
+  [
+    "22042191",
+    "Wines without PDO and PGI, produced in EU, in containers holding <= 2 l and of an actual alcoholic strength of > 15% vol(2017-2500);Wines without PDO and PGI, produced in EU, in containers holding <= 2 l and of an actual alcoholic strength of > 15% vol to 22% vol(2010-2016);Madeira and Setubal muscatel, in containers holding <= 2 l and of an actual alcoholic strength of > 15% vol to 18% vol(1995-2009)"
+  ],
+  [
+    "22042192",
+    "Wine of fresh grapes, incl. fortified wine, produced in EU, in containers holding <= 2 l and of an actual alcoholic strength of > 22% vol(2010-2016);Sherry, in containers holding <= 2 l and of an actual alcoholic strength of > 15% vol to 18% vol(1995-2009)"
+  ],
+  [
+    "22042193",
+    "White wines not produced in EU, in containers holding <= 2 l, with PDO or PGI (other than sparkling wine and semi-sparkling wine)(2010-2500);Tokay {Aszu and Szamorodni}, in containers holding <= 2 l and of an actual alcoholic strength by volume of > 15% to 18% vol(1995-2004)"
+  ],
+  [
+    "22042194",
+    "Wines not produced in EU, in containers holding <= 2 l, with PDO or PGI (other than sparkling wine, semi-sparkling wine and white wine)(2010-2500);Wine of fresh grapes, incl fortified wine, in containers holding <= 2 l and of an actual alcoholic strength of > 15% vol to 18% vol (other than sparkling wine, semi-sparkling wine and Marsala, Samos, Muskat de Limnos, Port, Madeira, Setubal muscatel and Sherry)(2005-2009);Wine of fresh grapes, incl fortified wine, in containers holding <= 2 l and of an actual alcoholic strength by volume of > 15% vol to 18% vol (other than sparkling wine, semi-sparkling wine and Marsala, Samos, Muskat de Limnos, Port, Madeira, Setubal muscatel, Sherry and Tokay {Aszu and Szamorodni})(1995-2004)"
+  ],
+  [
+    "22042195",
+    "Varietal white wines without PDO and PGI, not produced in EU, in containers holding <= 2 l (other than sparkling wine and semi-sparkling wine)(2010-2500);Port, in containers holding <= 2 l and of an actual alcoholic strength of > 18% vol to 22% vol(1995-2009)"
+  ],
+  [
+    "22042196",
+    "Varietal wines without PDO and PGI, not produced in EU, in containers holding <= 2 l (other than sparkling wine, semi-sparkling wine and white wine)(2010-2500);Madeira, Sherry and Setubal muscatel, in containers holding <= 2 l and of an actual alcoholic strength of > 18% vol to 22% vol(1995-2009)"
+  ],
+  [
+    "22042197",
+    "White wines not produced in EU, in containers holding <= 2 l (other than sparkling wine, semi-sparkling wine and varietal wines)(2010-2500);Tokay {Aszu and Szamorodni}, in containers holding <= 2 l and of an actual alcoholic strength by volume of > 18% vol to 22% vol(1995-2004)"
+  ],
+  [
+    "22042198",
+    "Wines not produced in EU, in containers holding <= 2 l (other than sparkling wine, semi-sparkling wine, white wine and varietal wines)(2010-2500);Wine of fresh grapes, incl. fortified wine, in containers holding <= 2 l and of an actual alcoholic strength of > 18% vol to 22% vol (other than Port, Madeira, Sherry and Setubal muscatel)(2005-2009);Wine of fresh grapes, incl. fortified wine, in containers holding <= 2 l and of an actual alcoholic strength by volume of > 18% vol to 22% vol (other than Port, Madeira, Sherry, Setubal muscatel and Tokay {Aszu and Szamorodni})(1995-2004)"
+  ],
+  [
+    "22042199",
+    "Wine of fresh grapes, incl. fortified wine, in containers holding <= 2 l and of an actual alcoholic strength of > 22% vol"
+  ],
+  ["220421XX", "Trade of  subheading 220421, not elsewhere specified"],
+  [
+    "220422",
+    "Wine of fresh grapes, incl. fortified wines, and grape must whose fermentation has been arrested by the addition of alcohol, in containers of > 2 l but <= 10 l (excl. sparkling wine)"
+  ],
+  [
+    "22042210",
+    "Wine of fresh grapes, incl. fortified wines, in bottles with \"mushroom\" stoppers held in place by ties or fastenings, holding > 2 l; wine otherwise put up with an excess pressure due to carbon dioxide in solution of >= 1 bar but < 3 bar measured at 20°C, in containers holding > 2 l but <= 10 l (excl. sparkling wine)"
+  ],
+  [
+    "22042222",
+    "Wines produced in Bordeaux, in containers holding > 2 l but <= 10 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine and semi-sparkling wine)"
+  ],
+  [
+    "22042223",
+    "Wines produced in Bourgogne \"Burgundy\", in containers holding > 2 l but <= 10 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine and semi-sparkling wine)"
+  ],
+  [
+    "22042224",
+    "Wines produced in Beaujolais, in containers holding > 2 l but <= 10 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine and semi-sparkling wine)"
+  ],
+  [
+    "22042226",
+    "Wines produced in Vallée du Rhône, in containers holding > 2 l but <= 10 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine and semi-sparkling wine)"
+  ],
+  [
+    "22042227",
+    "Wines produced in Languedoc-Roussillon, in containers holding > 2 l but <= 10 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine and semi-sparkling wine)"
+  ],
+  [
+    "22042228",
+    "Wines produced in Val de Loire \"Loire Valley\", in containers holding > 2 l but <= 10 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine and semi-sparkling wine)"
+  ],
+  [
+    "22042232",
+    "Wines produced in Piemonte \"Piedmont\", in containers holding > 2 l but <= 10 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine and semi-sparkling wine)"
+  ],
+  [
+    "22042233",
+    "Wines produced in Tokaj, in containers holding > 2 l but <= 10 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine and semi-sparkling wine)"
+  ],
+  [
+    "22042238",
+    "White wines produced in EU, in containers holding > 2 l but <= 10 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than Bordeaux, Bourgogne, Beaujolais, Vallée du Rhône, Languedoc-Roussillon, Val de Loire, Piemonte, Tokaj, sparkling wine and semi-sparkling wine)"
+  ],
+  [
+    "22042278",
+    "Wines produced in EU, in containers holding > 2 l but <= 10 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than Bordeaux, Bourgogne, Beaujolais, Vallée du Rhône, Languedoc-Roussillon, Val de Loire, Piemonte, Tokaj, sparkling wine, semi-sparkling wine and white wine)"
+  ],
+  [
+    "22042279",
+    "White wine of fresh grapes, produced in EU, in containers holding > 2 l but <= 10 l and of an actual alcoholic strength of <= 15% vol, with PGI (other than sparkling wine and semi-sparkling wine)"
+  ],
+  [
+    "22042280",
+    "Wines of fresh grapes, produced in EU, in containers holding > 2 l but <= 10 l and of an actual alcoholic strength of <= 15% vol, with PGI (other than sparkling wine, semi-sparkling wine and white wine)"
+  ],
+  [
+    "22042281",
+    "Varietal white wines without PDO and PGI, produced in EU, in containers holding > 2 l but <= 10 l and of an actual alcoholic strength of <=15% vol (other than sparkling wine and semi-sparkling wine)"
+  ],
+  [
+    "22042282",
+    "Varietal wines without PDO and PGI, produced in EU, in containers holding > 2 l but <= 10 l and of an actual alcoholic strength of <=15% vol (other than sparkling wine, semi-sparkling wine and white wine)"
+  ],
+  [
+    "22042283",
+    "White wines produced in EU, in containers holding > 2 l but <= 10 l and of an actual alcoholic strength of <=15% vol (other than sparkling wine, semi-sparkling wine and varietal wines)"
+  ],
+  [
+    "22042284",
+    "Wines produced in EU, in containers holding > 2 l but <= 10 l and of an actual alcoholic strength of <=15% vol (other than sparkling wine, semi-sparkling wine, white wine and varietal wines)"
+  ],
+  [
+    "22042285",
+    "Madeira and Setubal muscatel, in containers holding > 2 l but <= 10 l and of an actual alcoholic strength of > 15% vol, with PDO or PGI"
+  ],
+  [
+    "22042286",
+    "Sherry, in containers holding > 2 l but <= 10 l and of an actual alcoholic strength of  > 15% vol, with PDO or PGI"
+  ],
+  [
+    "22042288",
+    "Samos and Muscat de Lemnos, in containers holding > 2 l but <= 10 l and of an actual alcoholic strength of > 15% vol, with PDO or PGI"
+  ],
+  [
+    "22042290",
+    "Wines produced in EU, in containers holding > 2 l but <= 10 l and of an actual alcoholic strength of  > 15% vol, with PDO or PGI (other than Madeira, Sherry, Samos, Muscat de Lemnos and Setubal muscatel)"
+  ],
+  [
+    "22042291",
+    "Wines without PDO and PGI, produced in EU, in containers holding > 2 l but <= 10 l and of an actual alcoholic strength of > 15% vol"
+  ],
+  [
+    "22042293",
+    "White wines not produced in EU, in containers holding > 2 l but <= 10 l, with PDO or PGI (other than sparkling wine and semi-sparkling wine)"
+  ],
+  [
+    "22042294",
+    "Wines not produced in EU, in containers holding > 2 l but <= 10 l, with PDO or PGI (other than sparkling wine, semi-sparkling wine and white wine)"
+  ],
+  [
+    "22042295",
+    "Varietal white wines without PDO and PGI, not produced in EU, in containers holding > 2 l but <= 10 l (other than sparkling wine and semi-sparkling wine)"
+  ],
+  [
+    "22042296",
+    "Varietal wines without PDO and PGI, not produced in EU, in containers holding > 2 l but <= 10 l (other than sparkling wine, semi-sparkling wine and white wine)"
+  ],
+  [
+    "22042297",
+    "White wines not produced in EU, in containers holding > 2 l but <= 10 l (other than sparkling wine, semi-sparkling wine and varietal wines)"
+  ],
+  [
+    "22042298",
+    "Wines not produced in EU, in containers holding > 2 l but <= 10 l (other than sparkling wine, semi-sparkling wine, white wine and varietal wines)"
+  ],
+  ["220422XX", "Trade of  subheading 220422, not elsewhere specified"],
+  [
+    "220429",
+    "Wine of fresh grapes, incl. fortified wines, and grape must whose fermentation has been arrested by the addition of alcohol, in containers of > 10 l (excl. sparkling wine)"
+  ],
+  [
+    "22042910",
+    "Wine of fresh grapes, incl. fortified wines, in bottles with \"mushroom\" stoppers held in place by ties or fastenings, holding > 2 l; wine otherwise put up with an excess pressure due to carbon dioxide in solution of >= 1 bar but < 3 bar measured at 20°C, in containers holding > 10 l (excl. sparkling wine)(2017-2500);Wine of fresh grapes, incl. fortified wines, in bottles with \"mushroom\" stoppers held in place by ties or fastenings, holding > 2 l; wine otherwise put up with an excess pressure due to carbon dioxide in solution of >= 1 bar but < 3 bar measured at 20°C, in containers holding > 2 l (excl. sparkling wine)(1988-2016)"
+  ],
+  [
+    "22042911",
+    "White wines produced in Tokaj \"e.g. Aszu, Szamorodni, Máslás, Fordítás\", in containers holding > 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (excl. sparkling wine and semi-sparkling wine)(2010-2016);Quality white wines produced in Tokaj \"e.g. Aszu, Szamorodni, Máslás, Fordítás\", in containers holding > 2 l and of an actual alcoholic strength of <= 13% vol (excl. sparkling wine and semi-sparkling wine)(2005-2009)"
+  ],
+  [
+    "22042912",
+    "White wines produced in Bordeaux, in containers holding > 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine and semi-sparkling wine)(2010-2016);Quality white wines produced in Bordeaux, in containers holding > 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine and semi-sparkling wine)(1995-2009)"
+  ],
+  [
+    "22042913",
+    "Quality white wines produced in Bourgogne (Burgundy), in containers holding > 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine and semi-sparkling wine)(2010-2016);Quality white wines produced in Burgundy, in containers holding > 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine and semi-sparkling wine)(1995-2009)"
+  ],
+  [
+    "22042917",
+    "White wines produced in Val de Loire, in containers holding > 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine and semi-sparkling wine)(2010-2016);Quality white wines produced in Val de Loire, in containers holding > 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine and semi-sparkling wine)(1995-2009)"
+  ],
+  [
+    "22042918",
+    "White wines produced in EU, in containers holding > 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than Tokaj, Bordeaux, Bourgogne, Val de Loire, sparkling wine and semi-sparkling wine)(2010-2016);Quality white wines produced in specified regions, in containers holding > 2 l and of an actual alcoholic strength of <= 13% vol (other than Tokaj, Bordeaux, Burgundy, Val de Loire, sparkling wine and semi-sparkling wine)(1995-2009)"
+  ],
+  [
+    "22042921",
+    "Quality white wine produced in specified regions, in containers holding > 2 l, of actual alcoholic strength of =< 13 % vol"
+  ],
+  [
+    "22042922",
+    "Wines produced in Bordeaux, in containers holding > 10 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine and semi-sparkling wine)"
+  ],
+  [
+    "22042923",
+    "Wines produced in Bourgogne \"Burgundy\", in containers holding > 10 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine and semi-sparkling wine)(2017-2500);Quality wine produced in specified regions, in containers holding > 2 l, of actual alcoholic strength of =< 13 % vol (excl. white)(1988-1994)"
+  ],
+  [
+    "22042924",
+    "Wines produced in Beaujolais, in containers holding > 10 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine and semi-sparkling wine)"
+  ],
+  [
+    "22042925",
+    "White wine of fresh grapes, in containers holding > 2 l, of actual alcoholic strength of =< 13 % vol (excl. quality wine produced in specified regions)"
+  ],
+  [
+    "22042926",
+    "Wines produced in Vallée du Rhône, in containers holding > 10 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine and semi-sparkling wine)"
+  ],
+  [
+    "22042927",
+    "Wines produced in Languedoc-Roussillon, in containers holding > 10 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine and semi-sparkling wine)"
+  ],
+  [
+    "22042928",
+    "Wines produced in Val de Loire \"Loire Valley\", in containers holding > 10 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine and semi-sparkling wine)"
+  ],
+  [
+    "22042929",
+    "Wine of fresh grapes, incl. fortified wines, and grape must whose fermentation has been arrested by the addition of alcohol, in containers of > 2 l, of actual alcoholic strength of =< 13 % vol (excl. sparkling wine, quality wine produced in specified regions and white wine in general)"
+  ],
+  [
+    "22042931",
+    "Quality white wine from specified regions, in containers holding > 2 l, of actual alcoholic strength of > 13 % but =< 15 % vol"
+  ],
+  [
+    "22042932",
+    "Wines produced in Piemonte \"Piedmont\", in containers holding > 10 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine and semi-sparkling wine)"
+  ],
+  [
+    "22042933",
+    "Quality wine from specified regions, in containers holding > 2 l, of actual alcoholic strength of > 13 % but =< 15 % vol (excl. white)"
+  ],
+  [
+    "22042935",
+    "White wine from fresh grapes, in containers holding > 2 l, of actual alcoholic strength of > 13 % but =< 15 % vol (excl. quality wine from specified regions)"
+  ],
+  [
+    "22042938",
+    "White wines produced in EU, in containers holding > 10 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than Bordeaux, Bourgogne, Beaujolais, Vallée du Rhône, Languedoc-Roussillon, Val de Loire, Piemonte, sparkling wine and semi-sparkling wine)"
+  ],
+  [
+    "22042939",
+    "Wine of fresh grapes, incl. fortified wines, and grape must whose fermentation has been arrested by the addition of alcohol, in containers of > 2 l, of actual alcoholic strength of > 13 % but =< 15 % vol (excl. sparkling wine, quality wine produced in specified regions and white wine in general)"
+  ],
+  [
+    "22042941",
+    "Port, madeira, sherry and setubal muscatel, of actual alcoholic strength of > 15 % but =< 18 % vol, in containers holding > 2 l"
+  ],
+  [
+    "22042942",
+    "Wines produced in Bordeaux, in containers holding > 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine, semi-sparkling wine and white wine)(2010-2016);Quality wines produced in Bordeaux, in containers holding > 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine and general white wine)(1995-2009)"
+  ],
+  [
+    "22042943",
+    "Wines produced in Bourgogne (Burgundy), in containers holding > 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine, semi-sparkling wine and white wine)(2010-2016);Quality wines produced in Burgundy, in containers holding > 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine and general white wine)(1995-2009)"
+  ],
+  [
+    "22042944",
+    "Wines produced in Beaujolais, in containers holding > 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine, semi-sparkling wine and white wine)(2010-2016);Quality wines produced in Beaujolais, in containers holding > 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine and general white wine)(1995-2009)"
+  ],
+  [
+    "22042945",
+    "Tokay, of actual alcoholic strength of > 15 % but =< 18 % vol, in containers holding > 2 l"
+  ],
+  [
+    "22042946",
+    "Wines produced in Vallée du Rhône, in containers holding > 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine, semi-sparkling wine and white wine)(2015-2016);Wines produced in Côtes-du-Rhône, in containers holding > 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine, semi-sparkling wine and white wine)(2010-2014);Quality wines produced in Côtes-du-Rhône, in containers holding > 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine and general white wine)(1995-2009)"
+  ],
+  [
+    "22042947",
+    "Wines produced in Languedoc-Roussillon, in containers holding > 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine, semi-sparkling wine and white wine)(2010-2016);Quality wines produced in Languedoc-Roussillon, in containers holding > 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine and general white wine)(1995-2009)"
+  ],
+  [
+    "22042948",
+    "Wines produced in Val de Loire, in containers holding > 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than sparkling wine, semi-sparkling wine and white wine)(2010-2016);Quality wines produced in Val de Loire, in containers holding > 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine and general white wine)(1995-2009)"
+  ],
+  [
+    "22042949",
+    "Wine of fresh grapes, incl. fortified wines, in containers holding > 2 l, of actual alcoholic strength of > 15 % but =< 18 % vol (excl. sparkling wine, quality wine produced in specified regions, white wine in general, port, madeira, sherry, tokay and setubal muscatel)"
+  ],
+  [
+    "22042951",
+    "Port, madeira, sherry and setubal muscatel, of actual alcoholic strength of > 18 % but =< 22 % vol, in containers holding > 2 l"
+  ],
+  [
+    "22042955",
+    "Tokay, of actual alcoholic strength of > 18 % but =< 22 % vol, in containers holding > 2 l"
+  ],
+  [
+    "22042958",
+    "Wines produced in EU, in containers holding > 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than Bordeaux, Bourgogne, Beaujolais, Vallée du Rhône, Languedoc-Roussillon, Val de Loire, sparkling wine, semi-sparkling wine and white wine)(2015-2016);Wines produced in the Community, in containers holding > 2 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than Bordeaux, Bourgogne, Beaujolais, Côtes-du-Rhône, Languedoc-Roussillon, Val de Loire, sparkling wine, semi-sparkling wine and white wine)(2010-2014);Quality wines produced in specified regions, in containers holding > 2 l and of an actual alcoholic strength of <= 13% vol (other than Bordeaux, Burgundy, Beaujolais, Côtes-du-Rhône, Languedoc-Roussillon, Val de Loire, and sparkling wine, semi-sparkling wine and general white wine)(1995-2009)"
+  ],
+  [
+    "22042959",
+    "Wine of fresh grapes, incl. fortified wines, in containers holding > 2 l, of actual alcoholic strength of > 18 % but =< 22 % vol (excl. sparkling wine, quality wine produced in specified regions, white wine in general, port, madeira, sherry, tokay and setubal muscatel)"
+  ],
+  [
+    "22042962",
+    "White wine produced in Sicily, in containers holding > 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine and quality wines produced in specified regions)"
+  ],
+  [
+    "22042964",
+    "White wine produced in Veneto, in containers holding > 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine and quality wines produced in specified regions)"
+  ],
+  [
+    "22042965",
+    "White wine of fresh grapes, in containers holding > 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine, quality wines produced in specified regions and wines produced in Sicily and Veneto)(2005-2009);White wine of fresh grapes, in containers holding > 2 l and of an actual alcoholic strength by volume of <= 13% vol (other than sparkling wine, semi-sparkling wine, quality wines produced in specified regions and wines produced in Sicily and Veneto)(1995-2004)"
+  ],
+  [
+    "22042971",
+    "Wines produced in Puglia {Apulia}, in containers holding > 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine, quality wines produced in specified regions and general white wine)"
+  ],
+  [
+    "22042972",
+    "Wines produced in Sicily, in containers holding > 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine, quality wines produced in specified regions and general white wine)"
+  ],
+  [
+    "22042975",
+    "Wine of fresh grapes, incl. fortified wine and grape must, with fermentation arrested or interrupted by the addition of alcohol, in containers holding > 2 l and of an actual alcoholic strength of <= 13% vol (other than sparkling wine, semi-sparkling wine, wines produced in Puglia and Sicily, quality wines produced in specified regions and general white wine)"
+  ],
+  [
+    "22042977",
+    "Quality white wines produced in Tokaj \"e.g. Aszu, Szamorodni, Máslás, Fordítás\", in containers holding > 2 l and of an actual alcoholic strength of > 13% vol to 15% vol"
+  ],
+  [
+    "22042978",
+    "Wines produced in EU, in containers holding > 10 l and of an actual alcoholic strength of <= 15% vol, with PDO (other than Bordeaux, Bourgogne, Beaujolais, Vallée du Rhône, Languedoc-Roussillon, Val de Loire, Piemonte, sparkling wine, semi-sparkling wine and white wine)(2017-2500);Quality white wines produced in specified regions, in containers holding > 2 l and of an actual alcoholic strength of > 13% vol to 15% vol (other than Tokaj, sparkling wine and semi-sparkling wine)(2005-2009)"
+  ],
+  [
+    "22042979",
+    "White wine of fresh grapes, produced in EU, in containers holding > 10 l and of an actual alcoholic strength of <= 15% vol, with PGI (other than sparkling wine and semi-sparkling wine)(2017-2500);White wine of fresh grapes, produced in EU, in containers holding > 2 l and of an actual alcoholic strength of <= 15% vol, with PGI (other than sparkling wine and semi-sparkling wine)(2010-2016)"
+  ],
+  [
+    "22042980",
+    "Wines of fresh grapes, produced in EU, in containers holding > 10 l and of an actual alcoholic strength of <= 15% vol, with PGI (other than sparkling wine, semi-sparkling wine and white wine)(2017-2500);Wines of fresh grapes, produced in EU, in containers holding > 2 l and of an actual alcoholic strength of <= 15% vol, with PGI (other than sparkling wine, semi-sparkling wine and white wine)(2010-2016)"
+  ],
+  [
+    "22042981",
+    "Varietal white wines without PDO and PGI, produced in EU, in containers holding > 10 l and of an actual alcoholic strength of <=15% vol (other than sparkling wine and semi-sparkling wine)(2017-2500);Varietal white wines without PDO and PGI, produced in EU, in containers holding > 2 l and of an actual alcoholic strength of <=15% vol (other than sparkling wine and semi-sparkling wine)(2010-2016);Quality white wines produced in specified regions, in containers holding > 2 l and of an actual alcoholic strength by volume of > 13% vol to 15% vol (other than sparkling wine and semi-sparkling wine)(1995-2004)"
+  ],
+  [
+    "22042982",
+    "Varietal wines without PDO and PGI, produced in EU, in containers holding > 10 l and of an actual alcoholic strength of <=15% vol (other than sparkling wine, semi-sparkling wine and white wine)(2017-2500);Varietal wines without PDO and PGI, produced in EU, in containers holding > 2 l and of an actual alcoholic strength of <=15% vol (other than sparkling wine, semi-sparkling wine and white wine)(2010-2016);Quality wines produced in specified regions, in containers holding > 2 l and of an actual alcoholic strength of > 13% vol to 15% vol (other than sparkling wine, semi-sparkling wine and general white wine)(1995-2009)"
+  ],
+  [
+    "22042983",
+    "White wines produced in EU, in containers holding > 10 l and of an actual alcoholic strength of <=15% vol (other than sparkling wine, semi-sparkling wine and varietal wines)(2017-2500);White wines produced in EU, in containers holding > 2 l and of an actual alcoholic strength of <=15% vol (other than sparkling wine, semi-sparkling wine and varietal wines)(2010-2016);White wine of fresh grapes, in containers holding > 2 l and of an actual alcoholic strength of > 13% vol to 15% vol (other than quality wines produced in specified regions)(2005-2009);White wine of fresh grapes, in containers holding > 2 l and of an actual alcoholic strength by volume of > 13% vol to 15% vol (other than quality wines produced in specified regions)(1995-2004)"
+  ],
+  [
+    "22042984",
+    "Wines produced in EU, in containers holding > 10 l and of an actual alcoholic strength of <=15% vol (other than sparkling wine, semi-sparkling wine, white wine and varietal wines)(2017-2500);Wines produced in EU, in containers holding > 2 l and of an actual alcoholic strength of <=15% vol (other than sparkling wine, semi-sparkling wine, white wine and varietal wines)(2010-2016);Wine of fresh grapes, incl. fortified wine and grape must with fermentation arrested or interrupted by the addition of alcohol, in containers holding > 2 l and of an actual alcoholic strength of > 13% vol to 15% vol (other than sparkling wine, semi-sparkling wine, quality wines produced in specified regions and general white wine)(1995-2009)"
+  ],
+  [
+    "22042985",
+    "Madeira and Setubal muscatel, in containers holding > 10 l and of an actual alcoholic strength of > 15% vol, with PDO or PGI(2017-2500);Madeira and Setubal muscatel, in containers holding > 2 l and of an actual alcoholic strength of > 15% vol to 22% vol, with PDO or PGI(2010-2016)"
+  ],
+  [
+    "22042986",
+    "Sherry, in containers holding > 10 l and of an actual alcoholic strength of  > 15% vol, with PDO or PGI(2017-2500);Sherry, in containers holding > 2 l and of an actual alcoholic strength of  > 15% vol to 22% vol, with PDO or PGI(2010-2016)"
+  ],
+  [
+    "22042987",
+    "Marsala, in containers holding > 2 l and of an actual alcoholic strength of > 15% vol to 22% vol, with PDO or PGI(2010-2016);Marsala, in containers holding > 2 l and of an actual alcoholic strength of > 15% vol to 18% vol(1995-2009)"
+  ],
+  [
+    "22042988",
+    "Samos and Muscat de Lemnos, in containers holding > 10 l and of an actual alcoholic strength of > 15% vol, with PDO or PGI(2017-2500);Samos and Muscat de Lemnos, in containers holding > 2 l and of an actual alcoholic strength of > 15% vol to 22% vol, with PDO or PGI(2010-2016);Samos and Muscat de Lemnos, in containers holding > 2 l and of an actual alcoholic strength of > 15% vol to 18% vol(1995-2009)"
+  ],
+  [
+    "22042989",
+    "Port, in containers holding > 2 l and of an actual alcoholic strength of > 15% vol to 22% vol, with PDO or PGI(2010-2016);Port, in containers holding > 2 l and of an actual alcoholic strength of > 15% vol to 18% vol(1995-2009)"
+  ],
+  [
+    "22042990",
+    "Wines produced in EU, in containers holding > 10 l and of an actual alcoholic strength of  > 15% vol, with PDO or PGI (other than Madeira, Sherry, Samos, Muscat de Lemnos and Setubal muscatel)(2017-2500);Wines produced in EU, in containers holding > 2 l and of an actual alcoholic strength of  > 15% vol to 22% vol, with PDO or PGI (other than Port, Madeira, Sherry, Marsala, Samos, Muscat de Lemnos and Setubal muscatel)(2010-2016);Wine of fresh grapes, incl. fortified wines, in containers holding > 2 l, of actual alcoholic strength of > 22 % vol (excl. sparkling wine)(1988-1994)"
+  ],
+  [
+    "22042991",
+    "Wines without PDO and PGI, produced in EU, in containers holding > 10 l and of an actual alcoholic strength of > 15% vol(2017-2500);Wines without PDO and PGI, produced in EU, in containers holding > 2 l and of an actual alcoholic strength of > 15% vol to 22% vol(2010-2016);Madeira and Setubal muscatel, in containers holding > 2 l and of an actual alcoholic strength of > 15% vol to 18% vol(1995-2009)"
+  ],
+  [
+    "22042992",
+    "Wine of fresh grapes, incl. fortified wine, produced in EU, in containers holding > 2 l and of an actual alcoholic strength of > 22% vol(2010-2016);Sherry, in containers holding > 2 l and of an actual alcoholic strength of > 15% vol to 18% vol(1995-2009)"
+  ],
+  [
+    "22042993",
+    "White wines not produced in EU, in containers holding > 10 l, with PDO or PGI (other than sparkling wine and semi-sparkling wine)(2017-2500);White wines not produced in EU, in containers holding > 2 l, with PDO or PGI (other than sparkling wine and semi-sparkling wine)(2010-2016);Tokay {Aszu and Szamorodni}, in containers holding > 2 l and of an actual alcoholic strength by volume of > 15% vol to 18% vol(1995-2004)"
+  ],
+  [
+    "22042994",
+    "Wines not produced in EU, in containers holding > 10 l, with PDO or PGI (other than sparkling wine, semi-sparkling wine and white wine)(2017-2500);Wines not produced in EU, in containers holding > 2 l, with PDO or PGI (other than sparkling wine, semi-sparkling wine and white wine)(2010-2016);Wine of fresh grapes, incl. fortified wine, in containers holding > 2 l and of an actual alcoholic strength of > 15% vol to 18% vol (other than sparkling wine, semi-sparkling wine, quality wines produced in specified regions and general white wine, Marsala, Samos, Muscat de Lemnos, Port, Madeira, Setubal muscatel and Sherry)(2005-2009);Wine of fresh grapes, incl. fortified wine, in containers holding > 2 l and of an actual alcoholic strength by volume of > 15% vol to 18% vol (other than sparkling wine, semi-sparkling wine, quality wines produced in specified regions and general white wine, Marsala, Samos, Muscat de Lemnos, Port, Madeira, Setubal muscatel, Sherry and Tokay {Aszu and Szamorodni})(1995-2004)"
+  ],
+  [
+    "22042995",
+    "Varietal white wines without PDO and PGI, not produced in EU, in containers holding > 10 l (other than sparkling wine and semi-sparkling wine)(2017-2500);Varietal white wines without PDO and PGI, not produced in EU, in containers holding > 2 l (other than sparkling wine and semi-sparkling wine)(2010-2016);Port, in containers holding > 2 l and of an actual alcoholic strength of > 18% vol to 22% vol(1995-2009)"
+  ],
+  [
+    "22042996",
+    "Varietal wines without PDO and PGI, not produced in EU, in containers holding > 10 l (other than sparkling wine, semi-sparkling wine and white wine)(2017-2500);Varietal wines without PDO and PGI, not produced in EU, in containers holding > 2 l (other than sparkling wine, semi-sparkling wine and white wine)(2010-2016);Madeira, Sherry and Setubal muscatel, in containers holding > 2 l and of an actual alcoholic strength of > 18% vol to 22% vol(1995-2009)"
+  ],
+  [
+    "22042997",
+    "White wines not produced in EU, in containers holding > 10 l (other than sparkling wine, semi-sparkling wine and varietal wines)(2017-2500);White wines not produced in EU, in containers holding > 2 l (other than sparkling wine, semi-sparkling wine and varietal wines)(2010-2016);Tokay {Aszu and Szamorodni}, in containers holding > 2 l and of an actual alcoholic strength by volume of > 18% vol to 22% vol(1995-2004)"
+  ],
+  [
+    "22042998",
+    "Wines not produced in EU, in containers holding > 10 l (other than sparkling wine, semi-sparkling wine, white wine and varietal wines)(2017-2500);Wines not produced in EU, in containers holding > 2 l (other than sparkling wine, semi-sparkling wine, white wine and varietal wines)(2010-2016);Wine of fresh grapes, incl. fortified wine, in containers holding > 2 l and of an actual alcoholic strength of > 18% vol to 22% vol (other than Port, Madeira, Sherry and Setubal muscatel)(2005-2009);Wine of fresh grapes, incl. fortified wine, in containers holding > 2 l and of an actual alcoholic strength by volume of > 18% vol to 22% vol (other than Port, Madeira, Sherry, Setubal muscatel and Tokay {Aszu and Szamorodni})(1995-2004)"
+  ],
+  [
+    "22042999",
+    "Wine of fresh grapes, incl. fortified wine, in containers holding > 2 l and of an actual alcoholic strength of > 22% vol"
+  ],
+  ["220429XX", "Trade of  subheading 220429, not elsewhere specified"],
+  [
+    "220430",
+    "Grape must, of an actual alcoholic strength of > 0,5% vol (excl. grape must whose fermentation has been arrested by the addition of alcohol)"
+  ],
+  [
+    "22043010",
+    "Grape must, arrested otherwise than by addition of alcohol, of an actual alcoholic strength of > 1% vol (excl. grape must whose fermentation has been arrested by the addition of alcohol)"
+  ],
+  [
+    "22043091",
+    "Grape must, partly fermented, density of =< 1.33 g/cm³, of an actual alcoholic strength of > 0.5 % but =< 1 % vol (excl. grape must whose fermentation has been arrested by the addition of alcohol)"
+  ],
+  [
+    "22043092",
+    "Grape must, unfermented, concentrated within the meaning of Additional Note 7 to chapter 22, of a density <= 1,33 g/cm³ at 20°C and of an actual alcoholic strength <= 1% vol but > 0,5% vol (excl. grape must whose fermentation has been arrested by the addition of alcohol)"
+  ],
+  [
+    "22043094",
+    "Grape must, unfermented, non-concentrated, of a density <= 1,33 g/cm³ at 20°C and of an actual alcoholic strength <= 1% vol but > 0,5% vol (excl. grape must whose fermentation has been arrested by the addition of alcohol)"
+  ],
+  [
+    "22043096",
+    "Grape must, unfermented, concentrated within the meaning of Additional Note 7 to chapter 22, of a density > 1,33 g/cm³ at 20°C and of an actual alcoholic strength <= 1% vol but > 0,5% vol (excl. grape must whose fermentation has been arrested by the addition of alcohol)"
+  ],
+  [
+    "22043098",
+    "Grape must, unfermented, non-concentrated, of a density > 1,33 g/cm³ at 20°C and of an actual alcoholic strength <= 1% vol but > 0,5% vol (excl. grape must whose fermentation has been arrested by the addition of alcohol)"
+  ],
+  [
+    "22043099",
+    "Grape must, partly fermented, density of > 1.33 g/cm³, of an actual alcoholic strength of > 0.5 % but =< 1 % vol (excl. grape must whose fermentation has been arrested by the addition of alcohol)"
+  ],
+  ["220430XX", "Trade of  subheading 220430, not elsewhere specified"],
+  ["2204XX", "Trade of heading 2204, not elsewhere specified"],
+  ["2204XXXX", "Trade of heading 2204, not elsewhere specified"],
+  ["2205", "Vermouth and other wine of fresh grapes, flavoured with plants or aromatic substances"],
+  [
+    "220510",
+    "Vermouth and other wine of fresh grapes, flavoured with plants or aromatic substances, in containers of <= 2 l"
+  ],
+  [
+    "22051010",
+    "Vermouth and other wine of fresh grapes, flavoured with plants or aromatic substances, in containers holding <= 2 l, of actual alcoholic strength of <= 18% vol"
+  ],
+  [
+    "22051090",
+    "Vermouth and other wine of fresh grapes, flavoured with plants or aromatic substances, in containers holding <= 2 l, of actual alcoholic strength of > 18% vol"
+  ],
+  ["220510XX", "Trade of  subheading 220510, not elsewhere specified"],
+  [
+    "220590",
+    "Vermouth and other wine of fresh grapes, flavoured with plants or aromatic substances, in containers of > 2 l"
+  ],
+  [
+    "22059010",
+    "Vermouth and other wine of fresh grapes, flavoured with plants or aromatic substances, in containers holding > 2 l, of actual alcoholic strength of <= 18% vol"
+  ],
+  [
+    "22059090",
+    "Vermouth and other wine of fresh grapes, flavoured with plants or aromatic substances, in containers holding > 2 l, of actual alcoholic strength of > 18% vol"
+  ],
+  ["220590XX", "Trade of  subheading 220590, not elsewhere specified"],
+  ["2205XX", "Trade of heading 2205, not elsewhere specified"],
+  ["2205XXXX", "Trade of heading 2205, not elsewhere specified"],
+  [
+    "2206",
+    "Cider, perry, mead, saké and other fermented beverages and mixtures of fermented beverages and non-alcoholic beverages, n.e.s. (excl. beer, wine or fresh grapes, grape must, vermouth and other wine of fresh grapes flavoured with plants or aromatic substances)"
+  ],
+  [
+    "220600",
+    "Cider, perry, mead, saké and other fermented beverages and mixtures of fermented beverages and non-alcoholic beverages, n.e.s. (excl. beer, wine or fresh grapes, grape must, vermouth and other wine of fresh grapes flavoured with plants or aromatic substances)"
+  ],
+  ["22060010", "Piquette, obtained by grape marc"],
+  ["22060031", "Cider and perry, sparkling"],
+  [
+    "22060039",
+    "Mead and other fermented beverages and mixtures of fermented beverages and mixtures of fermented beverages with non-alcoholic beverages, sparkling, n.e.s."
+  ],
+  ["22060051", "Cider and perry, not sparkling, in containers holding <= 2 l"],
+  [
+    "22060059",
+    "Mead and other fermented beverages and mixtures of fermented beverages and mixtures of fermented beverages with non-alcoholic beverages, not sparkling, in containers holding <= 2 l, n.e.s. (excl. wine of fresh grapes, grape must, vermouth and other wine of fresh grapes, with plants or aromatic substances, piquette, cider and perry)"
+  ],
+  ["22060081", "Cider and perry, not sparkling, in containers holding > 2 l"],
+  [
+    "22060089",
+    "Mead and other fermented beverages and mixtures of fermented beverages and mixtures of fermented beverages with non-alcoholic beverages, not sparkling, in containers holding > 2 l, n.e.s. (excl. wine of fresh grapes, grape must, vermouth and other wine of fresh grapes, with plants or aromatic substances, piquette, cider and perry)"
+  ],
+  [
+    "85021340",
+    "Generating sets with compression-ignition internal combustion piston engine \"diesel or semi-diesel engine\" of an output > 750 kVA but <= 2.000 kVA"
+  ],
+  [
+    "85021380",
+    "Generating sets with compression-ignition internal combustion piston engine \"diesel or semi-diesel engine\" of an output > 2.000 kVA"
+  ],
+  [
+    "85021391",
+    "Generating sets with compression-ignition internal combustion piston engine \"diesel or semi-diesel engines\" of an output > 375 kVA but <= 750 kVA (excl. those for civil aircraft of subheading 8502.13.10)"
+  ],
+  [
+    "85021393",
+    "Generating sets with compression-ignition internal combustion piston engine \"diesel or semi-diesel engines\" of an output > 750 kVA but <= 2 000 kVA (excl. those for civil aircraft of subheading 8502.13.10)"
+  ],
+  [
+    "85021398",
+    "Generating sets with compression-ignition internal combustion piston engine \"diesel or semi-diesel engines\" of an output > 2 000 kVA (excl. those for civil aircraft of subheading 8502.13.10)"
+  ],
+  [
+    "85021399",
+    "Generating sets with compression-ignition internal combustion piston engines -diesel or semi-diesel engines- of an output > 750 kVA (excl. those for civil aircraft of subheading 8502.13.10)"
+  ],
+  ["850213XX", "Trade of  subheading 850213, not elsewhere specified"],
+  ["850220", "Generating sets with spark-ignition internal combustion piston engine"],
+  [
+    "85022010",
+    "Generating sets with spark-ignition internal combustion piston engine, for civil aircraft"
+  ],
+  [
+    "85022020",
+    "Generating sets with spark-ignition internal combustion piston engine, of an output <= 7,5 kVA"
+  ],
+  [
+    "85022040",
+    "Generating sets with spark-ignition internal combustion piston engine, of an output > 7,5 kVA but <= 375 kVA"
+  ],
+  [
+    "85022060",
+    "Generating sets with spark-ignition internal combustion piston engine, of an output > 375 kVA but <= 750 kVA"
+  ],
+  [
+    "85022080",
+    "Generating sets with spark-ignition internal combustion piston engine, of an output > 750 kVA"
+  ],
+  [
+    "85022091",
+    "Generating sets with spark-ignition internal combustion piston engine, of an output <= 7,5 kVA (excl. those for civil aircraft of subheading 8502.20.10)"
+  ],
+  [
+    "85022092",
+    "Generating sets with spark-ignition internal combustion piston engine, of an output > 7,5 kVA but <= 375 kVA (excl. those for civil aircraft of subheading 8502.20.10)"
+  ],
+  [
+    "85022094",
+    "Generating sets with spark-ignition internal combustion piston engine, of an output > 375 kVA but <= 750 kVA (excl. those for civil aircraft of subheading 8502.20.10)"
+  ],
+  [
+    "85022098",
+    "Generating sets with spark-ignition internal combustion piston engine, of an output > 750 kVA (excl. those for civil aircraft of subheading 8502.20.10)"
+  ],
+  [
+    "85022099",
+    "Generating sets with spark-ignition internal combustion piston engines, of an output > 7,5 kVA (excl. those for civil aircraft of subheading 8502.20.10)"
+  ],
+  ["850220XX", "Trade of  subheading 850220, not elsewhere specified"],
+  [
+    "850230",
+    "Generating sets powered other than with spark-ignition internal combustion piston engines"
+  ],
+  [
+    "85023010",
+    "Generating sets powered other than with spark-ignition internal combustion piston engines, for civil aircraft"
+  ]
+]

@@ -14,6 +14,7 @@ import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mc
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as serverConfig from '@/config/server-config.js';
 import { eurostatDownloadDataset } from '@/mcp-server/tools/definitions/eurostat-download-dataset.tool.js';
+import { eurostatQueryDataset } from '@/mcp-server/tools/definitions/eurostat-query-dataset.tool.js';
 import { setCanvas } from '@/services/canvas-accessor.js';
 import { withRealCanvas } from '../helpers/real-canvas.js';
 
@@ -623,6 +624,68 @@ describe('eurostatDownloadDataset — error contract', () => {
     });
   }
 
+  it('maps a download past its bulk deadline onto the declared Timeout with its timings and a narrowing hint', async () => {
+    vi.mocked(getEurostatBulkService).mockReturnValue({
+      startDownload: vi.fn().mockRejectedValue(
+        new McpError(
+          JsonRpcErrorCode.Timeout,
+          'The bulk download exceeded its 120000ms operation deadline.',
+          {
+            reason: 'retry_deadline_exceeded',
+            deadlineMs: 120_000,
+            elapsedMs: 120_412,
+          },
+        ),
+      ),
+    } as never);
+    const result = await runToolContract(eurostatDownloadDataset, { dataset_code: 'nama_10_gdp' });
+
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.Timeout,
+        data: {
+          reason: 'retry_deadline_exceeded',
+          deadlineMs: 120_000,
+          elapsedMs: 120_412,
+          recovery: { hint: expect.stringContaining('"nama_10_gdp"') },
+        },
+      },
+    });
+    const hint = (result.structuredContent as { error: { data: { recovery: { hint: string } } } })
+      .error.data.recovery.hint;
+    expect(hint).toContain('since_period/until_period');
+    const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+    expect(text).toContain(`Recovery: ${hint}`);
+  });
+
+  it('names the structure read when the deadline cut the read a filtered download needs', async () => {
+    vi.mocked(getEurostatDataService).mockReturnValue({
+      getDimensionOrder: vi.fn().mockRejectedValue(
+        new McpError(JsonRpcErrorCode.Timeout, 'deadline', {
+          reason: 'retry_deadline_exceeded',
+          deadlineMs: 30_000,
+          elapsedMs: 30_105,
+        }),
+      ),
+    } as never);
+    const result = await runToolContract(eurostatDownloadDataset, {
+      dataset_code: 'nama_10_gdp',
+      filters: { geo: ['DE'] },
+    });
+
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.Timeout,
+        data: { reason: 'retry_deadline_exceeded', deadlineMs: 30_000 },
+      },
+    });
+    const hint = (result.structuredContent as { error: { data: { recovery: { hint: string } } } })
+      .error.data.recovery.hint;
+    expect(hint).toContain('SDMX structure endpoint');
+    expect(hint).toContain('eurostat_query_dataset');
+    expect(hint).not.toContain('bulk allowance');
+  });
+
   it('counts a dimension whose values are all blank as unfiltered in the too-large hint (#61)', async () => {
     mockDimensionOrder();
     vi.mocked(getEurostatBulkService).mockReturnValue({
@@ -767,7 +830,7 @@ describe('eurostatDownloadDataset — notice text when the preview holds every r
     const ctx = createMockContext({ errors: eurostatDownloadDataset.errors, tenantId: 'default' });
     const result = await eurostatDownloadDataset.handler(parse({ preview_limit: 6 }), ctx);
     expect(getEnrichment(ctx).notice).toBe(
-      `All 6 downloaded rows are staged as table "${result.tableName}" on canvas "${result.canvasId}". Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query.`,
+      `All 6 downloaded rows are staged as table \`${result.tableName}\` on canvas \`${result.canvasId}\`. Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query.`,
     );
   });
 
@@ -777,7 +840,7 @@ describe('eurostatDownloadDataset — notice text when the preview holds every r
     const ctx = createMockContext({ errors: eurostatDownloadDataset.errors, tenantId: 'default' });
     const result = await eurostatDownloadDataset.handler(parse({ preview_limit: 6 }), ctx);
     expect(getEnrichment(ctx).notice).toBe(
-      `${BUDGET_TEXT} All 6 downloaded rows are staged as table "${result.tableName}" on canvas "${result.canvasId}". Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query.`,
+      `${BUDGET_TEXT} All 6 downloaded rows are staged as table \`${result.tableName}\` on canvas \`${result.canvasId}\`. Call eurostat_dataframe_describe with that canvas_id first to confirm the table and columns, then call eurostat_dataframe_query.`,
     );
   });
 
@@ -789,6 +852,32 @@ describe('eurostatDownloadDataset — notice text when the preview holds every r
     expect(getEnrichment(ctx).notice).toBe(
       `${BUDGET_TEXT} This deployment runs without a dataframe canvas, so nothing was staged; all 6 downloaded rows are returned inline.`,
     );
+  });
+
+  it('names the table and canvas as code spans, so an ID edged with "_" reads back exactly', async () => {
+    // Canvas IDs draw on [A-Za-z0-9_-]; quoted in prose, `_abcdefgh_` parses as emphasis.
+    const canvasId = '_abcdefgh_';
+    setCanvas({
+      acquire: async () => ({
+        canvasId,
+        registerTable: async (tableName: string, rows: AsyncIterable<BulkRow>) => {
+          let rowCount = 0;
+          for await (const _row of rows) rowCount++;
+          return { tableName, rowCount };
+        },
+      }),
+    } as unknown as DataCanvas);
+    mockDownload(stubDownload(makeRows(2)));
+    const result = await runToolContract(eurostatDownloadDataset, {
+      dataset_code: 'nama_10_gdp',
+    });
+    const content = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+    // The notice's sentence, not format()'s **Staged:** line. A code span's content is
+    // literal, so the text between its backticks is what a parse reads back.
+    const staged = /rows are staged as table `([^`]+)` on canvas `([^`]+)`/.exec(content);
+    const { tableName } = result.structuredContent as { tableName: string };
+    expect(staged?.slice(1)).toEqual([tableName, canvasId]);
+    expect(content).not.toContain(`"${canvasId}"`);
   });
 });
 
@@ -1675,8 +1764,9 @@ describe('eurostatDownloadDataset — period inputs and SDMX faults (real bulk s
       expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
       expect(error.data.reason).toBe('upstream_fault');
       expect(error.data.retryable).toBeUndefined();
+      // A DS-* collection refuses an unfiltered download as too large, so none is offered.
       expect(error.data.recovery.hint).toBe(
-        `Eurostat's SDMX structure endpoint answered HTTP 501 for "DS-045409", a status this server does not retry on its own, so the dimension order a filtered download needs could not be read. Retry in a few minutes. If it fails the same way, eurostat_query_dataset takes the same filters through the Statistics API, which does not depend on this structure, and a download without filters skips the read.`,
+        `Eurostat's SDMX structure endpoint answered HTTP 501 for "DS-045409", a status this server does not retry on its own, so the dimension order a filtered download needs could not be read. Retry in a few minutes. If it fails the same way, eurostat_query_dataset takes the same filters through the Statistics API, which does not depend on this structure.`,
       );
       expect(textOf(result)).toContain(`Recovery: ${error.data.recovery.hint}`);
       // One structure read, not retried, and no data request after it.
@@ -1684,7 +1774,26 @@ describe('eurostatDownloadDataset — period inputs and SDMX faults (real bulk s
       expect(paths()[0]).toContain('/sdmx/2.1/datastructure/');
     });
 
-    const STRUCTURE_BODY_HINT = `Eurostat returned a structure definition for "DS-045409" that this server cannot build a positional filter key from, so the filtered download was not sent. Retry in a few minutes. If it fails the same way, eurostat_query_dataset takes the same filters through the Statistics API, which does not depend on this structure, and a download without filters skips the read.`;
+    /** A filtered main-host download, which an unfiltered one can stand in for. */
+    const filteredMainHost = () => {
+      vi.mocked(getEurostatDataService).mockReturnValue(
+        new EurostatDataService({} as never, {} as never),
+      );
+      return { dataset_code: 'nama_10_gdp', filters: { freq: ['A'] } };
+    };
+
+    it('offers a main-host dataset the unfiltered download beside a structure-endpoint 501', async () => {
+      const input = filteredMainHost();
+      answerStructure('Not Implemented', 501);
+      const error = failureOf(await settled(input));
+      expect(error.data.reason).toBe('upstream_fault');
+      expect(error.data.recovery.hint).toBe(
+        `Eurostat's SDMX structure endpoint answered HTTP 501 for "nama_10_gdp", a status this server does not retry on its own, so the dimension order a filtered download needs could not be read. Retry in a few minutes. If it fails the same way, eurostat_query_dataset takes the same filters through the Statistics API, which does not depend on this structure, and a download without filters skips the read.`,
+      );
+    });
+
+    const STRUCTURE_BODY_HINT = `Eurostat returned a structure definition for "DS-045409" that this server cannot build a positional filter key from, so the filtered download was not sent. Retry in a few minutes. If it fails the same way, eurostat_query_dataset takes the same filters through the Statistics API, which does not depend on this structure.`;
+    const MAIN_HOST_STRUCTURE_BODY_HINT = `Eurostat returned a structure definition for "nama_10_gdp" that this server cannot build a positional filter key from, so the filtered download was not sent. Retry in a few minutes. If it fails the same way, eurostat_query_dataset takes the same filters through the Statistics API, which does not depend on this structure, and a download without filters skips the read.`;
 
     it('gives a structure body that failed to parse the structure wording', async () => {
       const input = filtered();
@@ -1707,9 +1816,27 @@ describe('eurostatDownloadDataset — period inputs and SDMX faults (real bulk s
       const error = failureOf(result);
       expect(error.data.reason).toBe('upstream_fault');
       expect(error.data.retryable).toBeUndefined();
-      expect(error.message).toContain('reported no dimensions');
+      expect(error.message).toBe(
+        'Eurostat reported no dimensions for dataset "DS-045409", so a positional filter key cannot be built. Re-read the dimensions with eurostat_get_dataset_info.',
+      );
       expect(error.data.recovery.hint).toBe(STRUCTURE_BODY_HINT);
+      expect(textOf(result)).not.toContain('without filters');
       expect(paths()).toHaveLength(1);
+    });
+
+    it('keeps the unfiltered offer for a main-host structure that is malformed or names no dimensions', async () => {
+      const input = filteredMainHost();
+      answerStructure(sdmxDataStructureXml().slice(0, 600));
+      expect(failureOf(await settled(input)).data.recovery.hint).toBe(
+        MAIN_HOST_STRUCTURE_BODY_HINT,
+      );
+
+      answerStructure(sdmxDataStructureXml([]));
+      const error = failureOf(await settled(input));
+      expect(error.message).toBe(
+        'Eurostat reported no dimensions for dataset "nama_10_gdp", so a positional filter key cannot be built. Retry without filters to download the whole dataset.',
+      );
+      expect(error.data.recovery.hint).toBe(MAIN_HOST_STRUCTURE_BODY_HINT);
     });
 
     it('describes the 501 refusal in the upstream_fault contract', () => {
@@ -1734,9 +1861,53 @@ describe('eurostatDownloadDataset — period inputs and SDMX faults (real bulk s
     expect(result.structuredContent).toMatchObject({
       error: {
         code: JsonRpcErrorCode.ValidationError,
-        data: { reason: 'filter_arity', recovery: { hint: expect.stringContaining('une_rt_m') } },
+        data: {
+          reason: 'filter_arity',
+          recovery: {
+            hint: 'Eurostat expected a different number of filter positions for "une_rt_m" than its metadata reports. Re-read the dimensions with eurostat_get_dataset_info, or retry without filters.',
+          },
+        },
       },
     });
+  });
+
+  it('offers no unfiltered retry for fault 140 on a DS-* collection, which Eurostat serves only filtered', async () => {
+    vi.mocked(getEurostatDataService).mockReturnValue(
+      new EurostatDataService({} as never, {} as never),
+    );
+    const dsd = readFileSync(
+      new URL('../fixtures/comext/ds-045409-datastructure.xml', import.meta.url),
+      'utf8',
+    );
+    fetchMock.mockImplementation(async (input: unknown) =>
+      new URL(String(input)).pathname.includes('/sdmx/2.1/datastructure/')
+        ? new Response(dsd, { status: 200 })
+        : new Response(soapFault('140', 'INVALID_QUERY_NB_FILTERS: Incorrect number of filters'), {
+            status: 400,
+          }),
+    );
+    const result = await runToolContract(eurostatDownloadDataset, {
+      dataset_code: 'DS-045409',
+      filters: { freq: ['A'] },
+    });
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ValidationError,
+        data: {
+          reason: 'filter_arity',
+          recovery: {
+            hint: 'Eurostat expected a different number of filter positions for "DS-045409" than its metadata reports. Re-read the dimensions with eurostat_get_dataset_info.',
+          },
+        },
+      },
+    });
+    const recovery = eurostatDownloadDataset.errors?.find(
+      ({ reason }) => reason === 'filter_arity',
+    )?.recovery;
+    expect(recovery).toMatch(/^Re-read the dimensions with eurostat_get_dataset_info/);
+    expect(recovery).toContain(
+      'except a DS-* Comext collection, which Eurostat serves only filtered',
+    );
   });
 
   describe('the structure read behind an extraction_too_big (#85)', () => {
@@ -1796,6 +1967,187 @@ describe('eurostatDownloadDataset — period inputs and SDMX faults (real bulk s
         },
       });
       expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Filter values and keys the positional key cannot carry (#100, #104). The real data and
+// bulk services run over a stubbed fetch, so the structure read, the key builder, and the
+// contract mapping all run.
+// ---------------------------------------------------------------------------
+
+/** `ilc_li02`'s structure definition as Eurostat serves it. */
+const ILC_LI02_DSD = readFileSync(
+  new URL('../fixtures/ilc-li02-datastructure.xml', import.meta.url),
+  'utf8',
+);
+
+/** `nama_10_gdp` CP_MEUR/B1GQ for DE and FR since 2024, the values Eurostat serves. */
+const NAMA_DE_FR_TSV =
+  'freq,unit,na_item,geo\\TIME_PERIOD\t2024 \t2025 \n' +
+  'A,CP_MEUR,B1GQ,DE\t4386940.0 \t4529710.0 \n' +
+  'A,CP_MEUR,B1GQ,FR\t2935236.2 \t2991055.9 \n';
+
+describe('eurostatDownloadDataset — filters the positional key cannot carry (#100, #104)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(getEurostatBulkService).mockReturnValue(
+      new EurostatBulkService({} as never, {} as never),
+    );
+    vi.mocked(getEurostatDataService).mockReturnValue(
+      new EurostatDataService({} as never, {} as never),
+    );
+    setCanvas(undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  type Result = Awaited<ReturnType<typeof runToolContract>>;
+  const failureOf = (result: Result) =>
+    (
+      result.structuredContent as {
+        error: {
+          code: number;
+          data: Record<string, unknown> & { recovery: { hint: string } };
+          message: string;
+        };
+      }
+    ).error;
+  const textOf = (result: Result) =>
+    result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+  const paths = () =>
+    fetchMock.mock.calls.map(([input]) => decodeURIComponent(new URL(String(input)).pathname));
+  /** Answer the structure read with `structure` and the data read with `body`. */
+  const serve = (structure: string, body: string) =>
+    fetchMock.mockImplementation(async (input: unknown) =>
+      new URL(String(input)).pathname.includes('/sdmx/2.1/datastructure/')
+        ? new Response(structure, { status: 200 })
+        : new Response(body, { status: 200 }),
+    );
+  const namaStructure = () =>
+    sdmxDataStructureXml(DIMENSIONS.map((id, index) => ({ id, position: index + 1 })));
+
+  describe('a value holding "." (#100)', () => {
+    it('fails a main-host value before any request, pointing at the value search', async () => {
+      const result = await runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'prc_hicp_manr',
+        filters: { geo: ['DE'], coicop: ['01.1.1'] },
+        since_period: '2024',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      const error = failureOf(result);
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data.reason).toBe('invalid_dimension');
+      expect(error.message).toBe(
+        'A filter value contains ".", so nothing was sent to Eurostat: "01.1.1" in filters.coicop.',
+      );
+      expect(error.data.recovery.hint).toContain(
+        'eurostat_get_dimension_values, dimension "coicop" and filter "0111"',
+      );
+      // COICOP 01.1.1 is CP0111: the stripped form is a search word, not a code to write.
+      expect(error.data.recovery.hint).not.toContain('Write "0111"');
+      const text = textOf(result);
+      expect(text).toContain('Recovery: No Eurostat code contains');
+      // The quoted values render as code spans, so they read back without escapes.
+      expect(text).toContain('filter "`0111`"');
+      expect(text).toContain('(reason invalid_dimension');
+    });
+
+    it('names every dotted value in one error, each with its own advice', async () => {
+      const result = await runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'prc_hicp_manr',
+        filters: { coicop: ['CP0111', '01.1.2'], geo: ['..'] },
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      const error = failureOf(result);
+      expect(error.data.reason).toBe('invalid_dimension');
+      expect(error.message).toBe(
+        '2 filter values contain ".", so nothing was sent to Eurostat: "01.1.2" in filters.coicop, ".." in filters.geo.',
+      );
+      expect(error.data.recovery.hint).toContain('dimension "coicop" and filter "0112"');
+      expect(error.data.recovery.hint).toContain(
+        'List the codes of "geo" with eurostat_get_dimension_values.',
+      );
+    });
+
+    it('checks the period bounds first, as before', async () => {
+      const result = await runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'prc_hicp_manr',
+        filters: { coicop: ['01.1.1'] },
+        since_period: '2020-13',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(failureOf(result).data.reason).toBe('invalid_period');
+    });
+  });
+
+  describe('a value holding "+" (#100)', () => {
+    it('sends "DE+FR" as an OR of two codes and echoes each code', async () => {
+      serve(namaStructure(), NAMA_DE_FR_TSV);
+      const result = await runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'nama_10_gdp',
+        filters: { unit: ['CP_MEUR'], na_item: ['B1GQ'], geo: ['DE+FR'] },
+        since_period: '2024',
+      });
+      expect(result.isError).not.toBe(true);
+      expect(paths().at(-1)).toMatch(/\/nama_10_gdp\/\.CP_MEUR\.B1GQ\.DE\+FR$/);
+      expect(result.structuredContent).toMatchObject({
+        rowCount: 4,
+        appliedQuery: { filters: { unit: ['CP_MEUR'], na_item: ['B1GQ'], geo: ['DE', 'FR'] } },
+      });
+      expect(textOf(result)).toContain('geo=[DE, FR]');
+    });
+
+    it('sends "DE+" as DE alone, dropping the blank piece', async () => {
+      serve(namaStructure(), NAMA_DE_FR_TSV.split('\n').slice(0, 2).join('\n'));
+      const result = await runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'nama_10_gdp',
+        filters: { unit: ['CP_MEUR'], na_item: ['B1GQ'], geo: ['DE+'] },
+        since_period: '2024',
+      });
+      expect(result.isError).not.toBe(true);
+      expect(paths().at(-1)).toMatch(/\/nama_10_gdp\/\.CP_MEUR\.B1GQ\.DE$/);
+      expect(result.structuredContent).toMatchObject({
+        rowCount: 2,
+        appliedQuery: { filters: { geo: ['DE'] } },
+      });
+    });
+  });
+
+  describe('a filter key that is not a dimension (#104)', () => {
+    it('names every unknown key and the key order on both surfaces, sending no data request', async () => {
+      serve(ILC_LI02_DSD, 'no data request expected');
+      const result = await runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'ilc_li02',
+        filters: { geo: ['FR'], indic_il: ['LI_R_MD60'], incgrp: ['TOTAL'] },
+      });
+      const error = failureOf(result);
+      const order = ['freq', 'statinfo', 'unit', 'rskpovth', 'sex', 'age', 'geo'];
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.message).toBe(
+        'Filter names "indic_il", "incgrp", which are not dimensions of this dataset. Filterable dimensions, in key order: freq, statinfo, unit, rskpovth, sex, age, geo. The time dimension is filtered with since_period/until_period instead.',
+      );
+      expect(error.data).toMatchObject({
+        reason: 'invalid_dimension',
+        unknownDimensions: ['indic_il', 'incgrp'],
+        dimensionOrder: order,
+        recovery: {
+          hint: 'Rename each filter key the error names to one of the dimensions it lists.',
+        },
+      });
+      const text = textOf(result);
+      expect(text).toContain(`Filterable dimensions, in key order: ${order.join(', ')}.`);
+      expect(text).toContain(
+        'Recovery: Rename each filter key the error names to one of the dimensions it lists.',
+      );
+      // The rename hint carries no period advice: a key is not a period.
+      expect(text).not.toContain("inside the dataset's coverage");
+      expect(paths()).toEqual([expect.stringContaining('/sdmx/2.1/datastructure/ESTAT/ilc_li02')]);
     });
   });
 });
@@ -2664,22 +3016,25 @@ describe('eurostatDownloadDataset — unflagged ":" rows (#90, #93)', () => {
     });
 
     it('counts the rows a budget-cut transfer emitted', async () => {
-      const lines = NAMA_DE_FR.split('\n');
+      // France opens the span in 1975, so Germany's bare years are lacked ones; the cut
+      // Italian line's bare cells would add 21 more.
+      const [header, deLine, frLine] = NAMA_DE_FR.split('\n');
+      const emitted = `${header}\n${frLine}\n${deLine}\n`;
       vi.spyOn(serverConfig, 'getServerConfig').mockReturnValue({
         ...serverConfig.getServerConfig(),
-        bulkMaxBytes: `${lines[0]}\n${lines[1]}\n`.length + 10,
+        bulkMaxBytes: emitted.length + 10,
       });
       try {
-        const result = await download(NAMA_DE_FR);
+        const result = await download(`${emitted}A,CP_MEUR,B1GQ,IT${'\t: '.repeat(21)}\n`);
         expect(result.structuredContent).toMatchObject({
           budgetExceeded: true,
           absentCellCount: 16,
-          rowCount: 21,
+          rowCount: 42,
           missingCount: 16,
-          periodRange: { start: '1991', end: '1995' },
+          periodRange: { start: '1975', end: '1995' },
         });
         expect(noticeOf(result)).toContain(
-          '16 of the 21 downloaded rows (absentCellCount) are periods their series lacks',
+          '16 of the 42 downloaded rows (absentCellCount) are periods their series lacks',
         );
       } finally {
         vi.restoreAllMocks();
@@ -2697,7 +3052,7 @@ describe('eurostatDownloadDataset — unflagged ":" rows (#90, #93)', () => {
         };
         expect(result.structuredContent).toMatchObject({ absentCellCount: 16, stagedRowCount: 42 });
         expect(noticeOf(result)).toContain(
-          `${ABSENT_16_OF_42} All 42 downloaded rows are staged as table "${tableName}" on canvas "${canvasId}".`,
+          `${ABSENT_16_OF_42} All 42 downloaded rows are staged as table \`${tableName}\` on canvas \`${canvasId}\`.`,
         );
         const instance = await canvas.acquire(canvasId, createMockContext({ tenantId: 'default' }));
         const staged = await instance.query(
@@ -2712,11 +3067,12 @@ describe('eurostatDownloadDataset — unflagged ":" rows (#90, #93)', () => {
 
   describe('periodRange from the rows carrying an observation (#93)', () => {
     it('starts where the series’ first observation is, not at its first unflagged ":"', async () => {
-      const result = await download(NAMA_DE, { filters: {} });
+      // Germany's bare 1975–1990 precede its first observation; its bare 1992 is a year it lacks.
+      const result = await download(NAMA_DE.replace('1655317.2 ', ': '), { filters: {} });
       expect(result.structuredContent).toMatchObject({
         rowCount: 21,
-        missingCount: 16,
-        absentCellCount: 16,
+        missingCount: 17,
+        absentCellCount: 1,
         periodRange: { start: '1991', end: '1995' },
       });
       expect(text(result)).toContain('**Period:** 1991 – 1995');
@@ -2778,6 +3134,459 @@ describe('eurostatDownloadDataset — unflagged ":" rows (#90, #93)', () => {
           'Omitted, with the other bound, when no row carries an observation.',
         );
       }
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Filter values and periods with no observation (#96, #97). The bulk service settles
+// emptyValues, the spans and absentCellCount; these tests cover what the tool makes of
+// them on both surfaces, and that it agrees with eurostat_query_dataset on recorded pairs.
+// ---------------------------------------------------------------------------
+
+describe('eurostatDownloadDataset — values and periods with no observation (#96, #97)', () => {
+  const fixture = (name: string) =>
+    readFileSync(new URL(`../fixtures/${name}`, import.meta.url), 'utf8');
+  const NAMA_DE = fixture('nama-10-gdp-de-fr-1975-to-1995.tsv').split('\n').slice(0, 2).join('\n');
+  const COMEXT_FILTERS = {
+    partner: ['US'],
+    product: ['2204'],
+    flow: ['2'],
+    indicators: ['VALUE_IN_EUROS'],
+  };
+  const COMEXT_DIMENSIONS = ['freq', 'reporter', 'partner', 'product', 'flow', 'indicators'];
+
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(getEurostatBulkService).mockReturnValue(
+      new EurostatBulkService({} as never, {} as never),
+    );
+    setCanvas(undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** Download `body` through the real bulk service; a filtered call reads `dimensions` first. */
+  const download = (
+    body: string,
+    input: Record<string, unknown>,
+    dimensions: string[] = ['freq', 'unit', 'geo'],
+  ) => {
+    mockDimensionOrder(dimensions);
+    fetchMock.mockImplementationOnce(async () => new Response(body, { status: 200 }));
+    return runToolContract(eurostatDownloadDataset, { dataset_code: 'nama_10r_2gdp', ...input });
+  };
+  const text = (result: { content: Array<{ type: string; text?: string }> }) =>
+    result.content.map((block) => block.text ?? '').join('\n');
+  const noticeOf = (result: { structuredContent?: unknown }) =>
+    (result.structuredContent as { notice?: string }).notice ?? '';
+
+  const LEAVES_THEM_OUT =
+    "absentCellCount leaves them out: it counts only periods from a frequency's first to its latest period with an observation.";
+  const SOME_PERIODS_SENTENCE =
+    'A value can still carry data in other periods or beside other filter values.';
+
+  describe('rows at periods outside every span with an observation (#97)', () => {
+    it('counts the months the Comext host pads a monthly slice with (issue step 2)', async () => {
+      const result = await download(
+        fixture('comext/ds-045409-m-de-fr-it-es-us-2204-since-2026-01.tsv'),
+        {
+          dataset_code: 'DS-045409',
+          filters: { freq: ['M'], reporter: ['DE', 'FR', 'IT', 'ES'], ...COMEXT_FILTERS },
+          since_period: '2026-01',
+        },
+        COMEXT_DIMENSIONS,
+      );
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        absentCellCount: 0,
+        rowCount: 48,
+        missingCount: 16,
+        totalCount: 48,
+        periodRange: { start: '2026-01', end: '2026-08' },
+      });
+      const padded = `16 of the 48 downloaded rows are unflagged ":" cells in periods no downloaded row has an observation in: 2026-09 – 2026-12, after the latest period with one (2026-08). ${LEAVES_THEM_OUT}`;
+      expect(noticeOf(result)).toContain(padded);
+      expect(text(result)).toContain(padded);
+      expect(text(result)).toContain('**Absent cells:** 0');
+      expect(noticeOf(result)).not.toContain('(absentCellCount)');
+      expect(result.structuredContent).not.toHaveProperty('emptyValues');
+    });
+
+    it('counts the years before a lone series starts (nama_10_gdp DE, 1975–1995)', async () => {
+      const result = await download(NAMA_DE, {
+        dataset_code: 'nama_10_gdp',
+        since_period: '1975',
+        until_period: '1995',
+      });
+      expect(result.structuredContent).toMatchObject({
+        absentCellCount: 0,
+        rowCount: 21,
+        missingCount: 16,
+      });
+      expect(noticeOf(result)).toContain(
+        `16 of the 21 downloaded rows are unflagged ":" cells in periods no downloaded row has an observation in: 1975 – 1990, before the first period with one (1991). ${LEAVES_THEM_OUT}`,
+      );
+    });
+
+    it('names each frequency of a mixed slice, finest first, beside the mixed-frequency sentence', async () => {
+      const result = await download(
+        fixture('comext/ds-045409-de-fr-us-2204-since-2025-01.tsv'),
+        {
+          dataset_code: 'DS-045409',
+          filters: { reporter: ['DE', 'FR'], ...COMEXT_FILTERS },
+          since_period: '2025-01',
+        },
+        COMEXT_DIMENSIONS,
+      );
+      expect(result.structuredContent).toMatchObject({
+        absentCellCount: 0,
+        rowCount: 104,
+        missingCount: 62,
+      });
+      const notice = noticeOf(result);
+      expect(notice).toContain(
+        `20 of the 104 downloaded rows are unflagged ":" cells in periods no downloaded row has an observation in: 2026-09 – 2026-12, after the latest period with one (2026-08); 2026, after the latest period with one (2025). ${LEAVES_THEM_OUT}`,
+      );
+      expect(notice).toContain('Frequencies are mixed in this slice');
+    });
+
+    it('names a single row and period in the singular', async () => {
+      const result = await download(
+        'freq,geo\\TIME_PERIOD\t2022 \t2023 \r\nA,AT\t1.0 \t: \r\n',
+        { dataset_code: 'nama_10_gdp' },
+        ['freq', 'geo'],
+      );
+      expect(result.structuredContent).toMatchObject({ absentCellCount: 0, rowCount: 2 });
+      expect(noticeOf(result)).toContain(
+        `1 of the 2 downloaded rows is an unflagged ":" cell in a period no downloaded row has an observation in: 2023, after the latest period with one (2022). ${LEAVES_THEM_OUT}`,
+      );
+    });
+
+    it('adds no sentence when no row carries an observation, which another sentence says', async () => {
+      const result = await download(
+        'freq,geo\\TIME_PERIOD\t2022 \t2023 \r\nA,AT\t: \t: \r\n',
+        { dataset_code: 'nama_10_gdp' },
+        ['freq', 'geo'],
+      );
+      expect(result.structuredContent).toMatchObject({ rowCount: 2, absentCellCount: 0 });
+      expect(noticeOf(result)).toContain('No downloaded row carries an observation');
+      expect(noticeOf(result)).not.toContain('no downloaded row has an observation in');
+    });
+
+    it('fires beside the absent-cell and emptyValues sentences, in that order, in one notice', async () => {
+      // 2019 has no observation anywhere; DE11 lacks 2021, inside the span NO02 opens; CH01 has no line.
+      const result = await download(
+        'freq,unit,geo\\TIME_PERIOD\t2019 \t2020 \t2021 \t2022 \r\nA,X,DE11\t: \t1 \t: \t2 \r\nA,X,NO02\t: \t3 \t4 \t5 \r\n',
+        { filters: { unit: ['X'], geo: ['DE11', 'NO02', 'CH01'] } },
+      );
+      expect(result.structuredContent).toMatchObject({
+        rowCount: 8,
+        missingCount: 3,
+        absentCellCount: 1,
+        emptyValues: { geo: ['CH01'] },
+        periodRange: { start: '2020', end: '2022' },
+      });
+      expect(noticeOf(result)).toBe(
+        `2 of the 8 downloaded rows are unflagged ":" cells in a period no downloaded row has an observation in: 2019, before the first period with one (2020). ${LEAVES_THEM_OUT} 1 of the 8 downloaded rows (absentCellCount) is a period its series lacks, not an observation: an unflagged ":" cell, obs_value null with no flag, status or text. 1 value the download selects exists in the dataset but has no observation in this download: geo=[CH01]. ${SOME_PERIODS_SENTENCE} This deployment runs without a dataframe canvas, so nothing was staged; all 8 downloaded rows are returned inline.`,
+      );
+      expect(text(result)).toContain(noticeOf(result));
+    });
+  });
+
+  describe('emptyValues (#96)', () => {
+    it('names the regions with no observation since 2024 on both surfaces (issue step 2)', async () => {
+      const result = await download(fixture('nama-10r-2gdp-de11-no02-ch01-since-2024.tsv'), {
+        filters: { unit: ['PPS_HAB_EU27_2020'], geo: ['DE11', 'NO02', 'CH01'] },
+        since_period: '2024',
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        rowCount: 1,
+        absentCellCount: 0,
+        emptyValues: { geo: ['NO02', 'CH01'] },
+      });
+      expect(eurostatDownloadDataset.output.parse(result.structuredContent)).toMatchObject({
+        emptyValues: { geo: ['NO02', 'CH01'] },
+      });
+      expect(noticeOf(result)).toContain(
+        `2 values the download selects exist in the dataset but have no observation in this download: geo=[NO02, CH01]. ${SOME_PERIODS_SENTENCE}`,
+      );
+      expect(text(result)).toContain(
+        '**Values with no observation:** geo=[NO02, CH01] — in the dataset but with no value, flag, status or text in this download',
+      );
+    });
+
+    it('omits the field, its sentence and its line when every filter value has an observation', async () => {
+      const result = await download(fixture('nama-10r-2gdp-de11-no02-ch01-since-2020.tsv'), {
+        filters: { unit: ['PPS_HAB_EU27_2020'], geo: ['DE11', 'NO02'] },
+        since_period: '2020',
+      });
+      expect(result.structuredContent).toMatchObject({ rowCount: 10, absentCellCount: 3 });
+      expect(result.structuredContent).not.toHaveProperty('emptyValues');
+      expect(noticeOf(result)).not.toContain('the download selects');
+      expect(text(result)).not.toContain('**Values with no observation:**');
+    });
+
+    /** One observed line, U0 by G0, against filters naming `units` and `geos` values. */
+    const overCap = (units: number, geos: number) => {
+      const codes = (prefix: string, n: number) =>
+        Array.from({ length: n }, (_, i) => `${prefix}${i}`);
+      return download('freq,unit,geo\\TIME_PERIOD\t2024 \r\nA,U0,G0\t1 \r\n', {
+        filters: { unit: codes('U', units), geo: codes('G', geos) },
+      });
+    };
+
+    it('names 24 values in the notice and counts the rest, keeping every one in the field and the line', async () => {
+      const result = await overCap(10, 20);
+      const unit = Array.from({ length: 9 }, (_, i) => `U${i + 1}`);
+      const geo = Array.from({ length: 19 }, (_, i) => `G${i + 1}`);
+      expect(result.structuredContent).toMatchObject({ emptyValues: { unit, geo } });
+      expect(noticeOf(result)).toContain(
+        `28 values the download selects exist in the dataset but have no observation in this download: unit=[${unit.join(', ')}]; geo=[${geo.slice(0, 15).join(', ')}] (4 more omitted; emptyValues lists all 28). ${SOME_PERIODS_SENTENCE}`,
+      );
+      expect(text(result)).toContain(
+        `**Values with no observation:** unit=[${unit.join(', ')}]; geo=[${geo.join(', ')}]`,
+      );
+    });
+
+    it('names all 24 with no omitted count when exactly 24 have no observation', async () => {
+      const result = await overCap(1, 25);
+      expect(noticeOf(result)).toContain(
+        `24 values the download selects exist in the dataset but have no observation in this download: geo=[${Array.from({ length: 24 }, (_, i) => `G${i + 1}`).join(', ')}]. ${SOME_PERIODS_SENTENCE}`,
+      );
+      expect(noticeOf(result)).not.toContain('more omitted');
+    });
+  });
+
+  describe('caller and upstream strings in content[]', () => {
+    const odd: BulkRow = {
+      geo: '**DE**',
+      'a**b**': 'x](y)',
+      time: '2024',
+      obs_value: 1,
+      obs_flag: null,
+    };
+    const base = {
+      datasetCode: 'nama_10_gdp',
+      dimensionsUsed: ['geo', 'a**b**'],
+      rowCount: 2,
+      missingCount: 0,
+      absentCellCount: 0,
+      periodRange: { start: '2024', end: '2024' },
+      bytesRead: 80,
+      compressed: false,
+      budgetExceeded: false,
+      observations: [odd],
+      emptyValues: { geo: ['[FR](z)'] },
+    };
+
+    it('escapes dimension names, row values and empty values in format()', () => {
+      const rendered = renderedText(base);
+      expect(rendered).toContain('**Dimensions:** geo, a\\*\\*b\\*\\*');
+      expect(rendered).toContain('geo=\\*\\*DE\\*\\* | a\\*\\*b\\*\\*=x\\](y) | time=2024');
+      expect(rendered).toContain('**Values with no observation:** geo=[\\[FR\\](z)]');
+      expect(rendered).not.toContain('geo=**DE**');
+    });
+
+    it('escapes a hoisted cell', () => {
+      const rendered = renderedText({ ...base, observations: [odd, { ...odd, obs_value: 2 }] });
+      expect(rendered).toContain(
+        '**Same in all 2 rows shown:** geo=\\*\\*DE\\*\\* | a\\*\\*b\\*\\*=x\\](y) | time=2024',
+      );
+    });
+
+    it('renders plain codes byte for byte', () => {
+      const rendered = renderedText({
+        ...base,
+        dimensionsUsed: ['unit', 'geo'],
+        observations: [{ unit: 'PPS_HAB_EU27_2020', geo: 'DE11', time: '2024', obs_value: 153.5 }],
+        emptyValues: { geo: ['NO02', 'CH01'] },
+      });
+      expect(rendered).toContain('**Dimensions:** unit, geo');
+      expect(rendered).toContain('unit=PPS_HAB_EU27_2020 | geo=DE11 | time=2024 | obs_value=153.5');
+      expect(rendered).toContain('**Values with no observation:** geo=[NO02, CH01]');
+    });
+
+    it('escapes filter keys, values and the URL in the request trailer', () => {
+      const render = eurostatDownloadDataset.enrichmentTrailer?.appliedQuery?.render;
+      const rendered = render?.({
+        filters: { 'g*o': ['**DE**', 'a](b)'], unit: ['CP_MEUR'] },
+        url: 'https://example.invalid/x/*DE*?format=TSV',
+      } as never);
+      expect(rendered).toContain('- **Filters:** g\\*o=[\\*\\*DE\\*\\*, a\\](b)]; unit=[CP_MEUR]');
+      expect(rendered).toContain('- **URL:** https://example.invalid/x/\\*DE\\*?format=TSV');
+    });
+
+    it('escapes an empty value in the notice', async () => {
+      const result = await download('freq,unit,geo\\TIME_PERIOD\t2024 \r\nA,X,DE\t1 \r\n', {
+        filters: { unit: ['X'], geo: ['DE', '**FR**'] },
+      });
+      expect(result.structuredContent).toMatchObject({ emptyValues: { geo: ['**FR**'] } });
+      expect(noticeOf(result)).toContain('geo=[\\*\\*FR\\*\\*]');
+    });
+
+    it('escapes the dataset code in the byte-budget sentence', async () => {
+      mockDownload(stubDownload(makeRows(2), { budgetExceeded: true }));
+      const result = await runToolContract(eurostatDownloadDataset, { dataset_code: 'a**b**' });
+      expect(noticeOf(result)).toContain(
+        'rows are the start of "a\\*\\*b\\*\\*" and not all of it',
+      );
+    });
+  });
+
+  /**
+   * The query and the download of one slice, each through its tool on the recorded reply to
+   * its request: the Statistics API JSON-stat and the SDMX TSV. `padded` is the rows the
+   * download notice counts outside the spans, for a slice of one frequency.
+   */
+  describe('agrees with eurostat_query_dataset on the same slice (#96, #97)', () => {
+    const PAIRS = [
+      {
+        name: 'nama-10-gdp-de-fr-1975-to-1995',
+        input: {
+          dataset_code: 'nama_10_gdp',
+          filters: { unit: ['CP_MEUR'], na_item: ['B1GQ'], geo: ['DE', 'FR'] },
+          since_period: '1975',
+          until_period: '1995',
+        },
+        dimensions: ['freq', 'unit', 'na_item', 'geo'],
+        absentCellCount: 16,
+        emptyValues: undefined,
+        padded: 0,
+      },
+      {
+        name: 'nama-10r-2gdp-de11-no02-ch01-since-2020',
+        input: {
+          dataset_code: 'nama_10r_2gdp',
+          filters: { unit: ['PPS_HAB_EU27_2020'], geo: ['DE11', 'NO02', 'CH01'] },
+          since_period: '2020',
+        },
+        dimensions: ['freq', 'unit', 'geo'],
+        absentCellCount: 3,
+        emptyValues: { geo: ['CH01'] },
+        padded: 0,
+      },
+      {
+        name: 'comext/ds-045409-m-de-fr-it-es-us-2204-since-2026-01',
+        input: {
+          dataset_code: 'DS-045409',
+          filters: { freq: ['M'], reporter: ['DE', 'FR', 'IT', 'ES'], ...COMEXT_FILTERS },
+          since_period: '2026-01',
+        },
+        dimensions: COMEXT_DIMENSIONS,
+        absentCellCount: 0,
+        emptyValues: undefined,
+        padded: 16,
+      },
+      {
+        name: 'comext/ds-045409-de-fr-us-2204-since-2025-01',
+        input: {
+          dataset_code: 'DS-045409',
+          filters: { reporter: ['DE', 'FR'], ...COMEXT_FILTERS },
+          since_period: '2025-01',
+        },
+        dimensions: COMEXT_DIMENSIONS,
+        absentCellCount: 0,
+        emptyValues: undefined,
+        // Two frequencies: the TSV also pads each series at the other one's periods.
+        padded: undefined,
+      },
+    ];
+
+    for (const pair of PAIRS) {
+      it(`reports the same absentCellCount and emptyValues for ${pair.name}`, async () => {
+        vi.mocked(getEurostatDataService).mockReturnValue(
+          new EurostatDataService({} as never, {} as never),
+        );
+        fetchMock.mockImplementation(async (input: unknown) => {
+          const url = input instanceof Request ? input.url : String(input);
+          if (url.includes('/statistics/1.0/data/')) {
+            return new Response(fixture(`${pair.name}.json`), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            });
+          }
+          if (url.includes('/sdmx/2.1/datastructure/')) {
+            return new Response(
+              sdmxDataStructureXml(pair.dimensions.map((id, i) => ({ id, position: i + 1 }))),
+              { status: 200 },
+            );
+          }
+          if (url.includes('/sdmx/2.1/data/')) {
+            return new Response(fixture(`${pair.name}.tsv`), { status: 200 });
+          }
+          throw new Error(`Unmocked fetch: ${url}`);
+        });
+        const query = await runToolContract(eurostatQueryDataset, pair.input);
+        const bulk = await runToolContract(eurostatDownloadDataset, pair.input);
+        expect(query.isError).not.toBe(true);
+        expect(bulk.isError).not.toBe(true);
+        const q = query.structuredContent as {
+          absentCellCount: number;
+          emptyValues?: Record<string, string[]>;
+          obsCount: number;
+        };
+        const d = bulk.structuredContent as {
+          absentCellCount: number;
+          emptyValues?: Record<string, string[]>;
+          rowCount: number;
+        };
+        expect(q.absentCellCount).toBe(pair.absentCellCount);
+        expect(d.absentCellCount).toBe(pair.absentCellCount);
+        expect(q.emptyValues).toEqual(pair.emptyValues);
+        expect(d.emptyValues).toEqual(pair.emptyValues);
+        if (pair.padded !== undefined) {
+          expect(d.rowCount).toBe(q.obsCount + q.absentCellCount + pair.padded);
+          if (pair.padded > 0) {
+            expect(noticeOf(bulk)).toContain(
+              `${pair.padded} of the ${d.rowCount} downloaded rows are unflagged ":" cells`,
+            );
+          }
+        }
+      });
+    }
+  });
+
+  describe('the descriptions', () => {
+    const output = eurostatDownloadDataset.output.shape;
+    const enrichment = eurostatDownloadDataset.enrichment;
+
+    it('describe emptyValues and when it is omitted', () => {
+      const description = output.emptyValues.description ?? '';
+      expect(description).toContain('Omitted when every filter value has an observation');
+      expect(description).toContain('budgetExceeded');
+    });
+
+    it('keep the periods outside a span out of absentCellCount on every count', () => {
+      for (const description of [
+        output.rowCount.description,
+        output.absentCellCount.description,
+        enrichment?.totalCount.description,
+      ]) {
+        expect(description).toContain('span');
+      }
+    });
+
+    it('state how filters treat "+", ".", and a value with no observation', () => {
+      const filters = eurostatDownloadDataset.input.shape.filters.description ?? '';
+      expect(filters).toContain('A value holding "+" is split into separate values (OR)');
+      expect(filters).toContain(
+        'A value holding "." is rejected as invalid_dimension before any request: no Eurostat code contains one.',
+      );
+      expect(filters).toContain('emptyValues');
+    });
+
+    it('name every disclosure the notice composes', () => {
+      const notice = enrichment?.notice.description ?? '';
+      expect(notice).toContain('emptyValues');
+      expect(notice).toContain('up to 24');
+      expect(notice).toContain("before or after a frequency's span");
     });
   });
 });

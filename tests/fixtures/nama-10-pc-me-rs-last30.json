@@ -1,0 +1,195 @@
+{
+  "version": "2.0",
+  "class": "dataset",
+  "label": "Gross domestic product (GDP) and main components per capita - annual data",
+  "source": "ESTAT",
+  "updated": "2026-11-05T23:00:00+0100",
+  "value": {
+    "10": 8302.5,
+    "11": 9831.9,
+    "12": 10710.9,
+    "13": 9796.1,
+    "14": 10305.5,
+    "15": 10691.7,
+    "16": 10185.3,
+    "17": 10604.8,
+    "18": 10949.1,
+    "19": 11570.4,
+    "20": 12524.5,
+    "21": 13295.7,
+    "22": 14297.5,
+    "23": 15417.6,
+    "24": 13175.6,
+    "25": 15111.4,
+    "26": 17315.6,
+    "27": 19902.9,
+    "28": 21365.0,
+    "29": 22816.4,
+    "34": 5328.7,
+    "35": 5631.7,
+    "36": 6200.3,
+    "37": 6588.8,
+    "38": 7121.9,
+    "39": 7697.8,
+    "40": 8320.8,
+    "41": 9226.4,
+    "42": 10183.6,
+    "43": 9842.7,
+    "44": 10084.2,
+    "45": 10655.1,
+    "46": 10712.3,
+    "47": 11005.4,
+    "48": 10963.6,
+    "49": 11178.3,
+    "50": 11430.7,
+    "51": 11873.0,
+    "52": 12524.5,
+    "53": 13389.6,
+    "54": 13423.6,
+    "55": 14930.4,
+    "56": 16138.5,
+    "57": 18601.5,
+    "58": 20623.8,
+    "59": 21923.4
+  },
+  "status": { "58": "p", "59": "p" },
+  "id": ["freq", "unit", "na_item", "geo", "time"],
+  "size": [1, 1, 1, 2, 30],
+  "dimension": {
+    "freq": {
+      "label": "Time frequency",
+      "category": { "index": { "A": 0 }, "label": { "A": "Annual" } }
+    },
+    "unit": {
+      "label": "Unit of measure",
+      "category": {
+        "index": { "CP_PPS_EU27_2020_HAB": 0 },
+        "label": {
+          "CP_PPS_EU27_2020_HAB": "Current prices, purchasing power standard (PPS, EU27 from 2020) per capita"
+        }
+      }
+    },
+    "na_item": {
+      "label": "National accounts indicator (ESA 2010)",
+      "category": {
+        "index": { "B1GQ": 0 },
+        "label": { "B1GQ": "Gross domestic product at market prices" }
+      }
+    },
+    "geo": {
+      "label": "Geopolitical entity (reporting)",
+      "category": { "index": { "ME": 0, "RS": 1 }, "label": { "ME": "Montenegro", "RS": "Serbia" } }
+    },
+    "time": {
+      "label": "Time",
+      "category": {
+        "index": {
+          "1996": 0,
+          "1997": 1,
+          "1998": 2,
+          "1999": 3,
+          "2000": 4,
+          "2001": 5,
+          "2002": 6,
+          "2003": 7,
+          "2004": 8,
+          "2005": 9,
+          "2006": 10,
+          "2007": 11,
+          "2008": 12,
+          "2009": 13,
+          "2010": 14,
+          "2011": 15,
+          "2012": 16,
+          "2013": 17,
+          "2014": 18,
+          "2015": 19,
+          "2016": 20,
+          "2017": 21,
+          "2018": 22,
+          "2019": 23,
+          "2020": 24,
+          "2021": 25,
+          "2022": 26,
+          "2023": 27,
+          "2024": 28,
+          "2025": 29
+        },
+        "label": {
+          "1996": "1996",
+          "1997": "1997",
+          "1998": "1998",
+          "1999": "1999",
+          "2000": "2000",
+          "2001": "2001",
+          "2002": "2002",
+          "2003": "2003",
+          "2004": "2004",
+          "2005": "2005",
+          "2006": "2006",
+          "2007": "2007",
+          "2008": "2008",
+          "2009": "2009",
+          "2010": "2010",
+          "2011": "2011",
+          "2012": "2012",
+          "2013": "2013",
+          "2014": "2014",
+          "2015": "2015",
+          "2016": "2016",
+          "2017": "2017",
+          "2018": "2018",
+          "2019": "2019",
+          "2020": "2020",
+          "2021": "2021",
+          "2022": "2022",
+          "2023": "2023",
+          "2024": "2024",
+          "2025": "2025"
+        }
+      }
+    }
+  },
+  "extension": {
+    "lang": "EN",
+    "id": "NAMA_10_PC",
+    "agencyId": "ESTAT",
+    "version": "1.0",
+    "datastructure": { "id": "NAMA_10_PC", "agencyId": "ESTAT", "version": "136.0" },
+    "annotation": [
+      { "type": "CREATED", "date": "2014-10-29T11:05:59+0100" },
+      {
+        "type": "DISSEMINATION_DOI_XML",
+        "title": "<adms:identifier xmlns:adms=\"http://www.w3.org/ns/adms#\" xmlns:skos=\"http://www.w3.org/2004/02/skos/core.html\" xmlns:dct=\"http://purl.org/dc/terms/\" xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><adms:Identifier rdf:about=\"https://doi.org/10.2908/NAMA_10_PC\"><skos:notation rdf:datatype=\"http://purl.org/spar/datacite/doi\">10.2908/NAMA_10_PC</skos:notation><dct:creator rdf:resource=\"http://publications.europa.eu/resource/authority/corporate-body/ESTAT\"/><dct:issued rdf:datatype=\"http://www.w3.org/2001/XMLSchema#date\">2023-01-19</dct:issued></adms:Identifier></adms:identifier>"
+      },
+      { "type": "DISSEMINATION_OBJECT_TYPE", "title": "DATASET" },
+      { "type": "DISSEMINATION_TIMESTAMP_DATA", "date": "2026-11-05T23:00:00+0100" },
+      { "type": "DISSEMINATION_TIMESTAMP_GLOBAL", "date": "2026-11-05T23:00:00+0100" },
+      { "type": "DISSEMINATION_TIMESTAMP_PLANNED", "date": "2026-11-05T23:00:00+0100" },
+      {
+        "type": "ESMS_HTML",
+        "title": "Explanatory texts (metadata)",
+        "href": "https://ec.europa.eu/eurostat/cache/metadata/en/nama_10_gdp_esms.htm"
+      },
+      {
+        "type": "ESMS_SDMX",
+        "title": "Explanatory texts (metadata)",
+        "href": "https://ec.europa.eu/eurostat/api/dissemination/files?file=metadata/nama_10_gdp_esms.sdmx.zip"
+      },
+      { "type": "OBS_COUNT", "title": "140491" },
+      { "type": "OBS_PERIOD_OVERALL_LATEST", "title": "2025" },
+      { "type": "OBS_PERIOD_OVERALL_OLDEST", "title": "1975" },
+      { "type": "SOURCE_INSTITUTIONS", "text": "Eurostat" },
+      { "type": "UPDATE_DATA", "date": "2026-11-05T23:00:00+0100" },
+      { "type": "UPDATE_STRUCTURE", "date": "2026-10-20T23:00:00+0200" }
+    ],
+    "status": { "label": { "p": "provisional" } },
+    "positions-with-no-data": {
+      "freq": [],
+      "unit": [],
+      "na_item": [],
+      "geo": [],
+      "time": [0, 1, 2, 3]
+    }
+  }
+}

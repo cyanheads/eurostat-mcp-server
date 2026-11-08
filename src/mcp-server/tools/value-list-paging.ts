@@ -1,5 +1,6 @@
 /**
- * @fileoverview Case- and accent-blind word filtering for dimension code/label lists.
+ * @fileoverview Case- and accent-blind word filtering, and case-blind code-prefix
+ * matching, for dimension code/label lists.
  * @module mcp-server/tools/value-list-paging
  */
 
@@ -29,4 +30,20 @@ export function matchValues<T extends { code: string; label: string }>(
     const haystack = foldForMatch(`${value.code} ${value.label}`);
     return tokens.every((token) => haystack.includes(token));
   });
+}
+
+/**
+ * A code prefix folded for comparison: trimmed and lowercased. Eurostat codes are
+ * uppercase ASCII letters, digits, `-` and `_`, so case is the only fold they need.
+ */
+export function foldCodePrefix(prefix: string): string {
+  return prefix.trim().toLowerCase();
+}
+
+/** The values whose code starts with a folded prefix, ignoring case, in the list's own order. */
+export function matchCodePrefix<T extends { code: string }>(
+  values: readonly T[],
+  foldedPrefix: string,
+): T[] {
+  return values.filter(({ code }) => code.toLowerCase().startsWith(foldedPrefix));
 }

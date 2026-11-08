@@ -8,7 +8,12 @@ import { CanvasIdSchema, type ColumnSchema } from '@cyanheads/mcp-ts-core/canvas
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { decodeCursor, encodeCursor } from '@cyanheads/mcp-ts-core/utils';
 import { clampReadLimit } from '@/mcp-server/tools/clamp-read-limit.js';
-import { filterTokens, matchValues } from '@/mcp-server/tools/value-list-paging.js';
+import {
+  filterTokens,
+  foldCodePrefix,
+  matchCodePrefix,
+  matchValues,
+} from '@/mcp-server/tools/value-list-paging.js';
 import {
   acquireCanvas,
   getCanvas,
@@ -16,21 +21,53 @@ import {
   newTableName,
 } from '@/services/canvas-accessor.js';
 import { getEurostatDataService } from '@/services/eurostat-data/eurostat-data-service.js';
-import { GEO_LEVEL_VALUES, type GeoLevel } from '@/services/eurostat-data/types.js';
+import {
+  GEO_LEVEL_VALUES,
+  type GeoLevel,
+  type ListedValue,
+} from '@/services/eurostat-data/types.js';
+import { isComextDataset } from '@/services/eurostat-hosts.js';
 import { outageAnswer } from '@/services/eurostat-outage.js';
 
 /**
- * The staged value list: the same `{code, label}` pairs as the inline `values`,
- * declared rather than sniffed. The service falls back to the code when Eurostat
- * publishes no label, so neither column is ever null.
+ * The sentence an empty page adds for a code_prefix holding ".", which no Eurostat code
+ * contains. A `DS-*` collection's classification codes are bare digits, so there a prefix
+ * of digits and dots is a code printed with separators and its stripped form is the prefix
+ * to send; elsewhere stripping can yield a non-code (COICOP `01.1` is `CP011`).
+ */
+function dottedPrefixAdvice(datasetCode: string, prefix: string | undefined): string {
+  if (!prefix?.includes('.')) return '';
+  const stripped = prefix.replaceAll('.', '');
+  return isComextDataset(datasetCode) && /^\d+$/.test(stripped)
+    ? ` No Eurostat code contains ".": a code printed with separators is sent without them, so pass code_prefix "${stripped}".`
+    : ' No Eurostat code contains ".", so a code_prefix holding one matches nothing: find the code with filter instead.';
+}
+
+/**
+ * The staged value list: `{code, label}` pairs, declared rather than sniffed. The
+ * service falls back to the code when Eurostat publishes no label, so neither
+ * column is ever null.
  */
 const VALUE_TABLE_SCHEMA: ColumnSchema[] = [
   { name: 'code', type: 'VARCHAR', nullable: false },
   { name: 'label', type: 'VARCHAR', nullable: false },
 ];
 
+/**
+ * A staged `geo` list adds each code's NUTS level, whether or not geo_level was
+ * passed, so every `geo` table has one shape. Null for a code with no level the
+ * server maps.
+ */
+const GEO_VALUE_TABLE_SCHEMA: ColumnSchema[] = [
+  ...VALUE_TABLE_SCHEMA,
+  { name: 'level', type: 'VARCHAR', nullable: true },
+];
+
 /** Longest filter accepted: room for many words, while its echo and cursor stay small. */
 const FILTER_MAX_CHARS = 500;
+
+/** Longest code_prefix accepted: well past any Eurostat code, while its cursor copy stays small. */
+const CODE_PREFIX_MAX_CHARS = 100;
 
 /** Count limit shared by first pages and legacy cursor continuations. */
 const MAX_PAGE_SIZE = 1000;
@@ -44,6 +81,18 @@ const blankAsUnset = <T extends z.ZodType>(schema: T) =>
 
 const formatCount = (n: number) => n.toLocaleString('en-US');
 
+/** A staged geo list's rows per NUTS level, in hierarchy order: "aggregate 1, country 34, NULL 2". */
+function levelCounts(values: readonly ListedValue[]): string {
+  const counts = new Map<GeoLevel | null, number>();
+  for (const { level = null } of values) counts.set(level, (counts.get(level) ?? 0) + 1);
+  return [...GEO_LEVEL_VALUES, null]
+    .flatMap((level) => {
+      const count = counts.get(level);
+      return count === undefined ? [] : [`${level ?? 'NULL'} ${formatCount(count)}`];
+    })
+    .join(', ');
+}
+
 type Value = { code: string; label: string };
 
 /** What a cursor is bound to: a cursor replayed with any of these changed is refused. */
@@ -53,6 +102,8 @@ interface CursorBinding {
   /** The folded filter words, sorted and space-joined; empty without a filter. */
   filter: string;
   geoLevel: string | null;
+  /** The folded code_prefix; empty without one. A cursor with no such field reads as empty. */
+  prefix: string;
 }
 
 /** The success payload, as the output schema declares it. */
@@ -75,6 +126,23 @@ interface PageEnrichment {
   truncated?: true;
 }
 
+/**
+ * The `content[]` Staged line. A geo table holds more rows than the inline level
+ * only when it was staged without geo_level, so every level: an explicit level
+ * stages exactly the `totalCount` values the page is drawn from.
+ */
+function stagedLine(result: DimensionValuesOutput): string {
+  const table = `**Staged:** table \`${result.tableName}\` on canvas \`${result.canvasId}\` (stagedRowCount ${result.stagedRowCount})`;
+  const next =
+    'inspect it with eurostat_dataframe_describe first, then join it in eurostat_dataframe_query';
+  if (!result.geoLevel) return `${table}, columns code and label — ${next}`;
+  const everyLevel =
+    result.stagedRowCount !== undefined && result.stagedRowCount > result.totalCount
+      ? ` — every geo level the dataset lists, not only the ${result.geoLevel} values below. Aggregates and regions overlap the countries they contain, so a JOIN on it keeps them beside the countries: filter level (e.g. g.level = 'country') before summing or averaging`
+      : '';
+  return `${table}, columns code, label and level (NUTS level, NULL when the code has none)${everyLevel} — ${next}`;
+}
+
 /** The `content[]` text of the payload. */
 function renderText(result: DimensionValuesOutput): string {
   const listed = result.values.length;
@@ -85,12 +153,8 @@ function renderText(result: DimensionValuesOutput): string {
     `**Total values:** ${result.totalCount}${result.matchCount === undefined ? partial(result.totalCount) : ''}`,
     ...(result.matchCount === undefined
       ? []
-      : [`**Matching filter:** ${result.matchCount}${partial(result.matchCount)}`]),
-    ...(result.tableName
-      ? [
-          `**Staged:** table \`${result.tableName}\` on canvas \`${result.canvasId}\` (stagedRowCount ${result.stagedRowCount}), columns code and label — inspect it with eurostat_dataframe_describe first, then join it in eurostat_dataframe_query`,
-        ]
-      : []),
+      : [`**Matching:** ${result.matchCount}${partial(result.matchCount)}`]),
+    ...(result.tableName ? [stagedLine(result)] : []),
     '',
   ];
   for (const v of result.values) {
@@ -108,7 +172,7 @@ function renderText(result: DimensionValuesOutput): string {
  */
 function readCursor(
   cursor: string,
-  binding: Pick<CursorBinding, 'dataset' | 'filter'>,
+  binding: Pick<CursorBinding, 'dataset' | 'filter' | 'prefix'>,
   ctx: Context,
 ): { after: string; dimension: unknown; geoLevel: unknown; limit: number } | undefined {
   try {
@@ -116,7 +180,8 @@ function readCursor(
     if (
       typeof state.after === 'string' &&
       state.dataset === binding.dataset &&
-      state.filter === binding.filter
+      state.filter === binding.filter &&
+      (state.prefix === undefined ? '' : state.prefix) === binding.prefix
     ) {
       return {
         after: state.after,
@@ -133,7 +198,7 @@ function readCursor(
 
 /** The refusal of a cursor that is malformed or belongs to another call. */
 const UNUSABLE_CURSOR =
-  'Unusable cursor: it is malformed, or was issued for a different dataset_code, dimension, geo_level or filter.';
+  'Unusable cursor: it is malformed, or was issued for a different dataset_code, dimension, geo_level, filter or code_prefix.';
 
 /**
  * Recovery for a `geo_level` that holds no value. `levels` are the ones the dataset
@@ -154,7 +219,7 @@ export const createEurostatGetDimensionValues = (clampLimits: boolean) =>
   tool('eurostat_get_dimension_values', {
     title: 'Get Eurostat Dimension Values',
     description:
-      'List the valid values for a dimension in a Eurostat dataset, preserving value codes and labels exactly. Use this when eurostat_get_dataset_info returns more values than its sample, or to confirm exact filter codes before querying. Dimension identifiers match exactly first, then case-insensitively; TIME_PERIOD aliases time. For geo, use geo_level to select the NUTS hierarchy (country, nuts1, nuts2, nuts3). To find codes in a long list, pass filter: words its code or label contains. Pages default to 25 values, maximum 1,000; pass nextCursor back as cursor for the next page with the same dataset, dimension, geo level and filter. Canonical and alias dimension spellings resume the same list. Pass canvas_id on the first call to also stage every value as a two-column code/label table, regardless of filter or limit. Inspect that table with eurostat_dataframe_describe, then search or join it with eurostat_dataframe_query.',
+      "List the valid values for a dimension in a Eurostat dataset, preserving value codes and labels exactly. Use this when eurostat_get_dataset_info returns more values than its sample, or to confirm exact filter codes before querying. Dimension identifiers match exactly first, then case-insensitively; TIME_PERIOD aliases time. For geo, use geo_level to select the NUTS hierarchy (country, nuts1, nuts2, nuts3). To find codes in a long list, pass filter: words its code or label contains. To list the codes under a parent, pass code_prefix: the codes starting with it, ignoring case, such as one country's regions (geo_level nuts2, code_prefix DE) or the CN codes under a heading; aggregates outside the code tree are not reached. Pages default to 25 values, maximum 1,000; pass nextCursor back as cursor for the next page with the same dataset, dimension, geo level, filter and code_prefix. Canonical and alias dimension spellings resume the same list. Pass canvas_id on the first call to also stage the dimension's whole list as a table, whatever filter, code_prefix or limit: columns code and label, plus level for geo. For geo, omitting geo_level stages every level, aggregates, countries and regions together, and an explicit geo_level only that level. Inspect that table with eurostat_dataframe_describe, then search or join it with eurostat_dataframe_query.",
     annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
     input: z.object({
       dataset_code: z
@@ -171,10 +236,13 @@ export const createEurostatGetDimensionValues = (clampLimits: boolean) =>
         .enum(GEO_LEVEL_VALUES)
         .optional()
         .describe(
-          'NUTS hierarchy level filter — applies only when dimension is "geo"; passing it with any other dimension is rejected. Options: "aggregate" (EU/EA codes), "country" (2-letter codes, default), "nuts1" (3-char), "nuts2" (4-char), "nuts3" (5-char).',
+          'NUTS hierarchy level filter — applies only when dimension is "geo"; passing it with any other dimension is rejected. Options: "aggregate" (EU/EA codes), "country" (2-letter codes, the inline default), "nuts1" (3-char), "nuts2" (4-char), "nuts3" (5-char). With canvas_id, an omitted geo_level stages every level and an explicit one only that level.',
         ),
       filter: blankAsUnset(z.string().max(FILTER_MAX_CHARS).optional()).describe(
         `Words to find, up to ${FILTER_MAX_CHARS} characters: keeps only values whose code and label, joined by a space, contain every whitespace-separated word as a substring — in any order, ignoring case and accents ("palma frankfurt" finds DE_EDDF_ES_LEPA, "zurich" finds Zürich). Punctuation is part of a word, and spellings are not transliterated ("münchen" does not find MUENCHEN). Runs over the whole list at the effective geo_level before paging and keeps Eurostat's order, with no ranking; matchCount counts the matches.`,
+      ),
+      code_prefix: blankAsUnset(z.string().max(CODE_PREFIX_MAX_CHARS).optional()).describe(
+        `Keep only values whose code starts with this text, ignoring case — the codes under a parent where codes nest by prefix: "DE" with geo_level "nuts2" lists the German NUTS 2 regions, "2204" on a CN product list lists the codes under that heading, parent code included. Aggregates outside the code tree (COICOP ELC_GAS, NRG) are not reached. Up to ${CODE_PREFIX_MAX_CHARS} characters, no wildcards, surrounding whitespace ignored. Applies within the effective geo_level (country when omitted) beside filter, before paging; matchCount counts the values passing both.`,
       ),
       limit: (clampLimits
         ? z.number().multipleOf(1).min(1)
@@ -185,10 +253,10 @@ export const createEurostatGetDimensionValues = (clampLimits: boolean) =>
           'Most values per page, default 25, maximum 1,000. Larger positive integers clamp with a notice when EUROSTAT_CLAMP_LIMITS is enabled. Fixed by the first call: with cursor, the cursor carries that limit and this field is ignored.',
         ),
       cursor: blankAsUnset(z.string().optional()).describe(
-        "Opaque nextCursor from the previous page; omit for the first page. It resumes after that page's last code and is bound to dataset_code, dimension, geo_level and filter, so send those unchanged. Cannot be combined with canvas_id on a deployment with a dataframe canvas.",
+        "Opaque nextCursor from the previous page; omit for the first page. It resumes after that page's last code and is bound to dataset_code, dimension, geo_level, filter and code_prefix, so send those unchanged. Cannot be combined with canvas_id on a deployment with a dataframe canvas.",
       ),
       canvas_id: CanvasIdSchema.optional().describe(
-        'Also stage the values on this dataframe canvas as a table with two columns, code and label, holding every value the dimension lists at the geo_level requested (country when it is omitted), whatever filter and limit are. Pass the canvasId a eurostat_download_dataset or eurostat_query_dataset response returned, then search the staged table with SQL or join it to a download on the dimension column (e.g., d.geo = g.code). Only on a call without cursor; omit to return the values inline only: this tool never starts a canvas. Ignored on deployments without a dataframe canvas.',
+        "Also stage the dimension's whole list on this dataframe canvas: every value it lists, whatever filter, code_prefix and limit are, narrowed only by an explicit geo_level. Columns code and label; a geo table adds level (aggregate, country, nuts1, nuts2, nuts3, or NULL for a code with no NUTS level). Without geo_level a geo table holds every level, and aggregates and regions overlap the countries they contain, so a JOIN on it keeps them beside the countries: filter level before summing or averaging. Pass the canvasId a eurostat_download_dataset or eurostat_query_dataset response returned, then search the staged table with SQL or join it to a download on the dimension column (e.g., d.geo = g.code). Only on a call without cursor; omit to return the values inline only: this tool never starts a canvas. Ignored on deployments without a dataframe canvas.",
       ),
     }),
     output: z.object({
@@ -198,7 +266,7 @@ export const createEurostatGetDimensionValues = (clampLimits: boolean) =>
         .enum(GEO_LEVEL_VALUES)
         .optional()
         .describe(
-          'Effective NUTS hierarchy level for the geo value set. Present only for the geo dimension; country is reported when geo_level was omitted.',
+          'Effective NUTS hierarchy level of the inline values. Present only for the geo dimension; country is reported when geo_level was omitted, though a geo table staged then holds every level.',
         ),
       values: z
         .array(
@@ -214,18 +282,18 @@ export const createEurostatGetDimensionValues = (clampLimits: boolean) =>
             .describe('A dimension value code and label pair.'),
         )
         .describe(
-          "This page of dataset-available values, in Eurostat's order — for geo, the subset at geoLevel; with filter, only the matches. A page holds the effective limit (default 25, maximum 1,000), fewer only at the end; truncated and nextCursor are set when more follow.",
+          "This page of dataset-available values, in Eurostat's order — for geo, the subset at geoLevel; with filter or code_prefix, only the matches. A page holds the effective limit (default 25, maximum 1,000), fewer only at the end; truncated and nextCursor are set when more follow.",
         ),
       totalCount: z
         .number()
         .describe(
-          'Number of distinct values the dimension lists, after geoLevel filtering for geo — every one, whatever filter and paging apply.',
+          'Number of distinct values the dimension lists, after geoLevel filtering for geo — every one, whatever filter, code_prefix and paging apply. A geo table staged without geo_level holds every level, so more rows (stagedRowCount).',
         ),
       matchCount: z
         .number()
         .optional()
         .describe(
-          'Values matching filter across the whole list, before paging. Present only when filter was passed.',
+          'Values passing filter and code_prefix across the whole list at geoLevel, before paging. Present only when filter or code_prefix was passed.',
         ),
       canvasId: z
         .string()
@@ -237,13 +305,13 @@ export const createEurostatGetDimensionValues = (clampLimits: boolean) =>
         .string()
         .optional()
         .describe(
-          'Canvas table holding every value as two VARCHAR columns, code and label. Call eurostat_dataframe_describe with canvasId first to confirm it, then join it in eurostat_dataframe_query. Omitted alongside canvasId.',
+          'Canvas table holding the staged list as VARCHAR columns code and label, plus level for geo. Call eurostat_dataframe_describe with canvasId first to confirm it, then join it in eurostat_dataframe_query. Omitted alongside canvasId.',
         ),
       stagedRowCount: z
         .number()
         .optional()
         .describe(
-          'Rows written to the canvas table. Equals totalCount. Omitted alongside tableName.',
+          "Rows written to the canvas table. Equals totalCount, except for a geo table staged without geo_level, which holds every level: then it equals the dataset's geo valuesCount from eurostat_get_dataset_info. Omitted alongside tableName.",
         ),
     }),
     enrichment: {
@@ -257,13 +325,13 @@ export const createEurostatGetDimensionValues = (clampLimits: boolean) =>
         .string()
         .optional()
         .describe(
-          "Opaque cursor for the next page. Pass it back as cursor with dataset_code, dimension, geo_level and filter unchanged; it resumes after this page's last code. Omitted on the last page.",
+          "Opaque cursor for the next page. Pass it back as cursor with dataset_code, dimension, geo_level, filter and code_prefix unchanged; it resumes after this page's last code. Omitted on the last page.",
         ),
       notice: z
         .string()
         .optional()
         .describe(
-          'Count-limit clamp disclosure, continuation routes (nextCursor, filter, canvas_id), or an explanation of a filter that matched nothing.',
+          'Count-limit clamp disclosure, continuation routes (nextCursor, filter, canvas_id), an explanation of a filter or code_prefix that matched nothing, or, for a geo table staged without geo_level that holds more rows than the country values listed, its rows per level and the warning that it holds every level.',
         ),
     },
     errors: [
@@ -291,9 +359,9 @@ export const createEurostatGetDimensionValues = (clampLimits: boolean) =>
       {
         reason: 'invalid_cursor',
         code: JsonRpcErrorCode.InvalidParams,
-        when: 'The cursor is malformed, was issued for a different dataset_code, dimension, geo_level or filter, or resumes after a code the list no longer holds.',
+        when: 'The cursor is malformed, was issued for a different dataset_code, dimension, geo_level, filter or code_prefix, or resumes after a code the list no longer holds.',
         recovery:
-          'Call again without cursor, keeping dataset_code, dimension, geo_level and filter, then page with the nextCursor that call returns.',
+          'Call again without cursor, keeping dataset_code, dimension, geo_level, filter and code_prefix, then page with the nextCursor that call returns.',
       },
       {
         reason: 'upstream_fault',
@@ -335,10 +403,13 @@ export const createEurostatGetDimensionValues = (clampLimits: boolean) =>
        */
       const tokens = input.filter ? filterTokens(input.filter) : [];
       const filtered = tokens.length > 0;
+      const prefix = input.code_prefix ? foldCodePrefix(input.code_prefix) : '';
+      const narrowed = filtered || prefix !== '';
       const binding: Omit<CursorBinding, 'geoLevel'> = {
         dataset: input.dataset_code.toLowerCase(),
         dimension: input.dimension,
         filter: [...tokens].sort().join(' '),
+        prefix,
       };
       const resume = input.cursor ? readCursor(input.cursor, binding, ctx) : undefined;
       if (input.cursor && !resume) throw ctx.fail('invalid_cursor', UNUSABLE_CURSOR);
@@ -413,11 +484,12 @@ export const createEurostatGetDimensionValues = (clampLimits: boolean) =>
        * Staging needs a caller-supplied canvas: without canvas_id there is nothing
        * to acquire, so a plain lookup never takes a canvas slot. An empty list
        * stages nothing rather than a 0-row table. The table is written from the
-       * service's whole value list, whatever bound applies to the inline array.
+       * dimension's whole list, narrowed only by an explicit geo_level: filter,
+       * limit, cursor and the inline country default shape the page alone.
        */
       const canvas = input.canvas_id ? getCanvas() : undefined;
       let staged: { canvasId: string; stagedRowCount: number; tableName: string } | undefined;
-      if (canvas && result.values.length > 0) {
+      if (canvas && result.listedValues.length > 0) {
         // Re-thrown so the declared recovery replaces the canvas service's generic one.
         const instance = await acquireCanvas(canvas, input.canvas_id, ctx).catch((err: unknown) => {
           if (isCanvasFailure(err, 'canvas_not_found')) {
@@ -430,8 +502,8 @@ export const createEurostatGetDimensionValues = (clampLimits: boolean) =>
           }
           throw err;
         });
-        const handle = await instance.registerTable(newTableName(), result.values, {
-          schema: VALUE_TABLE_SCHEMA,
+        const handle = await instance.registerTable(newTableName(), result.listedValues, {
+          schema: result.geoLevel ? GEO_VALUE_TABLE_SCHEMA : VALUE_TABLE_SCHEMA,
           signal: ctx.signal,
         });
         staged = {
@@ -440,8 +512,19 @@ export const createEurostatGetDimensionValues = (clampLimits: boolean) =>
           tableName: handle.tableName,
         };
       }
+      /**
+       * A geo table staged without geo_level that holds more rows than the country
+       * default lists holds other levels, so a JOIN on it stops acting as the country
+       * filter the inline default suggests: said on every such call, whatever page it
+       * returns, and never for a list that holds countries alone.
+       */
+      const everyLevelNotice =
+        staged && result.geoLevel && !input.geo_level && staged.stagedRowCount > result.totalCount
+          ? `Table \`${staged.tableName}\` on canvas \`${staged.canvasId}\` holds every "geo" level "${input.dataset_code}" lists, not only the ${result.geoLevel} values listed here — ${levelCounts(result.listedValues)} — with each code's level in a level column (NULL for a code with no NUTS level). Aggregates and regions overlap the countries they contain, so a JOIN on this table keeps them beside the countries: filter g.level (e.g. WHERE g.level = 'country') before summing or averaging, or pass geo_level to stage one level. Search or join it with eurostat_dataframe_query.`
+          : undefined;
 
-      const matched = filtered ? matchValues(result.values, tokens) : result.values;
+      const prefixed = prefix ? matchCodePrefix(result.values, prefix) : result.values;
+      const matched = filtered ? matchValues(prefixed, tokens) : prefixed;
       const geoLevel = result.geoLevel ?? null;
 
       /**
@@ -464,28 +547,39 @@ export const createEurostatGetDimensionValues = (clampLimits: boolean) =>
         if (anchor < 0) {
           throw ctx.fail(
             'invalid_cursor',
-            `Unusable cursor: it resumes after "${resume.after}", which the "${input.dimension}" values of "${input.dataset_code}" no longer list${filtered ? ' under this filter' : ''}.`,
+            `Unusable cursor: it resumes after "${resume.after}", which the "${input.dimension}" values of "${input.dataset_code}" no longer list${narrowed ? ` under this ${[filtered && 'filter', prefix && 'code_prefix'].filter(Boolean).join(' and ')}` : ''}.`,
           );
         }
         start = anchor + 1;
       }
 
       const filterEcho = input.filter?.trim().replace(/\s+/g, ' ');
-      const pool = filtered
-        ? `${formatCount(matched.length)} values matching filter "${filterEcho}"`
+      const prefixEcho = input.code_prefix?.trim();
+      const matching = filtered ? ` matching filter "${filterEcho}"` : '';
+      const pool = narrowed
+        ? `${formatCount(matched.length)} values${prefix ? ` with code prefix "${prefixEcho}"` : ''}${matching}`
         : `${formatCount(matched.length)} "${input.dimension}" values`;
       const canvasRoute = staged
-        ? ` Every one of the ${formatCount(staged.stagedRowCount)} values is staged as table "${staged.tableName}" on canvas "${staged.canvasId}" — search it with eurostat_dataframe_query (e.g. SELECT code, label FROM ${staged.tableName} WHERE label ILIKE '%term%').`
+        ? everyLevelNotice
+          ? ''
+          : ` Every one of the ${formatCount(staged.stagedRowCount)} values is staged as table \`${staged.tableName}\` on canvas \`${staged.canvasId}\` — search it with eurostat_dataframe_query (e.g. \`SELECT code, label FROM ${staged.tableName} WHERE label ILIKE '%term%'\`).`
         : getCanvas()
-          ? ` Or, on a call without cursor, pass canvas_id — the canvasId of a eurostat_query_dataset or eurostat_download_dataset response — to stage all ${formatCount(result.totalCount)} as a code/label table to search with eurostat_dataframe_query.`
+          ? ` Or, on a call without cursor, pass canvas_id — the canvasId of a eurostat_query_dataset or eurostat_download_dataset response — to stage all ${
+              result.geoLevel
+                ? `${formatCount(result.listedValues.length)} "geo" values${input.geo_level ? ` at geo_level "${input.geo_level}"` : ', every level,'} as a code/label/level table`
+                : `${formatCount(result.listedValues.length)} as a code/label table`
+            } to search with eurostat_dataframe_query.`
           : '';
 
       const page = (k: number): { enrichment: PageEnrichment; output: DimensionValuesOutput } => {
         const values = matched.slice(start, start + k);
         const output: DimensionValuesOutput = {
-          ...result,
+          dimensionCode: result.dimensionCode,
+          dimensionLabel: result.dimensionLabel,
+          ...(result.geoLevel && { geoLevel: result.geoLevel }),
           values,
-          ...(filtered && { matchCount: matched.length }),
+          totalCount: result.totalCount,
+          ...(narrowed && { matchCount: matched.length }),
           ...staged,
         };
         if (start + k < matched.length) {
@@ -505,32 +599,47 @@ export const createEurostatGetDimensionValues = (clampLimits: boolean) =>
             },
           };
         }
-        // An empty page needs saying only when a cursor or filter emptied it.
-        if (values.length > 0 || !(input.cursor || filtered)) return { output, enrichment: {} };
-        return {
-          output,
-          enrichment: {
-            notice: input.cursor
-              ? `No "${input.dimension}" values of "${input.dataset_code}" follow the code this cursor resumes after: the list ends there.`
-              : `No "${input.dimension}" value${result.geoLevel ? ` at geo_level "${result.geoLevel}"` : ''} of "${input.dataset_code}" matched filter "${filterEcho}": every word must appear in a value's code or label, in any order, ignoring case and accents. Drop or shorten a word, or ${
-                  staged
-                    ? `search all ${formatCount(staged.stagedRowCount)} values, staged as table "${staged.tableName}" on canvas "${staged.canvasId}", with eurostat_dataframe_query (e.g. SELECT code, label FROM ${staged.tableName} WHERE label ILIKE '%term%').`
-                    : `call without filter to page through all ${formatCount(result.totalCount)}.`
-                }`,
-          },
-        };
+        // An empty page needs saying only when a cursor, filter or code_prefix emptied it.
+        if (values.length > 0 || !(input.cursor || narrowed)) return { output, enrichment: {} };
+        return { output, enrichment: { notice: emptyPageNotice() } };
+      };
+      const emptyPageNotice = (): string => {
+        if (input.cursor) {
+          return `No "${input.dimension}" values of "${input.dataset_code}" follow the code this cursor resumes after: the list ends there.`;
+        }
+        const atLevel = result.geoLevel ? ` at geo_level "${result.geoLevel}"` : '';
+        const searchStaged = (table: NonNullable<typeof staged>) =>
+          `search all ${formatCount(table.stagedRowCount)} values, staged as table \`${table.tableName}\` on canvas \`${table.canvasId}\`, with eurostat_dataframe_query`;
+        if (!prefix) {
+          const filterRoute = result.geoLevel
+            ? ` filter applies within geo_level "${result.geoLevel}": pass another geo_level to search the codes of that level.`
+            : '';
+          return `No "${input.dimension}" value${atLevel} of "${input.dataset_code}" matched filter "${filterEcho}": every word must appear in a value's code or label, in any order, ignoring case and accents.${filterRoute} Drop or shorten a word, or ${
+            staged
+              ? `${searchStaged(staged)} (e.g. \`SELECT code, label FROM ${staged.tableName} WHERE label ILIKE '%term%'\`).`
+              : `call without filter to page through all ${formatCount(result.totalCount)}.`
+          }`;
+        }
+        const levelRoute = result.geoLevel
+          ? ` code_prefix applies within geo_level "${result.geoLevel}": pass another geo_level to list the codes of that level.`
+          : '';
+        return `No "${input.dimension}" value${atLevel} of "${input.dataset_code}" has a code starting with code_prefix "${prefixEcho}"${filtered ? ` and matches filter "${filterEcho}"` : ''}, ignoring case.${dottedPrefixAdvice(input.dataset_code, prefixEcho)}${levelRoute} Shorten or drop code_prefix${filtered ? ' or filter' : ''}, or ${
+          staged
+            ? `${searchStaged(staged)}.`
+            : `call without ${filtered ? 'them' : 'it'} to page through all ${formatCount(result.totalCount)}.`
+        }`;
       };
       const { output, enrichment } = page(Math.min(pageLimit, matched.length - start));
       const { notice, ...fields } = enrichment;
       ctx.enrich(fields);
-      const notices = [applied.notice, notice].filter(Boolean);
+      const notices = [applied.notice, notice, everyLevelNotice].filter(Boolean);
       if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
       ctx.log.info('Dimension values fetched', {
         datasetCode: input.dataset_code,
         dimension: input.dimension,
         totalCount: result.totalCount,
-        ...(filtered && { matchCount: matched.length }),
+        ...(narrowed && { matchCount: matched.length }),
         shown: output.values.length,
         hasMore: enrichment.truncated === true,
         ...(staged && { canvasId: staged.canvasId, tableName: staged.tableName }),

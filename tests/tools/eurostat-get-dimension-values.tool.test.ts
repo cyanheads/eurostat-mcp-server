@@ -11,6 +11,12 @@ import { decodeCursor, encodeCursor } from '@cyanheads/mcp-ts-core/utils';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eurostatGetDimensionValues } from '@/mcp-server/tools/definitions/eurostat-get-dimension-values.tool.js';
 import { setCanvas } from '@/services/canvas-accessor.js';
+import { GEO_LEVEL_VALUES } from '@/services/eurostat-data/types.js';
+import {
+  CONSTRAINT_WITH_UNMAPPED_LEVELS_XML,
+  DATAFLOW_WITH_UNMAPPED_LEVELS_XML,
+  UNMAPPED_GEO_CODES,
+} from '../fixtures/dimension-values/geo-unmapped-levels.js';
 import {
   SDMX_CONSTRAINT_WITHOUT_COUNTRIES_XML,
   SDMX_CONSTRAINT_XML,
@@ -346,15 +352,20 @@ describe('eurostatGetDimensionValues — staging on a canvas (#50)', () => {
     expect(staged.rows).toContainEqual({ code: 'U01', label: 'Euro & national currency' });
   });
 
-  it('lists the staged table through eurostat_dataframe_describe beside the bulk table', async () => {
+  it('lists the staged tables through eurostat_dataframe_describe beside the bulk table, level on geo alone (#99)', async () => {
     const { canvasId, bulk } = await canvasWithBulkTable();
-    const staged = await runToolContract(eurostatGetDimensionValues, {
-      dataset_code: 'demo_r_pjangrp3',
-      dimension: 'geo',
-      geo_level: 'nuts3',
-      canvas_id: canvasId,
-    });
-    const { tableName } = staged.structuredContent as { tableName: string };
+    const stage = async (input: Record<string, unknown>) =>
+      (
+        (
+          await runToolContract(eurostatGetDimensionValues, {
+            dataset_code: 'demo_r_pjangrp3',
+            canvas_id: canvasId,
+            ...input,
+          } as never)
+        ).structuredContent as { tableName: string }
+      ).tableName;
+    const geoTable = await stage({ dimension: 'geo', geo_level: 'nuts3' });
+    const unitTable = await stage({ dimension: 'unit' });
 
     const { eurostatDataframeDescribe } = await import(
       '@/mcp-server/tools/definitions/eurostat-dataframe-describe.tool.js'
@@ -362,14 +373,23 @@ describe('eurostatGetDimensionValues — staging on a canvas (#50)', () => {
     const described = await runToolContract(eurostatDataframeDescribe, { canvas_id: canvasId });
     const tables = (
       described.structuredContent as {
-        tables: Array<{ columns: Array<{ name: string }>; name: string }>;
+        tables: Array<{ columns: Array<{ name: string; type: string }>; name: string }>;
       }
     ).tables;
-    expect(tables.map(({ name }) => name).sort()).toEqual([bulk, tableName].sort());
-    expect(tables.find(({ name }) => name === tableName)?.columns.map(({ name }) => name)).toEqual([
-      'code',
-      'label',
+    expect(tables.map(({ name }) => name).sort()).toEqual([bulk, geoTable, unitTable].sort());
+    const columnsOf = (table: string) =>
+      tables.find(({ name }) => name === table)?.columns.map(({ name, type }) => [name, type]);
+    expect(columnsOf(geoTable)).toEqual([
+      ['code', 'VARCHAR'],
+      ['label', 'VARCHAR'],
+      ['level', 'VARCHAR'],
     ]);
+    expect(columnsOf(unitTable)).toEqual([
+      ['code', 'VARCHAR'],
+      ['label', 'VARCHAR'],
+    ]);
+    // The describe tool's content[] carries the same column lists.
+    expect(textOf(described)).toMatch(new RegExp(`${geoTable}[\\s\\S]*level`));
   });
 
   it('labels a code-only table through a join, one row per NUTS-3 code and no other level', async () => {
@@ -394,21 +414,49 @@ describe('eurostatGetDimensionValues — staging on a canvas (#50)', () => {
     ]);
   });
 
-  it('stages country codes only when geo_level is omitted', async () => {
-    const { canvasId } = await canvasWithBulkTable();
+  it('stages every level, each code with its level, when geo_level is omitted (#99)', async () => {
+    const { canvasId, bulk } = await canvasWithBulkTable();
     const result = await runToolContract(eurostatGetDimensionValues, {
       dataset_code: 'demo_r_pjangrp3',
       dimension: 'geo',
       canvas_id: canvasId,
     });
-    const { tableName, stagedRowCount } = result.structuredContent as {
+    const { tableName, stagedRowCount, totalCount, values } = result.structuredContent as {
       stagedRowCount: number;
       tableName: string;
+      totalCount: number;
+      values: Value[];
     };
-    expect(stagedRowCount).toBe(2);
+    // The inline page keeps its country default; the table does not.
+    expect(values).toEqual([
+      { code: 'DE', label: 'Germany' },
+      { code: 'FR', label: 'France' },
+    ]);
+    expect(totalCount).toBe(2);
+    expect(stagedRowCount).toBe(7);
     const instance = await canvas.acquire(canvasId, ctx());
-    const rows = (await instance.query(`SELECT code FROM ${tableName} ORDER BY code`)).rows;
-    expect(rows).toEqual([{ code: 'DE' }, { code: 'FR' }]);
+    const rows = (await instance.query(`SELECT code, label, level FROM ${tableName}`)).rows;
+    expect(rows).toEqual([
+      { code: 'EU27_2020', label: 'European Union - 27 countries', level: 'aggregate' },
+      { code: 'EA20', label: 'Euro area - 20 countries', level: 'aggregate' },
+      { code: 'DE', label: 'Germany', level: 'country' },
+      { code: 'FR', label: 'France', level: 'country' },
+      { code: 'DE1', label: 'Baden-Württemberg', level: 'nuts1' },
+      { code: 'DE11', label: 'Stuttgart', level: 'nuts2' },
+      { code: 'DE111', label: 'Stuttgart, Stadtkreis', level: 'nuts3' },
+    ]);
+    // A JOIN labels every row of the download, DE112 aside, which no value list carries.
+    const joined = await instance.query(
+      `SELECT d.geo, g.level FROM ${bulk} d JOIN ${tableName} g ON d.geo = g.code ORDER BY d.obs_value`,
+    );
+    expect(joined.rows.map(({ geo }) => geo)).toEqual([
+      'EU27_2020',
+      'DE',
+      'FR',
+      'DE1',
+      'DE11',
+      'DE111',
+    ]);
   });
 
   it('names the table and canvas in content[] and points at describe, then query', async () => {
@@ -456,6 +504,7 @@ describe('eurostatGetDimensionValues — staging on a canvas (#50)', () => {
         dimensionLabel: 'Observation status',
         values: [],
         totalCount: 0,
+        listedValues: [],
       }),
     } as never);
     const result = await runToolContract(eurostatGetDimensionValues, {
@@ -525,6 +574,7 @@ describe('eurostatGetDimensionValues — staging on a canvas (#50)', () => {
         geoLevel: 'nuts3',
         values,
         totalCount: values.length,
+        listedValues: values.map((value) => ({ ...value, level: 'nuts3' })),
       }),
     } as never);
     const { canvasId } = await canvasWithBulkTable();
@@ -554,6 +604,7 @@ describe('eurostatGetDimensionValues — staging on a canvas (#50)', () => {
         dimensionLabel: 'Observation status',
         values: [],
         totalCount: 0,
+        listedValues: [],
       }),
     } as never);
     const { canvasId, bulk } = await canvasWithBulkTable();
@@ -569,6 +620,667 @@ describe('eurostatGetDimensionValues — staging on a canvas (#50)', () => {
     expect(result.structuredContent).not.toHaveProperty('tableName');
     const instance = await canvas.acquire(canvasId, ctx());
     expect((await instance.describe()).map(({ name }) => name)).toEqual([bulk]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Every geo level on a canvas (#99) — the real data service over nama_10r_2gdp's
+// dataflow and content constraint as Eurostat served them on 2026-11-08: 471 geo
+// codes, 1 aggregate, 34 countries, 127 NUTS 1 and 309 NUTS 2.
+// ---------------------------------------------------------------------------
+
+const recordedXml = (name: string) =>
+  readFileSync(new URL(`../fixtures/dimension-values/${name}.xml`, import.meta.url), 'utf8');
+
+/** Answers both structure reads of any dataset with nama_10r_2gdp's recorded pair. */
+async function namaRegionalFetch(input: unknown): Promise<Response> {
+  const { pathname } = new URL(String(input));
+  if (pathname.includes('/sdmx/2.1/dataflow/')) {
+    return new Response(recordedXml('nama-10r-2gdp-dataflow'), { status: 200 });
+  }
+  if (pathname.includes('/sdmx/2.1/contentconstraint/')) {
+    return new Response(recordedXml('nama-10r-2gdp-constraint'), { status: 200 });
+  }
+  throw new Error(`Unexpected URL: ${pathname}`);
+}
+
+/** Underscores at both ends: in running text, Markdown reads the ID as emphasis. */
+const EMPHASIS_ID = '_abcdefgh_';
+
+/** `canvas`, answering every acquire with one of its canvases under `id`, which it would never mint. */
+async function underId(canvas: DataCanvas, id: string): Promise<DataCanvas> {
+  const instance = await canvas.acquire(undefined, createMockContext({ tenantId: 'default' }));
+  const renamed = new Proxy(instance, {
+    get: (target, key) => {
+      if (key === 'canvasId') return id;
+      const value: unknown = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return { acquire: async () => renamed } as never;
+}
+
+describe('eurostatGetDimensionValues — every geo level on a canvas (#99)', () => {
+  let canvas: DataCanvas;
+  let teardown: () => Promise<void>;
+  const ctx = () => createMockContext({ tenantId: 'default' });
+  const geo = (extra: Record<string, unknown> = {}) =>
+    runToolContract(eurostatGetDimensionValues, {
+      dataset_code: 'nama_10r_2gdp',
+      dimension: 'geo',
+      ...extra,
+    } as never);
+
+  beforeAll(async () => {
+    ({ canvas, teardown } = withRealCanvas());
+    await canvas.acquire(undefined, ctx());
+  });
+  afterAll(async () => {
+    await teardown();
+  });
+  beforeEach(() => {
+    setCanvas(canvas);
+    vi.stubGlobal('fetch', vi.fn(namaRegionalFetch));
+    vi.mocked(getEurostatDataService).mockReturnValue(
+      new EurostatDataService({} as never, {} as never),
+    );
+  });
+  afterEach(() => {
+    setCanvas(undefined);
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('pages the 34 countries inline when geo_level is omitted (characterization)', async () => {
+    const result = await geo({ limit: 1000 });
+    const body = result.structuredContent as {
+      geoLevel: string;
+      totalCount: number;
+      values: Array<{ code: string; label: string }>;
+    };
+    expect(body.geoLevel).toBe('country');
+    expect(body.totalCount).toBe(34);
+    expect(body.values).toHaveLength(34);
+    expect(body.values.every(({ code }) => /^[A-Z]{2}$/.test(code))).toBe(true);
+    expect(body.values.slice(0, 3)).toEqual([
+      { code: 'BE', label: 'Belgium' },
+      { code: 'BG', label: 'Bulgaria' },
+      { code: 'CZ', label: 'Czechia' },
+    ]);
+    expect(result.structuredContent).not.toHaveProperty('matchCount');
+    expect(textOf(result)).toContain('**Geo level:** `country`');
+    expect(textOf(result)).toContain('**Total values:** 34\n');
+  });
+
+  type Staged = {
+    canvasId: string;
+    geoLevel: string;
+    notice?: string;
+    stagedRowCount: number;
+    tableName: string;
+    totalCount: number;
+    values: Array<{ code: string; label: string }>;
+  };
+  /** The payload through the production output parse, so every field is a declared one. */
+  const stagedBody = (result: Awaited<ReturnType<typeof geo>>) =>
+    eurostatGetDimensionValues.output.parse(result.structuredContent) as Staged;
+  const levelsOf = async (canvasId: string, table: string) =>
+    (
+      await (
+        await canvas.acquire(canvasId, ctx())
+      ).query(
+        `SELECT level, CAST(COUNT(*) AS INTEGER) AS n FROM ${table} GROUP BY level ORDER BY level NULLS LAST`,
+      )
+    ).rows;
+
+  it('stages all 471 geo codes with their level when geo_level is omitted, the page unchanged', async () => {
+    const { canvasId } = await canvas.acquire(undefined, ctx());
+    const result = await geo({ canvas_id: canvasId, limit: 1000 });
+    const body = stagedBody(result);
+    const structured = result.structuredContent as Staged;
+
+    // The inline page is the country default, exactly as without canvas_id.
+    expect(body.geoLevel).toBe('country');
+    expect(body.totalCount).toBe(34);
+    expect(body.values).toHaveLength(34);
+    expect(body.stagedRowCount).toBe(471);
+
+    // stagedRowCount is the dataset's geo valuesCount, as eurostat_get_dataset_info reports it.
+    const { eurostatGetDatasetInfo } = await import(
+      '@/mcp-server/tools/definitions/eurostat-get-dataset-info.tool.js'
+    );
+    const info = await runToolContract(eurostatGetDatasetInfo, { dataset_code: 'nama_10r_2gdp' });
+    const geoInfo = (
+      info.structuredContent as { dimensions: Array<{ code: string; valuesCount?: number }> }
+    ).dimensions.find(({ code }) => code === 'geo');
+    expect(geoInfo?.valuesCount).toBe(body.stagedRowCount);
+
+    expect(await levelsOf(canvasId, body.tableName)).toEqual([
+      { level: 'aggregate', n: 1 },
+      { level: 'country', n: 34 },
+      { level: 'nuts1', n: 127 },
+      { level: 'nuts2', n: 309 },
+    ]);
+
+    // Both surfaces carry the every-level disclosure and the overlap warning.
+    expect(structured.notice).toBe(
+      `Table \`${body.tableName}\` on canvas \`${canvasId}\` holds every "geo" level "nama_10r_2gdp" lists, not only the country values listed here — aggregate 1, country 34, nuts1 127, nuts2 309 — with each code's level in a level column (NULL for a code with no NUTS level). Aggregates and regions overlap the countries they contain, so a JOIN on this table keeps them beside the countries: filter g.level (e.g. WHERE g.level = 'country') before summing or averaging, or pass geo_level to stage one level. Search or join it with eurostat_dataframe_query.`,
+    );
+    const text = textOf(result);
+    expect(text).toContain(`> ${structured.notice}`);
+    expect(text).toContain(
+      `**Staged:** table \`${body.tableName}\` on canvas \`${canvasId}\` (stagedRowCount 471), columns code, label and level (NUTS level, NULL when the code has none) — every geo level the dataset lists, not only the country values below. Aggregates and regions overlap the countries they contain, so a JOIN on it keeps them beside the countries: filter level (e.g. g.level = 'country') before summing or averaging — inspect it with eurostat_dataframe_describe first, then join it in eurostat_dataframe_query`,
+    );
+  });
+
+  it('labels every row of an all-level download through a JOIN, and selects countries by level', async () => {
+    const instance = await canvas.acquire(undefined, ctx());
+    const result = await geo({ canvas_id: instance.canvasId });
+    const { tableName } = stagedBody(result);
+    // A code-only table holding one row per geo code the dataset lists, as a download does.
+    const codes = (await instance.query(`SELECT code FROM ${tableName}`)).rows.map(
+      ({ code }) => code as string,
+    );
+    await instance.registerTable(
+      'df_bulk0099',
+      codes.map((code, i) => ({ geo: code, obs_value: i })),
+      {
+        schema: [
+          { name: 'geo', type: 'VARCHAR' },
+          { name: 'obs_value', type: 'DOUBLE' },
+        ],
+      },
+    );
+    const count = async (sql: string) =>
+      (await instance.query(`SELECT CAST(COUNT(*) AS INTEGER) AS n FROM ${sql}`)).rows[0];
+    expect(await count(`df_bulk0099 d JOIN ${tableName} g ON d.geo = g.code`)).toEqual({
+      n: 471,
+    });
+    expect(
+      await count(`df_bulk0099 d LEFT JOIN ${tableName} g ON d.geo = g.code WHERE g.label IS NULL`),
+    ).toEqual({ n: 0 });
+    expect(
+      await count(`df_bulk0099 d JOIN ${tableName} g ON d.geo = g.code WHERE g.level = 'country'`),
+    ).toEqual({ n: 34 });
+  });
+
+  it.each([
+    ['nuts2', 309],
+    ['country', 34],
+  ] as const)(
+    'stages only geo_level %s when it is passed, every row at that level, with no every-level notice',
+    async (level, rows) => {
+      const { canvasId } = await canvas.acquire(undefined, ctx());
+      const result = await geo({ canvas_id: canvasId, geo_level: level, limit: 1000 });
+      const body = stagedBody(result);
+      expect(body).toMatchObject({ geoLevel: level, totalCount: rows, stagedRowCount: rows });
+      expect(await levelsOf(canvasId, body.tableName)).toEqual([{ level, n: rows }]);
+      expect(result.structuredContent).not.toHaveProperty('notice');
+      const text = textOf(result);
+      expect(text).toContain(
+        `**Staged:** table \`${body.tableName}\` on canvas \`${canvasId}\` (stagedRowCount ${rows}), columns code, label and level (NUTS level, NULL when the code has none) — inspect it with eurostat_dataframe_describe first`,
+      );
+      expect(text).not.toContain('every geo level');
+    },
+  );
+
+  it('sends the page notice and the every-level notice together, naming the table once', async () => {
+    const { canvasId } = await canvas.acquire(undefined, ctx());
+    const result = await geo({ canvas_id: canvasId, limit: 5 });
+    const { notice, tableName } = result.structuredContent as Staged;
+    expect(notice).toContain(
+      'Values 1–5 of 34 "geo" values, in Eurostat\'s order; limit 5 ended this page.',
+    );
+    expect(notice).toContain('holds every "geo" level "nama_10r_2gdp" lists');
+    expect(notice?.split(tableName)).toHaveLength(2);
+    expect(notice).not.toContain('Every one of the');
+    expect(textOf(result)).toContain(`> ${notice}`);
+  });
+
+  it.each([
+    [{}, 'to stage all 471 "geo" values, every level, as a code/label/level table'],
+    [
+      { geo_level: 'nuts2' },
+      'to stage all 309 "geo" values at geo_level "nuts2" as a code/label/level table',
+    ],
+  ])('offers canvas_id with the count a table would hold (%o)', async (extra, offer) => {
+    const result = await geo({ limit: 5, ...extra });
+    expect((result.structuredContent as Staged).notice).toContain(offer);
+  });
+
+  it('renders the canvas ID and table name as code spans in the every-level notice', async () => {
+    setCanvas(await underId(canvas, EMPHASIS_ID));
+    const result = await geo({ canvas_id: EMPHASIS_ID, limit: 1000 });
+    const { notice, tableName } = result.structuredContent as Staged;
+    const named = `Table \`${tableName}\` on canvas \`${EMPHASIS_ID}\` holds every "geo" level`;
+    expect(notice).toContain(named);
+    expect(textOf(result)).toContain(`> ${named}`);
+  });
+});
+
+describe('eurostatGetDimensionValues — geo codes with no NUTS level (#99)', () => {
+  let canvas: DataCanvas;
+  let teardown: () => Promise<void>;
+  const ctx = () => createMockContext({ tenantId: 'default' });
+
+  beforeAll(async () => {
+    ({ canvas, teardown } = withRealCanvas());
+    await canvas.acquire(undefined, ctx());
+  });
+  afterAll(async () => {
+    await teardown();
+  });
+  beforeEach(() => {
+    setCanvas(canvas);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        const { pathname } = new URL(String(input));
+        if (pathname.includes('/sdmx/2.1/dataflow/'))
+          return new Response(DATAFLOW_WITH_UNMAPPED_LEVELS_XML, { status: 200 });
+        return new Response(CONSTRAINT_WITH_UNMAPPED_LEVELS_XML, { status: 200 });
+      }),
+    );
+    vi.mocked(getEurostatDataService).mockReturnValue(
+      new EurostatDataService({} as never, {} as never),
+    );
+  });
+  afterEach(() => {
+    setCanvas(undefined);
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('stages a code whose LEVEL is OTH, 5 or absent with level NULL, and counts them', async () => {
+    const instance = await canvas.acquire(undefined, ctx());
+    const result = await runToolContract(eurostatGetDimensionValues, {
+      dataset_code: 'earn_ses_annual',
+      dimension: 'geo',
+      canvas_id: instance.canvasId,
+    });
+    const { notice, stagedRowCount, tableName } = result.structuredContent as {
+      notice: string;
+      stagedRowCount: number;
+      tableName: string;
+    };
+    expect(stagedRowCount).toBe(10);
+    const unmapped = await instance.query(
+      `SELECT code, label, level FROM ${tableName} WHERE level IS NULL`,
+    );
+    expect(unmapped.rows).toEqual(UNMAPPED_GEO_CODES.map((value) => ({ ...value, level: null })));
+    expect(notice).toContain('aggregate 2, country 2, nuts1 1, nuts2 1, nuts3 1, NULL 3');
+    expect(textOf(result)).toContain('NULL 3');
+  });
+
+  it('leaves them out of every explicit geo_level', async () => {
+    const instance = await canvas.acquire(undefined, ctx());
+    for (const geo_level of GEO_LEVEL_VALUES) {
+      const result = await runToolContract(eurostatGetDimensionValues, {
+        dataset_code: 'earn_ses_annual',
+        dimension: 'geo',
+        geo_level,
+        canvas_id: instance.canvasId,
+      });
+      const { tableName } = result.structuredContent as { tableName: string };
+      const nulls = await instance.query(
+        `SELECT CAST(COUNT(*) AS INTEGER) AS n FROM ${tableName} WHERE level IS NULL OR level <> '${geo_level}'`,
+      );
+      expect(nulls.rows).toEqual([{ n: 0 }]);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// code_prefix (#102) — the codes under a parent: the real data service over
+// nama_10r_2gdp's recorded structure, and recorded CN and COICOP lists.
+// ---------------------------------------------------------------------------
+
+describe('eurostatGetDimensionValues — code_prefix (#102)', () => {
+  type Page = {
+    matchCount?: number;
+    nextCursor?: string;
+    notice?: string;
+    totalCount: number;
+    values: Value[];
+  };
+  const call = (input: Record<string, unknown>) =>
+    runToolContract(eurostatGetDimensionValues, {
+      dataset_code: 'nama_10r_2gdp',
+      dimension: 'geo',
+      ...input,
+    } as never);
+  const body = (result: Awaited<ReturnType<typeof call>>) => result.structuredContent as Page;
+  const errorReason = (result: Awaited<ReturnType<typeof call>>) =>
+    (result.structuredContent as { error?: { data?: { reason?: string } } }).error?.data?.reason;
+
+  beforeEach(() => {
+    setCanvas(undefined);
+    vi.stubGlobal('fetch', vi.fn(namaRegionalFetch));
+    vi.mocked(getEurostatDataService).mockReturnValue(
+      new EurostatDataService({} as never, {} as never),
+    );
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it.each(['DE', 'de', ' De '])(
+    'lists the 38 German NUTS 2 regions with code_prefix "%s", matchCount 38 of 309',
+    async (code_prefix) => {
+      const result = await call({ geo_level: 'nuts2', code_prefix, limit: 1000 });
+      expect(result.isError).not.toBe(true);
+      const page = eurostatGetDimensionValues.output.parse(result.structuredContent);
+      expect(page).toMatchObject({ geoLevel: 'nuts2', matchCount: 38, totalCount: 309 });
+      expect(page.values).toHaveLength(38);
+      expect(page.values.every(({ code }) => code.startsWith('DE'))).toBe(true);
+      expect(page.values[0]).toEqual({ code: 'DE11', label: 'Stuttgart' });
+      expect(page.values.at(-1)).toEqual({ code: 'DEG0', label: 'Thüringen' });
+      expect(page.values.map(({ code }) => code)).not.toContain('ES30');
+      const text = textOf(result);
+      expect(text).toContain('**Total values:** 309\n**Matching:** 38\n');
+      expect(text).toContain('- `DEG0` — Thüringen');
+    },
+  );
+
+  it('narrows with filter: "ober" finds four NUTS 2 regions, three of them under DE', async () => {
+    expect(
+      body(await call({ geo_level: 'nuts2', filter: 'ober' })).values.map(({ code }) => code),
+    ).toEqual(['DE21', 'DE23', 'DE24', 'AT31']);
+    const both = await call({ geo_level: 'nuts2', filter: 'ober', code_prefix: 'DE' });
+    expect(body(both)).toMatchObject({ matchCount: 3, totalCount: 309 });
+    expect(body(both).values.map(({ code }) => code)).toEqual(['DE21', 'DE23', 'DE24']);
+  });
+
+  it('pages a prefix list and names code_prefix in the page notice', async () => {
+    const first = await call({ geo_level: 'nuts2', code_prefix: 'FR', limit: 5 });
+    expect(body(first)).toMatchObject({ matchCount: 28, totalCount: 309, truncated: true });
+    expect(body(first).notice).toContain(
+      'Values 1–5 of 28 values with code prefix "FR", in Eurostat\'s order; limit 5 ended this page.',
+    );
+    expect(textOf(first)).toContain('**Matching:** 28 — 5 listed below');
+    const both = await call({
+      geo_level: 'nuts2',
+      code_prefix: 'DE',
+      filter: 'r',
+      limit: 2,
+    });
+    expect(body(both).notice).toContain(
+      'Values 1–2 of 27 values with code prefix "DE" matching filter "r", in Eurostat\'s order',
+    );
+  });
+
+  it('answers a prefix that matches nothing with an empty page, matchCount 0, and a notice naming code_prefix', async () => {
+    const result = await call({ geo_level: 'nuts2', code_prefix: 'XX' });
+    expect(result.isError).not.toBe(true);
+    expect(body(result)).toMatchObject({ values: [], matchCount: 0, totalCount: 309 });
+    expect(body(result)).not.toHaveProperty('nextCursor');
+    expect(body(result).notice).toBe(
+      'No "geo" value at geo_level "nuts2" of "nama_10r_2gdp" has a code starting with code_prefix "XX", ignoring case. code_prefix applies within geo_level "nuts2": pass another geo_level to list the codes of that level. Shorten or drop code_prefix, or call without it to page through all 309.',
+    );
+    expect(textOf(result)).toContain('**Matching:** 0');
+    expect(textOf(result)).toContain(`> ${body(result).notice}`);
+  });
+
+  it('names both narrowings when a prefix and a filter together match nothing', async () => {
+    const result = await call({ geo_level: 'nuts2', code_prefix: 'DE', filter: 'zz_nothing' });
+    expect(body(result)).toMatchObject({ values: [], matchCount: 0 });
+    expect(body(result).notice).toContain(
+      'No "geo" value at geo_level "nuts2" of "nama_10r_2gdp" has a code starting with code_prefix "DE" and matches filter "zz_nothing", ignoring case.',
+    );
+  });
+
+  it('keeps the country default: "DE1" finds no country, and the notice routes to geo_level', async () => {
+    expect(body(await call({ code_prefix: 'de' })).values).toEqual([
+      { code: 'DE', label: 'Germany' },
+    ]);
+    const result = await call({ code_prefix: 'DE1' });
+    expect(body(result)).toMatchObject({ values: [], matchCount: 0, totalCount: 34 });
+    expect(body(result).notice).toContain(
+      'code_prefix applies within geo_level "country": pass another geo_level to list the codes of that level.',
+    );
+  });
+
+  it('routes a geo filter that finds no country to geo_level, as code_prefix does', async () => {
+    const result = await call({ filter: 'Oberbayern' });
+    expect(body(result)).toMatchObject({ values: [], matchCount: 0, totalCount: 34 });
+    expect(body(result).notice).toContain(
+      'filter applies within geo_level "country": pass another geo_level to search the codes of that level.',
+    );
+    expect(body(await call({ geo_level: 'nuts2', filter: 'Oberbayern' })).values).toEqual([
+      { code: 'DE21', label: 'Oberbayern' },
+    ]);
+  });
+
+  it.each([
+    ['empty', ''],
+    ['whitespace-only', ' \t '],
+  ])('treats a code_prefix that is %s as omitted', async (_label, code_prefix) => {
+    const plain = await call({ geo_level: 'nuts2' });
+    const blank = await call({ geo_level: 'nuts2', code_prefix });
+    expect(blank.structuredContent).toEqual(plain.structuredContent);
+    expect(body(blank)).not.toHaveProperty('matchCount');
+  });
+
+  it('rejects a code_prefix longer than 100 characters at argument validation', () => {
+    const parse = (code_prefix: string) =>
+      eurostatGetDimensionValues.input.parse({
+        dataset_code: 'nama_10r_2gdp',
+        dimension: 'geo',
+        code_prefix,
+      });
+    expect(parse('D'.repeat(100))).toMatchObject({ code_prefix: 'D'.repeat(100) });
+    expect(() => parse('D'.repeat(101))).toThrow();
+  });
+
+  describe('the cursor binds code_prefix', () => {
+    it('resumes with the same prefix in another case, and refuses another prefix or none before loading the structure', async () => {
+      const first = await call({ geo_level: 'nuts2', code_prefix: 'DE', limit: 5 });
+      const cursor = body(first).nextCursor;
+      expect(decodeCursor(cursor as string, createMockContext())).toMatchObject({ prefix: 'de' });
+      const next = await call({ geo_level: 'nuts2', code_prefix: 'de', cursor });
+      expect(body(first).values.map(({ code }) => code)).toEqual([
+        'DE11',
+        'DE12',
+        'DE13',
+        'DE14',
+        'DE21',
+      ]);
+      expect(body(next).values.map(({ code }) => code)).toEqual([
+        'DE22',
+        'DE23',
+        'DE24',
+        'DE25',
+        'DE26',
+      ]);
+      vi.mocked(fetch).mockClear();
+      for (const change of [{ code_prefix: 'FR' }, {}]) {
+        const refused = await call({ geo_level: 'nuts2', ...change, cursor });
+        expect(errorReason(refused)).toBe('invalid_cursor');
+        expect(textOf(refused)).toContain('filter or code_prefix');
+      }
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it('resumes a cursor issued before code_prefix existed on a call without one, and refuses it with one', async () => {
+      const legacy = encodeCursor({
+        offset: 5,
+        limit: 5,
+        after: 'DE14',
+        dataset: 'nama_10r_2gdp',
+        dimension: 'geo',
+        filter: '',
+        geoLevel: 'nuts2',
+      });
+      const resumed = await call({ geo_level: 'nuts2', cursor: legacy });
+      expect(resumed.isError).not.toBe(true);
+      expect(body(resumed).values[0]?.code).toBe('DE21');
+      expect(
+        errorReason(await call({ geo_level: 'nuts2', code_prefix: 'DE', cursor: legacy })),
+      ).toBe('invalid_cursor');
+    });
+
+    it('walks a prefix list to its end and answers a cursor past it with an empty page', async () => {
+      const codes: string[] = [];
+      let cursor: string | undefined;
+      for (let pages = 0; pages < 5; pages++) {
+        const page = body(
+          await call({
+            geo_level: 'nuts2',
+            code_prefix: 'FR',
+            limit: 10,
+            ...(cursor && { cursor }),
+          }),
+        );
+        expect(page).toMatchObject({ matchCount: 28, totalCount: 309 });
+        codes.push(...page.values.map(({ code }) => code));
+        cursor = page.nextCursor;
+        if (!cursor) break;
+      }
+      expect(codes).toHaveLength(28);
+      expect(new Set(codes).size).toBe(28);
+      expect(codes.every((code) => code.startsWith('FR'))).toBe(true);
+      const past = encodeCursor({
+        offset: 28,
+        limit: 10,
+        after: codes.at(-1),
+        dataset: 'nama_10r_2gdp',
+        dimension: 'geo',
+        filter: '',
+        geoLevel: 'nuts2',
+        prefix: 'fr',
+      });
+      const end = await call({ geo_level: 'nuts2', code_prefix: 'FR', cursor: past });
+      expect(body(end).values).toEqual([]);
+      expect(body(end)).not.toHaveProperty('nextCursor');
+      expect(body(end).notice).toBe(
+        'No "geo" values of "nama_10r_2gdp" follow the code this cursor resumes after: the list ends there.',
+      );
+    });
+
+    it('refuses a cursor resuming after a code outside the prefix list, naming code_prefix', async () => {
+      const stray = encodeCursor({
+        offset: 5,
+        limit: 5,
+        after: 'DE11',
+        dataset: 'nama_10r_2gdp',
+        dimension: 'geo',
+        filter: '',
+        geoLevel: 'nuts2',
+        prefix: 'fr',
+      });
+      const result = await call({ geo_level: 'nuts2', code_prefix: 'FR', cursor: stray });
+      expect(errorReason(result)).toBe('invalid_cursor');
+      expect(textOf(result)).toContain(
+        'Unusable cursor: it resumes after "DE11", which the "geo" values of "nama_10r_2gdp" no longer list under this code_prefix.',
+      );
+    });
+
+    it('refuses a cursor whose prefix field is not a string', async () => {
+      const odd = encodeCursor({
+        offset: 5,
+        limit: 5,
+        after: 'DE14',
+        dataset: 'nama_10r_2gdp',
+        dimension: 'geo',
+        filter: '',
+        geoLevel: 'nuts2',
+        prefix: null,
+      });
+      expect(errorReason(await call({ geo_level: 'nuts2', cursor: odd }))).toBe('invalid_cursor');
+    });
+
+    it('names code_prefix among the bound inputs in the invalid_cursor contract', () => {
+      const entry = eurostatGetDimensionValues.errors?.find(
+        ({ reason }) => reason === 'invalid_cursor',
+      );
+      expect(entry?.when).toContain('filter or code_prefix');
+      expect(entry?.recovery).toContain('filter and code_prefix');
+    });
+  });
+
+  describe('beside a canvas', () => {
+    let canvas: DataCanvas;
+    let teardown: () => Promise<void>;
+    const ctx = () => createMockContext({ tenantId: 'default' });
+    beforeAll(async () => {
+      ({ canvas, teardown } = withRealCanvas());
+      await canvas.acquire(undefined, ctx());
+    });
+    afterAll(async () => {
+      await teardown();
+    });
+    beforeEach(() => {
+      setCanvas(canvas);
+    });
+
+    it.each([{}, { geo_level: 'nuts2' }])(
+      'stages the same rows with code_prefix as without it (%o)',
+      async (extra) => {
+        const instance = await canvas.acquire(undefined, ctx());
+        const stage = async (input: Record<string, unknown>) => {
+          const result = await call({ canvas_id: instance.canvasId, ...extra, ...input });
+          const { tableName } = result.structuredContent as { tableName: string };
+          return (await instance.query(`SELECT code, label, level FROM ${tableName}`)).rows;
+        };
+        const plain = await stage({});
+        expect(plain.length).toBeGreaterThan(38);
+        expect(await stage({ code_prefix: 'DE' })).toEqual(plain);
+      },
+    );
+  });
+
+  it('lists the 193 CN codes under heading 2204, parent included, never 85022040', async () => {
+    serveList(recordedValues('ds-045409-product-2204-excerpt'), {
+      code: 'product',
+      label: 'Product',
+    });
+    const product = (input: Record<string, unknown>) =>
+      call({ dataset_code: 'DS-045409', dimension: 'product', limit: 1000, ...input });
+    const result = await product({ code_prefix: '2204' });
+    const page = body(result);
+    expect(page.matchCount).toBe(193);
+    expect(page.values).toHaveLength(193);
+    expect(page.values[0]?.code).toBe('2204');
+    expect(page.values.every(({ code }) => code.startsWith('2204'))).toBe(true);
+    expect(page.values.map(({ code }) => code)).toContain('220410XX');
+    expect(page.values.map(({ code }) => code)).not.toContain('85022040');
+    // The same text as a filter word also matches a code that only contains it.
+    const filtered = body(await product({ filter: '2204' }));
+    expect(filtered.matchCount).toBe(194);
+    expect(filtered.values.map(({ code }) => code)).toContain('85022040');
+    // No code holds ".", so a CN code printed with separators says what to send instead.
+    const dotted = body(await product({ code_prefix: '2204.21' }));
+    expect(dotted).toMatchObject({ values: [], matchCount: 0 });
+    expect(dotted.notice).toContain(
+      'No Eurostat code contains ".": a code printed with separators is sent without them, so pass code_prefix "220421".',
+    );
+    expect(body(await product({ code_prefix: '220421' })).values[0]?.code).toBe('220421');
+  });
+
+  it('lists CP045 and its nine sub-items, never the ELC_GAS or NRG aggregates outside the code tree', async () => {
+    serveList(recordedValues('prc-hicp-manr-coicop'), { code: 'coicop', label: 'COICOP' });
+    const result = await call({
+      dataset_code: 'prc_hicp_manr',
+      dimension: 'coicop',
+      code_prefix: 'cp045',
+    });
+    expect(body(result).values.map(({ code }) => code)).toEqual([
+      'CP045',
+      'CP0451',
+      'CP0452',
+      'CP04521',
+      'CP04522',
+      'CP0453',
+      'CP0454',
+      'CP04541',
+      'CP04549',
+      'CP0455',
+    ]);
+    expect(body(result).values[0]).toEqual({
+      code: 'CP045',
+      label: 'Electricity, gas and other fuels',
+    });
   });
 });
 
@@ -980,7 +1692,8 @@ function recordedValues(name: string): Value[] {
 
 /**
  * The data service answering with one recorded list, as getDimensionValues
- * returns it: for geo, at the level requested, country when none was.
+ * returns it: for geo, at the level requested, country when none was. The
+ * recorded list is all there is, so it is also the whole list a canvas stages.
  */
 function serveList(values: Value[], dimension = { code: 'unit', label: 'Unit' }) {
   const getDimensionValues = vi.fn(
@@ -994,6 +1707,10 @@ function serveList(values: Value[], dimension = { code: 'unit', label: 'Unit' })
       ...(dimension.code === 'geo' && { geoLevel: geoLevel ?? 'country' }),
       values: [...values],
       totalCount: values.length,
+      listedValues:
+        dimension.code === 'geo'
+          ? values.map((value) => ({ ...value, level: geoLevel ?? 'country' }))
+          : [...values],
     }),
   );
   vi.mocked(getEurostatDataService).mockReturnValue({ getDimensionValues } as never);
@@ -1178,7 +1895,7 @@ describe('eurostatGetDimensionValues — paging and filtering recorded lists (#6
         matchCount: 3,
       });
       const text = textOf(result);
-      expect(text).toContain('**Total values:** 2352\n**Matching filter:** 3\n');
+      expect(text).toContain('**Total values:** 2352\n**Matching:** 3\n');
       expect(text).toContain(
         '- `DE_EDFH_ES_LEPA` — FRANKFURT-HAHN airport - PALMA DE MALLORCA airport',
       );
@@ -1203,7 +1920,7 @@ describe('eurostatGetDimensionValues — paging and filtering recorded lists (#6
     expect(body(first).notice).toContain(
       'Values 1–20 of 428 values matching filter "FRANKFURT", in Eurostat\'s order; limit 20 ended this page.',
     );
-    expect(textOf(first)).toContain('**Matching filter:** 428 — 20 listed below');
+    expect(textOf(first)).toContain('**Matching:** 428 — 20 listed below');
     expect(textOf(first)).toContain(`> ${body(first).notice}`);
 
     const pages = await walk({ filter: 'FRANKFURT', limit: 20 });
@@ -1275,7 +1992,7 @@ describe('eurostatGetDimensionValues — paging and filtering recorded lists (#6
     expect(body(result)).not.toHaveProperty('truncated');
     expect(body(result)).not.toHaveProperty('nextCursor');
     expect(body(result).notice).toContain('matched filter "münchen lepa"');
-    expect(textOf(result)).toContain('**Matching filter:** 0');
+    expect(textOf(result)).toContain('**Matching:** 0');
     expect(textOf(result)).toContain(`> ${body(result).notice}`);
   });
 
@@ -1579,7 +2296,7 @@ describe('eurostatGetDimensionValues — paging beside a canvas (#64)', () => {
     expect(body).toMatchObject({ matchCount: 428, totalCount: 2_352, stagedRowCount: 2_352 });
     const counted = await instance.query(`SELECT count(*) AS n FROM ${body.tableName}`);
     expect(counted.rows).toEqual([{ n: '2352' }]);
-    expect(body.notice).toContain(`staged as table "${body.tableName}"`);
+    expect(body.notice).toContain(`staged as table \`${body.tableName}\``);
   });
 
   it('refuses canvas_id beside cursor as conflicting_params, staging nothing', async () => {
@@ -1628,7 +2345,7 @@ describe('eurostatGetDimensionValues — paging beside a canvas (#64)', () => {
     };
     expect(body).toMatchObject({ values: [], matchCount: 0, stagedRowCount: 2_352 });
     expect(body.notice).toBe(
-      `No "airp_pr" value of "avia_par_de" matched filter "münchen lepa": every word must appear in a value's code or label, in any order, ignoring case and accents. Drop or shorten a word, or search all 2,352 values, staged as table "${body.tableName}" on canvas "${instance.canvasId}", with eurostat_dataframe_query (e.g. SELECT code, label FROM ${body.tableName} WHERE label ILIKE '%term%').`,
+      `No "airp_pr" value of "avia_par_de" matched filter "münchen lepa": every word must appear in a value's code or label, in any order, ignoring case and accents. Drop or shorten a word, or search all 2,352 values, staged as table \`${body.tableName}\` on canvas \`${instance.canvasId}\`, with eurostat_dataframe_query (e.g. \`SELECT code, label FROM ${body.tableName} WHERE label ILIKE '%term%'\`).`,
     );
     expect(textOf(result)).toContain(`> ${body.notice}`);
     // The SQL the notice offers runs against the staged table as written.
@@ -1639,5 +2356,81 @@ describe('eurostatGetDimensionValues — paging beside a canvas (#64)', () => {
       code: 'DE_EDDF_ES_LEPA',
       label: 'FRANKFURT/MAIN airport - PALMA DE MALLORCA airport',
     });
+  });
+
+  it.each([
+    [
+      'a cut page',
+      {},
+      (table: string) =>
+        `Every one of the 2,352 values is staged as table \`${table}\` on canvas \`${EMPHASIS_ID}\` — search it with eurostat_dataframe_query (e.g. \`SELECT code, label FROM ${table} WHERE label ILIKE '%term%'\`).`,
+    ],
+    [
+      'a filter that matched nothing',
+      { filter: 'münchen lepa' },
+      (table: string) =>
+        `search all 2,352 values, staged as table \`${table}\` on canvas \`${EMPHASIS_ID}\`, with eurostat_dataframe_query (e.g. \`SELECT code, label FROM ${table} WHERE label ILIKE '%term%'\`).`,
+    ],
+  ])(
+    'renders the canvas ID, table name and SQL as code spans after %s',
+    async (_, extra, expected) => {
+      setCanvas(await underId(canvas, EMPHASIS_ID));
+      const result = await call({ canvas_id: EMPHASIS_ID, ...extra });
+      const body = result.structuredContent as {
+        canvasId: string;
+        notice: string;
+        tableName: string;
+      };
+      expect(body.canvasId).toBe(EMPHASIS_ID);
+      expect(body.notice).toContain(expected(body.tableName));
+      expect(textOf(result)).toContain(expected(body.tableName));
+    },
+  );
+});
+
+describe('eurostatGetDimensionValues — a geo list of countries alone on a canvas', () => {
+  let canvas: DataCanvas;
+  let teardown: () => Promise<void>;
+
+  beforeAll(() => {
+    ({ canvas, teardown } = withRealCanvas());
+  });
+  afterAll(async () => {
+    await teardown();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('stages it without the every-level notice, which only a list holding other levels earns', async () => {
+    const listed = [
+      { code: 'DE', label: 'Germany', level: 'country' as const },
+      { code: 'FR', label: 'France', level: 'country' as const },
+    ];
+    vi.mocked(getEurostatDataService).mockReturnValue({
+      getDimensionValues: vi.fn().mockResolvedValue({
+        dimensionCode: 'geo',
+        dimensionLabel: 'Geopolitical entity (reporting)',
+        geoLevel: 'country',
+        values: listed.map(({ code, label }) => ({ code, label })),
+        totalCount: 2,
+        listedValues: listed,
+      }),
+    } as never);
+    const { canvasId } = await canvas.acquire(
+      undefined,
+      createMockContext({ tenantId: 'default' }),
+    );
+
+    const result = await runToolContract(eurostatGetDimensionValues, {
+      dataset_code: 'country_only',
+      dimension: 'geo',
+      canvas_id: canvasId,
+    } as never);
+
+    const body = result.structuredContent as { notice?: string; stagedRowCount: number };
+    expect(body.stagedRowCount).toBe(2);
+    expect(body.notice).toBeUndefined();
+    expect(textOf(result)).not.toContain('every geo level');
   });
 });
