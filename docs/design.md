@@ -328,7 +328,7 @@ Enrichment (both surfaces): `total_matches` (full count across all pages), `trun
 **Errors:**
 - `no_match` (NotFound): no datasets matched the query; for a multi-word query the hint names each word whose removal alone finds matches, or else the words that match no dataset text, and says when dimension value labels were not searched
 - `invalid_cursor` (InvalidParams): the cursor is malformed, or was issued for a different query, for a catalogue snapshot that has since refreshed, or, for results matched through dimension values, a value index that has since refreshed
-- `upstream_fault` (ServiceUnavailable): no catalogue is loaded yet and the table of contents answered HTTP 501, which is not retried and is marked `retryable: false`, or a 4xx status, which its URL carries no caller input to cause, also `retryable: false`, or answered another HTTP 5xx or could not be reached on every attempt, marked `retryable: true`; the hint says the load runs again on the next call (see **Outage handling**)
+- `upstream_fault` (ServiceUnavailable): no catalogue is loaded yet and the table of contents answered HTTP 501, which is not retried and is marked `retryable: false`, or a 4xx status other than 408 and 429, which its URL carries no caller input to cause, also `retryable: false`, or answered HTTP 408, HTTP 429 or another HTTP 5xx, or could not be reached, on every attempt, marked `retryable: true`, since 408 and 429 are transient however long they last; the hint says the load runs again on the next call (see **Outage handling**)
 
 ### `eurostat_browse_themes`
 
@@ -360,7 +360,7 @@ Enrichment (both surfaces): `item_count`, `theme_code?`, and the partial-catalog
 **Errors:**
 - `not_found` (NotFound): `theme_code` does not exist in the TOC; recover by browsing from the root. While the Comext list is unmerged, a Comext folder or `DS-*` code instead says it comes from that list and that the merge is retried about once a minute
 - `not_a_folder` (ValidationError): `theme_code` resolves to a known dataset or table rather than an expandable folder; the error identifies the entry type and directs the code to `eurostat_get_dataset_info`, then `eurostat_query_dataset`
-- `upstream_fault` (ServiceUnavailable): no catalogue is loaded yet and the table of contents answered HTTP 501 or a 4xx status (`retryable: false`) or answered another HTTP 5xx or could not be reached on every attempt (`retryable: true`), as for `eurostat_search_datasets`
+- `upstream_fault` (ServiceUnavailable): no catalogue is loaded yet and the table of contents answered HTTP 501 or a 4xx status other than 408 and 429 (`retryable: false`) or answered HTTP 408, HTTP 429 or another HTTP 5xx, or could not be reached, on every attempt (`retryable: true`), as for `eurostat_search_datasets`
 
 ### `eurostat_get_dataset_info`
 
