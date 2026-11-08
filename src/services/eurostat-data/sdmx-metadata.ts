@@ -3,6 +3,7 @@
  * @module services/eurostat-data/sdmx-metadata
  */
 
+import { decodeXmlEntities } from '@/services/xml-entities.js';
 import type { DatasetMeta, GeoLevel } from './types.js';
 
 interface XmlNode {
@@ -31,26 +32,6 @@ export interface SdmxDatasetMetadata {
 interface SdmxCodeDefinition {
   geoLevel?: GeoLevel;
   label: string;
-}
-
-function decodeXml(value: string): string {
-  return value.replace(/&(#x[\da-f]+|#\d+|amp|apos|gt|lt|quot);/gi, (entity, token: string) => {
-    if (token[0] === '#') {
-      const radix = token[1]?.toLowerCase() === 'x' ? 16 : 10;
-      const digits = radix === 16 ? token.slice(2) : token.slice(1);
-      const codePoint = Number.parseInt(digits, radix);
-      return Number.isNaN(codePoint) ? entity : String.fromCodePoint(codePoint);
-    }
-    return (
-      {
-        amp: '&',
-        apos: "'",
-        gt: '>',
-        lt: '<',
-        quot: '"',
-      }[token.toLowerCase()] ?? entity
-    );
-  });
 }
 
 function localName(qualifiedName: string): string {
@@ -93,10 +74,10 @@ function parseXml(xml: string): XmlNode {
   while (cursor < xml.length) {
     const opening = xml.indexOf('<', cursor);
     if (opening === -1) {
-      currentNode(stack).text += decodeXml(xml.slice(cursor));
+      currentNode(stack).text += decodeXmlEntities(xml.slice(cursor));
       break;
     }
-    if (opening > cursor) currentNode(stack).text += decodeXml(xml.slice(cursor, opening));
+    if (opening > cursor) currentNode(stack).text += decodeXmlEntities(xml.slice(cursor, opening));
 
     if (xml.startsWith('<!--', opening)) {
       const end = xml.indexOf('-->', opening + 4);
@@ -147,7 +128,7 @@ function parseXml(xml: string): XmlNode {
     const attributePattern = /([^\s=]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
     for (const match of attributeSource.matchAll(attributePattern)) {
       const attributeName = match[1];
-      if (attributeName) attributes[attributeName] = decodeXml(match[2] ?? match[3] ?? '');
+      if (attributeName) attributes[attributeName] = decodeXmlEntities(match[2] ?? match[3] ?? '');
     }
 
     const node: XmlNode = {

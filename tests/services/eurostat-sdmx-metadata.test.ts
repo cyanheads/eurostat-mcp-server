@@ -5,6 +5,11 @@
 
 import { describe, expect, it } from 'vitest';
 import { parseSdmxDatasetMetadata } from '@/services/eurostat-data/sdmx-metadata.js';
+import {
+  CONSTRAINT_WITH_UNMAPPED_LEVELS_XML,
+  DATAFLOW_WITH_UNMAPPED_LEVELS_XML,
+  UNMAPPED_GEO_CODES,
+} from '../fixtures/dimension-values/geo-unmapped-levels.js';
 import { SDMX_CONSTRAINT_XML, SDMX_DATAFLOW_XML } from '../fixtures/eurostat-sdmx-metadata.js';
 
 describe('parseSdmxDatasetMetadata', () => {
@@ -59,6 +64,20 @@ describe('parseSdmxDatasetMetadata', () => {
     });
   });
 
+  it('lists a geo code whose LEVEL is OTH, 5 or absent, and gives it no level (#99)', () => {
+    const parsed = parseSdmxDatasetMetadata(
+      DATAFLOW_WITH_UNMAPPED_LEVELS_XML,
+      CONSTRAINT_WITH_UNMAPPED_LEVELS_XML,
+      'earn_ses_annual',
+    );
+    expect(parsed.valuesByDimension.geo?.slice(-3)).toEqual(UNMAPPED_GEO_CODES);
+    expect(parsed.meta.dimensions.find(({ code }) => code === 'geo')?.valuesCount).toBe(10);
+    for (const { code } of UNMAPPED_GEO_CODES) {
+      expect(parsed.geoLevelsByCode).not.toHaveProperty(code);
+    }
+    expect(Object.keys(parsed.geoLevelsByCode)).toHaveLength(7);
+  });
+
   it('keeps absent or unparseable annotations absent from the public contract', () => {
     const withoutAnnotations = SDMX_DATAFLOW_XML.replace(
       /<c:Annotations>[\s\S]*?<\/c:Annotations>/,
@@ -103,5 +122,27 @@ describe('parseSdmxDatasetMetadata', () => {
     expect(time?.valuesCount).toBeUndefined();
     expect(time?.sampleValues).toBeUndefined();
     expect(withoutTimeEnumeration.valuesByDimension.time).toEqual([]);
+  });
+
+  it('decodes entities and character references in text and attribute values', () => {
+    const dataflow = SDMX_DATAFLOW_XML.replace(
+      'Euro &amp; national currency',
+      'Caf&#233; &#xE9;&#Xe9; &lt;5&gt; &quot;q&quot; &apos;a&apos; &AMP; &amp;lt; &unknown;',
+    )
+      .replace('<s:Code id="U01">', '<s:Code id="U&#x30;1">')
+      .replace('earn_ses_esms.htm', 'earn_ses_esms.htm?a=1&amp;b=2');
+    const parsed = parseSdmxDatasetMetadata(dataflow, SDMX_CONSTRAINT_XML, 'earn_ses_annual');
+
+    expect(parsed.valuesByDimension.unit?.[0]).toEqual({
+      code: 'U01',
+      label: `Café éé <5> "q" 'a' & &lt; &unknown;`,
+    });
+    expect(parsed.meta.metadataUrl).toBe('https://example.test/earn_ses_esms.htm?a=1&b=2');
+  });
+
+  it('keeps a character reference past U+10FFFF as written rather than failing the parse', () => {
+    const dataflow = SDMX_DATAFLOW_XML.replace('Euro &amp; national currency', 'Euro &#x110000;');
+    const parsed = parseSdmxDatasetMetadata(dataflow, SDMX_CONSTRAINT_XML, 'earn_ses_annual');
+    expect(parsed.valuesByDimension.unit?.[0]).toEqual({ code: 'U01', label: 'Euro &#x110000;' });
   });
 });
