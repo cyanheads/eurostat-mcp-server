@@ -40,7 +40,7 @@ The three `eurostat_dataframe_*` tools need the dataframe canvas, which is on by
 | `eurostat_search_datasets` | Search the Eurostat catalogue by keyword — returns codes, descriptions, period coverage, and theme breadcrumbs |
 | `eurostat_browse_themes` | Navigate the Eurostat theme hierarchy — list root themes or drill into subthemes and datasets |
 | `eurostat_get_dataset_info` | Fetch dataset metadata: dimensions with sample values, time range, observation count, and last-update date |
-| `eurostat_get_dimension_values` | List all valid codes for one dataset dimension, paged, with a code/label word filter and NUTS hierarchy filtering for `geo` |
+| `eurostat_get_dimension_values` | List all valid codes for one dataset dimension, paged, with a code/label word filter, a code-prefix filter and NUTS hierarchy filtering for `geo` |
 | `eurostat_query_dataset` | Fetch a bounded preview of decoded observations with dimension filters, NUTS geo-level, and time-range controls |
 | `eurostat_download_dataset` | Download a whole dataset via the SDMX bulk endpoint and stage every row on the dataframe canvas |
 | `eurostat_dataframe_describe` | List the tables staged on a dataframe canvas, with row counts and column types |
@@ -64,8 +64,8 @@ The same metadata is available through `eurostat_get_dataset_info` for tool-only
 
 ### `eurostat_search_datasets` <sub>tool</sub>
 
-- `query` words are ANDed case-insensitively across each dataset's label, theme breadcrumb, and code, ignoring spacing beside punctuation (`Rev.2` finds `Rev. 2`); `limit` is a positive integer (default 20), clamped to 100 with a notice. Page by passing `nextCursor` back as `cursor`; cursor calls ignore `limit`
-- Results carry `code`, `label`, `type` (`dataset` / `table`), period coverage, `obsCount`, `lastUpdated`, and `themePath`, with `totalMatches` across every page; fails as `no_match` (naming the words whose removal finds matches or, when none does, the words that match no dataset), `invalid_cursor`, or a retryable `upstream_fault` when no catalogue is loaded and Eurostat's table of contents is unreachable
+- `query` words are ANDed case-insensitively across each dataset's label, theme breadcrumb, and code, ignoring spacing beside punctuation (`Rev.2` finds `Rev. 2`). Matches are ordered by where the words were found: a label containing the query as a phrase beginning at the start of a word, then a label or code containing every word, then a theme breadcrumb only, each group in table-of-contents order. When no dataset holds every word, a query of up to 10 distinct words is searched again with each missing word also matching where it begins a word of the English label of one of the dataset's dimension values (`pharmacist` finds `Pharmacists`, `med_spec=PHARM`). `limit` is a positive integer (default 20), clamped to 100 with a notice. Page by passing `nextCursor` back as `cursor`; cursor calls ignore `limit`
+- Results carry `code`, `label`, `type` (`dataset` / `table`), period coverage, `obsCount`, `lastUpdated`, and `themePath`, with `totalMatches` across every page. A row found through dimension value labels carries `matchedValues` (`dimension`, `code`, `label`; the code is the filter `eurostat_query_dataset` takes) and the response carries a `notice`. Fails as `no_match` (naming the words whose removal finds matches or, when none does, the words that match no dataset, checking the first 32 distinct words; it also says when dimension value labels were not searched, because their index has not loaded or the query has more than 10 distinct words), `invalid_cursor`, or a retryable `upstream_fault` when no catalogue is loaded and Eurostat's table of contents is unreachable
 - If the Comext dataflow list cannot be loaded, results carry `comextListMissing` and a `notice`; a catalogue that could not be refreshed carries `catalogueLoadedAt`
 
 ---
@@ -87,20 +87,21 @@ The same metadata is available through `eurostat_get_dataset_info` for tool-only
 
 ### `eurostat_get_dimension_values` <sub>tool</sub>
 
-- `dataset_code` plus `dimension`, resolved exact-first then case-insensitively (`TIME_PERIOD` aliases `time`); returned value codes and labels stay unchanged. For `geo`, `geo_level` picks a NUTS level (`aggregate`, `country` by default, `nuts1`, `nuts2`, `nuts3`). `filter` keeps values whose code and label contain every word given, ignoring case and accents (`palma frankfurt` finds `DE_EDDF_ES_LEPA`), counted in `matchCount`
+- `dataset_code` plus `dimension`, resolved exact-first then case-insensitively (`TIME_PERIOD` aliases `time`); returned value codes and labels stay unchanged. For `geo`, `geo_level` picks a NUTS level (`aggregate`, `country` by default, `nuts1`, `nuts2`, `nuts3`). `filter` keeps values whose code and label contain every word given, ignoring case and accents (`palma frankfurt` finds `DE_EDDF_ES_LEPA`); `code_prefix` keeps values whose code starts with the text, ignoring case (`geo_level` `nuts2` with `DE` lists the German NUTS 2 regions). Both apply before paging and are counted in `matchCount`
 - `limit` defaults to 25 and clamps to 1,000 with a notice. Pages contain that many values, fewer at the end, with `totalCount` for the full list; a page with more after it carries `truncated`, `nextCursor` (pass back as `cursor`), and a `notice`. Continuations retain the effective count and ignore a new `limit`; older cursors above 1,000 normalize to 1,000 with disclosure. Fails as `not_found`, `no_results`, `conflicting_params`, `invalid_cursor`, `upstream_fault` (retryable when the endpoint is down), or `canvas_not_found`
-- `canvas_id` stages every value on that canvas as a `code` / `label` table (`canvasId` / `tableName` / `stagedRowCount`) that labels a download's code columns through a join; it never starts a canvas of its own
+- `canvas_id` stages the dimension's whole list on that canvas as a `code` / `label` table (`canvasId` / `tableName` / `stagedRowCount`), whatever `filter`, `code_prefix` or `limit` say, that labels a download's code columns through a join; it never starts a canvas of its own. A `geo` table adds a `level` column (NULL for a code with no NUTS level) and, without `geo_level`, holds every level, aggregates and regions overlapping the countries they contain: filter `level` before joining or aggregating
 
 ---
 
 ### `eurostat_query_dataset` <sub>tool</sub>
 
 - `dataset_code` plus `filters` (`{dimension_code: [values]}`), `geo_level`, and either `since_period` / `until_period` (`2020`, `2020-Q1`, `2020-01`, down to `YYYY-Wnn` and `YYYY-Dnnn`) or `last_n_periods`; `preview_limit` is a positive integer (default 25), clamped to 500 with a notice; `lang` is `EN`, `FR`, or `DE`
+- No Eurostat code contains `+` or `.`: a filter value holding `+` is split into separate values, read as OR (`["DE+FR"]` is `["DE", "FR"]`), and one holding `.` stays one value that matches nothing. A valid value with no cell in the selected periods contributes no rows, and `emptyValues` names it
 - `stage: true` stages the whole match on an available canvas, regardless of size; reuse `canvas_id` or omit it to create one. Without it, automatic staging starts above 5,000 observations. `truncated` still describes that threshold; `tableName` identifies a staged result. Canvas-disabled deployments disclose an explicit staging request as unavailable
-- `last_n_periods` counts dataset time positions, which can include periods with no populated cells. A notice names gaps across the full match (up to the newest 24, with an omitted count); increase N or replace it with `until_period` to reach earlier observations
+- `last_n_periods` counts dataset time positions, which can include periods with no populated cells. A notice names gaps across the full match (up to the newest 24, with an omitted count) and advises a larger N (the exact one for a single frequency), or a `since_period`–`until_period` range ending at the slice's latest period with a cell, only when every such period follows that period
 - Eurostat keeps only periods wholly inside `since_period`–`until_period`, per frequency. A notice names a period a bound falls inside and the bound that includes it. A one-day range goes out as `time=<date>`, because Eurostat ignores one-day bounds
-- Each observation carries code/label pairs per dimension, a nullable `value`, `status` (OBS_FLAG), and `confStatus` (CONF_STATUS); `obsCount`, `missingObsCount`, `absentCellCount` (periods a matched series lacks, which are not observations and are never staged), and `timeRange` cover the whole match, `truncated` is true above 5,000 observations, and `unmatchedValues` names filter values that matched nothing
-- Fails as `not_found`, `no_results` (naming the unmatched values, the periods with no value, why a range selected no period, or `geo_level` as the likely cause when Eurostat's reply says nothing more), `invalid_dimension`, `invalid_period`, `conflicting_params`, a non-retryable `async_response` for a query too large to serve, `canvas_not_found`, or a retryable `upstream_fault` when the Statistics API is down
+- Each observation carries code/label pairs per dimension, a nullable `value`, `status` (OBS_FLAG), and `confStatus` (CONF_STATUS); `obsCount`, `missingObsCount`, `absentCellCount` (periods a matched series lacks inside each frequency's span, from its first to its latest period with a cell; they are not observations and are never staged), and `timeRange` cover the whole match. A notice names periods outside that span. `truncated` is true above 5,000 observations, `unmatchedValues` names filter values that matched nothing, and `emptyValues` names values the dataset has but this match carries no cell for (under `geo_level`, every code of that level with none)
+- Fails as `not_found`, `no_results` (naming the unmatched values with their dimension's valid codes, or a value search when it holds more than 25, the periods with no value, why a range selected no period, or `geo_level` as the likely cause when Eurostat's reply says nothing more), `invalid_dimension` (naming every filter key that is not a dimension, with the dataset's dimensions in key order), `invalid_period`, `conflicting_params`, a non-retryable `async_response` for a query too large to serve, `retry_deadline_exceeded` when the Statistics API does not complete the query within the request deadline, `canvas_not_found`, or a retryable `upstream_fault` when the Statistics API is down
 
 ---
 
@@ -108,8 +109,9 @@ The same metadata is available through `eurostat_get_dataset_info` for tool-only
 
 - `dataset_code` plus the same `filters` map and `since_period` / `until_period` (no `last_n_periods`: the TSV keeps a column per period unless a range drops it); `preview_limit` is a positive integer (default 25), clamped to 500 with a notice
 - The wholly-inside rule and its notice apply here too. A one-day range requests that day and the next, and the later day's column is dropped before anything is counted or staged
-- Stages one row per non-blank TSV cell. A row with null `obs_value` and no flag, status or text (an unflagged `:`) is not an observation: it is a period the series lacks, or a period of a frequency the series has no observation of (the padding of a mixed-frequency slice)
-- Returns `rowCount` (echoed as `totalCount`), `missingCount`, `absentCellCount` (the unflagged rows at periods of a frequency the series carries), `periodRange` (bounded by rows carrying a value, flag, status, or text), and `bytesRead` for the whole download; fails as `not_found`, `invalid_dimension`, `invalid_period`, `filter_arity`, a non-retryable `async_queued` or `extraction_too_big`, `no_results`, `upstream_fault` (retryable when the SDMX endpoint is down), or `canvas_not_found`
+- Stages one row per non-blank TSV cell. A row with null `obs_value` and no flag, status or text (an unflagged `:`) is not an observation: it is a period the series lacks, a period of a frequency the series has no observation of (the padding of a mixed-frequency slice), or a period before or after the span in which any downloaded row has an observation, which a notice names
+- `filters` follow the query tool's rules: a value holding `+` is split into separate values (OR), and one holding `.` is rejected as `invalid_dimension` before any request, since no Eurostat code contains one. A valid value with no observation in the selected periods adds no rows, and `emptyValues` names it (omitted when `budgetExceeded` is true)
+- Returns `rowCount` (echoed as `totalCount`), `missingCount`, `absentCellCount` (the unflagged rows at periods of a frequency the series carries, inside that frequency's span from its first to its latest period with an observation in any downloaded row), `periodRange` (bounded by rows carrying a value, flag, status, or text), and `bytesRead` for the whole download; fails as `not_found`, `invalid_dimension`, `invalid_period`, `filter_arity`, a non-retryable `async_queued` or `extraction_too_big`, `no_results`, `upstream_fault` (retryable when the SDMX endpoint is down), or `canvas_not_found`
 - The `EUROSTAT_BULK_MAX_BYTES` budget (default 50 MiB decoded) retains complete rows within the permitted prefix and returns `budgetExceeded: true`. A budget too small for a complete header and usable row fails as `byte_budget_exceeded`, with the configured limit and narrowing guidance. `bytesRead` counts accepted decoded bytes, never more than the budget; incomplete trailing rows are discarded.
 
 ---
@@ -117,7 +119,7 @@ The same metadata is available through `eurostat_get_dataset_info` for tool-only
 ### `eurostat_dataframe_describe` <sub>tool</sub>
 
 - `canvas_id` from a staging response; lists each table's `name`, `rowCount`, typed columns, and `expiresAt` (sliding `CANVAS_TTL_MS`, default 24h); fails as `canvas_not_found` or `canvas_disabled`
-- Columns depend on the staging tool: `eurostat_query_dataset` writes a code and a `_label` column per dimension, `eurostat_download_dataset` codes only plus `time` (both share the `obs_*` and `conf_status*` measures), and `eurostat_get_dimension_values` writes `code` and `label`
+- Columns depend on the staging tool: `eurostat_query_dataset` writes a code and a `_label` column per dimension, `eurostat_download_dataset` codes only plus `time` (both share the `obs_*` and `conf_status*` measures), and `eurostat_get_dimension_values` writes `code` and `label` (plus `level` for `geo`)
 
 ---
 
@@ -198,7 +200,7 @@ No API key is required. For Docker or a source build, see [Running the server](#
 | `EUROSTAT_REQUEST_TIMEOUT_MS` | Total allowance for one request, including retries, backoff and body reads, in ms. | `30000` |
 | `EUROSTAT_METADATA_TIMEOUT_MS` | Total allowance for one dataset's SDMX dataflow structure, including retries, backoff and body reads, in ms. | `120000` (2 min) |
 | `EUROSTAT_TOC_CACHE_TTL_MS` | Catalogue TOC cache lifetime, in ms. | `43200000` (12 h) |
-| `EUROSTAT_BULK_TIMEOUT_MS` | Total allowance for one bulk transfer, including request retries, backoff and streaming, in ms. | `120000` (2 min) |
+| `EUROSTAT_BULK_TIMEOUT_MS` | Total allowance for one bulk transfer, including request retries, backoff and streaming, and for each download that builds the dimension value index, in ms. | `120000` (2 min) |
 | `EUROSTAT_BULK_MAX_BYTES` | Byte budget for one bulk download. | `52428800` (50 MiB) |
 | `CANVAS_PROVIDER_TYPE` | Dataframe canvas backend; `none` disables the canvas and its tools. The `.mcpb` bundle sets `none`. | `duckdb` |
 | `CANVAS_TTL_MS` | Sliding lifetime of a staged canvas, in ms. | `86400000` (24 h) |
@@ -221,7 +223,7 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### Local development
 
-Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+Requires [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+).
 
 ```sh
 git clone https://github.com/cyanheads/eurostat-mcp-server.git
@@ -263,7 +265,7 @@ The image defaults to HTTP transport, stateless session mode, and logs to `/var/
 | `src/index.ts` | `createApp()` entry point — registers tools and the resource, inits services, gates the dataframe tools on the canvas and the drop tool on its own flag. |
 | `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Six discovery and data tools, plus three canvas-gated dataframe tools, one of them opt-in. |
 | `src/mcp-server/resources` | Resource definitions. Dataset metadata resource. |
-| `src/services/eurostat-catalogue` | Catalogue service — fetches and parses the Eurostat TOC, merges the Comext dataflow list into it, with a TTL-bounded in-memory cache. |
+| `src/services/eurostat-catalogue` | Catalogue service — fetches and parses the Eurostat TOC, merges the Comext dataflow list into it, and builds the dimension value index search falls back to (metabase codes, codelist labels), with a TTL-bounded in-memory cache. |
 | `src/services/eurostat-data` | Statistics API service — SDMX metadata parsing with a per-dataset cache, JSON-stat 2.0 decoding, async-response detection, canvas row source. |
 | `src/services/eurostat-bulk` | SDMX 2.1 TSV bulk service — streaming download, byte budget, SOAP fault mapping, canvas row source. |
 | `src/services/eurostat-codelists.ts` | OBS_FLAG and CONF_STATUS codelists, the measure column names both stagers write, and the text-value decoder. |

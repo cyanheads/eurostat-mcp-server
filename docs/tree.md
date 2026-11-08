@@ -1,6 +1,6 @@
 # eurostat-mcp-server - Directory Structure
 
-Generated on: 2026-11-03 03:52:29
+Generated on: 2026-11-08 18:19:34
 
 ```text
 eurostat-mcp-server/
@@ -174,13 +174,16 @@ eurostat-mcp-server/
 │   │       ├── clamp-read-limit.ts
 │   │       ├── hoist-dimensions.ts
 │   │       ├── narrowing-advice.ts
+│   │       ├── notice-text.ts
 │   │       └── value-list-paging.ts
 │   ├── services/
 │   │   ├── eurostat-bulk/
 │   │   │   ├── eurostat-bulk-service.ts
 │   │   │   └── types.ts
 │   │   ├── eurostat-catalogue/
+│   │   │   ├── dimension-value-index.ts
 │   │   │   ├── eurostat-catalogue-service.ts
+│   │   │   ├── search-text.ts
 │   │   │   └── types.ts
 │   │   ├── eurostat-data/
 │   │   │   ├── eurostat-data-service.ts
@@ -192,7 +195,8 @@ eurostat-mcp-server/
 │   │   ├── eurostat-hosts.ts
 │   │   ├── eurostat-outage.ts
 │   │   ├── eurostat-periods.ts
-│   │   └── shared-load.ts
+│   │   ├── shared-load.ts
+│   │   └── xml-entities.ts
 │   └── index.ts
 ├── tests/
 │   ├── config/
@@ -200,6 +204,9 @@ eurostat-mcp-server/
 │   ├── fixtures/
 │   │   ├── comext/
 │   │   │   ├── comext-dataflows.xml
+│   │   │   ├── ds-045409-a-de-us-2204-21-since-2024.json
+│   │   │   ├── ds-045409-a-de-us-2204-and-2204-21-since-2024.json
+│   │   │   ├── ds-045409-a-de-us-220421-since-2024.tsv
 │   │   │   ├── ds-045409-constraint.xml
 │   │   │   ├── ds-045409-dataflow.xml
 │   │   │   ├── ds-045409-datastructure.xml
@@ -208,22 +215,38 @@ eurostat-mcp-server/
 │   │   │   ├── ds-045409-de-fr-2023-06-to-2024.json
 │   │   │   ├── ds-045409-de-fr-2023-06-to-2024.tsv
 │   │   │   ├── ds-045409-de-fr-no-period.json
+│   │   │   ├── ds-045409-de-fr-us-2204-since-2025-01.json
+│   │   │   ├── ds-045409-de-fr-us-2204-since-2025-01.tsv
 │   │   │   ├── ds-045409-de-us-m-2026-06-07.tsv
 │   │   │   ├── ds-045409-eu27-us-total-2024-01-02.json
 │   │   │   ├── ds-045409-extraction-too-big.json
 │   │   │   ├── ds-045409-fault-413.xml
+│   │   │   ├── ds-045409-m-de-fr-it-es-us-2204-since-2026-01.json
+│   │   │   ├── ds-045409-m-de-fr-it-es-us-2204-since-2026-01.tsv
+│   │   │   ├── ds-045409-m-de-us-2204-last6.json
 │   │   │   ├── ds-059358-de-2022.json
 │   │   │   ├── ds-059358-de-2022.tsv
 │   │   │   ├── ds-999999-data.xml
 │   │   │   ├── ds-999999-dataflow.xml
 │   │   │   └── ds-999999-statistics.json
+│   │   ├── dimension-value-index/
+│   │   │   ├── codelists-excerpt.xml
+│   │   │   └── metabase-excerpt.tsv
 │   │   ├── dimension-values/
 │   │   │   ├── avia-par-de-airp-pr.json
 │   │   │   ├── demo-r-pjangrp3-geo-nuts3.json
+│   │   │   ├── ds-045409-product-2204-excerpt.json
 │   │   │   ├── ds-045409-product-excerpt.json
+│   │   │   ├── geo-codes-unmapped-level.xml
+│   │   │   ├── geo-unmapped-levels.ts
+│   │   │   ├── hlth-cd-apr-constraint.xml
+│   │   │   ├── hlth-cd-apr-dataflow.xml
 │   │   │   ├── nama-10-gdp-constraint.xml
 │   │   │   ├── nama-10-gdp-dataflow.xml
 │   │   │   ├── nama-10-gdp-na-item.json
+│   │   │   ├── nama-10r-2gdp-constraint.xml
+│   │   │   ├── nama-10r-2gdp-dataflow.xml
+│   │   │   ├── prc-hicp-manr-coicop.json
 │   │   │   ├── sbs-ovw-act-nace-r2.json
 │   │   │   ├── tgs00010-constraint.xml
 │   │   │   └── tgs00010-dataflow.xml
@@ -233,16 +256,37 @@ eurostat-mcp-server/
 │   │   ├── ert-bil-eur-d-usd-2022-06-15.json
 │   │   ├── ert-bil-eur-d-usd-no-period.json
 │   │   ├── eurostat-sdmx-metadata.ts
+│   │   ├── hlth-cd-apr-f-dot-i-prvt.json
+│   │   ├── hlth-cd-apr-fi-prev.json
+│   │   ├── hlth-cd-apr-xx-prvt.json
+│   │   ├── ilc-li02-datastructure.xml
+│   │   ├── ilc-li02-fr-indic-il-incgrp-150.json
+│   │   ├── lfsa-egan-mt-lu-cy-ee-2010-to-2022.json
 │   │   ├── nama-10-gdp-country-level-2022-06-to-2023-06.json
 │   │   ├── nama-10-gdp-datastructure.xml
+│   │   ├── nama-10-gdp-de-1975-to-1995.json
 │   │   ├── nama-10-gdp-de-2022-06-to-2024.json
 │   │   ├── nama-10-gdp-de-2022.json
 │   │   ├── nama-10-gdp-de-2024-to-2031-06.json
 │   │   ├── nama-10-gdp-de-fr-1975-to-1995.json
 │   │   ├── nama-10-gdp-de-fr-1975-to-1995.tsv
+│   │   ├── nama-10-gdp-de-fr-since-2024.json
 │   │   ├── nama-10-gdp-de-no-period.json
 │   │   ├── nama-10-gdp-de-since-2030.json
 │   │   ├── nama-10-gdp-de-until-1980.json
+│   │   ├── nama-10-pc-me-rs-last30.json
+│   │   ├── nama-10r-2gdp-de11-no02-ch01-last1.json
+│   │   ├── nama-10r-2gdp-de11-no02-ch01-last4.json
+│   │   ├── nama-10r-2gdp-de11-no02-ch01-since-2020.json
+│   │   ├── nama-10r-2gdp-de11-no02-ch01-since-2020.tsv
+│   │   ├── nama-10r-2gdp-de11-no02-ch01-since-2024.tsv
+│   │   ├── nama-10r-2gdp-de11-no02-since-2020.json
+│   │   ├── nama-10r-2gdp-de11-xx99-ch01-last1.json
+│   │   ├── nama-10r-2gdp-no02-ch01-since-2020.json
+│   │   ├── nama-10r-2gdp-no02-last30.json
+│   │   ├── nama-10r-2gdp-no02-since-2020.json
+│   │   ├── nama-10r-2gdp-no02-since-2020.tsv
+│   │   ├── nama-10r-2gdp-nuts2-last1.json
 │   │   ├── no-results-reply.json
 │   │   ├── nrg-pc-204-de-2022-01-to-2023.json
 │   │   ├── nrg-pc-204-de-2022-06-to-2023.json
@@ -271,12 +315,14 @@ eurostat-mcp-server/
 │   │   └── eurostat-dataset.resource.test.ts
 │   ├── services/
 │   │   ├── canvas-accessor.test.ts
+│   │   ├── dimension-value-index.test.ts
 │   │   ├── eurostat-bulk-service.test.ts
 │   │   ├── eurostat-catalogue-service.test.ts
 │   │   ├── eurostat-comext-bulk.test.ts
 │   │   ├── eurostat-comext-catalogue.test.ts
 │   │   ├── eurostat-comext-data.test.ts
 │   │   ├── eurostat-data-service.test.ts
+│   │   ├── eurostat-filters.test.ts
 │   │   ├── eurostat-hosts.test.ts
 │   │   ├── eurostat-periods.test.ts
 │   │   └── eurostat-sdmx-metadata.test.ts

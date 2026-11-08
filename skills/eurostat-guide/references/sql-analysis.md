@@ -14,16 +14,16 @@ ORDER BY geo, time
 
 If this returns rows, inspect the remaining dimensions. Restrict them or include them in the intended key before joining. Do not use DISTINCT to hide multiplied observations.
 
-Attach a staged geographic value list without losing observations whose labels are absent:
+Attach a staged geographic value list without losing observations whose labels are absent. A geo list staged without geo_level holds every level, so keep the level of the observations (here country) in the join, or aggregates and regions join beside the countries:
 
 ```sql
 SELECT d.geo, g.label AS geo_label, d.time, d.obs_value
 FROM observations_table AS d
-LEFT JOIN geographic_labels AS g ON d.geo = g.code
+LEFT JOIN geographic_labels AS g ON d.geo = g.code AND g.level = 'country'
 ORDER BY d.geo, d.time
 ```
 
-The ordering is total only when the selected slice has one row per geo/time pair. Otherwise add the other identifying dimensions as tie-breakers. A value-list table has code and label; an observation table produced by the bulk path has no dimension-label companions. Describe both tables instead of assuming their shapes match.
+The ordering is total only when the selected slice has one row per geo/time pair. Otherwise add the other identifying dimensions as tie-breakers. A value-list table has code and label, and a geo list also level; an observation table produced by the bulk path has no dimension-label companions. Describe both tables instead of assuming their shapes match.
 
 Inspect missingness alongside an aggregate:
 
@@ -37,7 +37,7 @@ ORDER BY geo
 
 AVG ignores null numeric values. Use it only when that average answers the statistical question; do not replace missing observations with zero.
 
-A table staged by eurostat_query_dataset has a row only for each published cell, so a period a series lacks is not a row; the query's absentCellCount counts those. A table staged by eurostat_download_dataset also holds those periods as rows with null obs_value, obs_flag, conf_status and (on DS-* tables) obs_value_text. To count the null cells that are observations, exclude them:
+A table staged by eurostat_query_dataset has a row only for each published cell, so a period a series lacks is not a row; the query's absentCellCount counts those inside each frequency's span. A table staged by eurostat_download_dataset also holds those periods as rows with null obs_value, obs_flag, conf_status and (on DS-* tables) obs_value_text, including periods outside the span, which its absentCellCount leaves out. To count the null cells that are observations, exclude them:
 
 ```sql
 SELECT geo,
@@ -51,6 +51,6 @@ GROUP BY geo
 ORDER BY geo
 ```
 
-On a DS-* table add OR obs_value_text IS NOT NULL to the observation test and AND obs_value_text IS NULL to the unflagged test; otherwise a text value such as KG counts as an unflagged row. In a mixed-frequency slice, compare each row's frequency dimension (freq on Comext) with the shape of its time code: an unflagged null row at a monthly period of an annual series is padding, not a gap. For DS-* tables, inspect obs_value_text before interpreting every null numeric cell as missing data. Inspect obs_flag and conf_status alongside the values before drawing conclusions.
+On a DS-* table add OR obs_value_text IS NOT NULL to the observation test and AND obs_value_text IS NULL to the unflagged test; otherwise a text value such as KG counts as an unflagged row. In a mixed-frequency slice, compare each row's frequency dimension (freq on Comext) with the shape of its time code: an unflagged null row at a monthly period of an annual series is padding, not a gap, and one before the first or after the latest period any row of its frequency has an observation in is padding too. For DS-* tables, inspect obs_value_text before interpreting every null numeric cell as missing data. Inspect obs_flag and conf_status alongside the values before drawing conclusions.
 
 When a SQL result is truncated, retrieve deterministic pages of an unchanged query with a total ORDER BY and LIMIT/OFFSET. Advance OFFSET by the returned rowCount. Restart at offset zero if the first query was unordered. Expired or changing tables and volatile expressions cannot provide stable paging. Integer counts may arrive as strings to preserve precision; do not coerce them to an unsafe JavaScript number.
