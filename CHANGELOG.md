@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.11.3](changelog/0.11.x/0.11.3.md) — 2026-11-08
+
+Both data tools name selected values with no cell (emptyValues) and count absent periods only inside each frequency's span; search ranks label matches first and falls back to dimension value labels; eurostat_get_dimension_values gains code_prefix and a geo level column; the query declares retry_deadline_exceeded.
+
 ## [0.11.2](changelog/0.11.x/0.11.2.md) — 2026-11-02
 
 eurostat_query_dataset and eurostat_download_dataset report absentCellCount, the periods a series lacks; the dataset resource's errors carry recovery hints; a search no_match names the query words that match no catalogue entry; the download's periodRange spans observations only; an HTTP 501 gets its own hint.

@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** @cyanheads/eurostat-mcp-server
-**Version:** 0.11.2
+**Version:** 0.11.3
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.22`
 **Engines:** Bun ≥1.4.4, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` `^2.4.0`
