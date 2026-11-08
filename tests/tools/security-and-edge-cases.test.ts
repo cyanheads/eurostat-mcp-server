@@ -26,8 +26,12 @@ import {
 } from '@/services/eurostat-data/eurostat-data-service.js';
 import { withRealCanvas } from '../helpers/real-canvas.js';
 
-// Mock catalogue service
-vi.mock('@/services/eurostat-catalogue/eurostat-catalogue-service.js', () => ({
+// Mock catalogue service. Only the accessor is replaced — the search tool also imports the
+// service's search bounds from this module, and a bare factory would blank them out.
+vi.mock('@/services/eurostat-catalogue/eurostat-catalogue-service.js', async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import('@/services/eurostat-catalogue/eurostat-catalogue-service.js')
+  >()),
   getEurostatCatalogueService: vi.fn(),
 }));
 
@@ -434,7 +438,8 @@ describe('Injection resistance', () => {
       });
     }
 
-    for (const injection of injectionStrings.slice(0, 5)) {
+    // A value holding "." is refused before any request (#100); the next case covers it.
+    for (const injection of injectionStrings.slice(0, 5).filter((s) => !s.includes('.'))) {
       it(`survives injection in a filter value: ${JSON.stringify(injection).slice(0, 40)}`, async () => {
         const ctx = createMockContext({
           errors: eurostatDownloadDataset.errors,
@@ -447,6 +452,23 @@ describe('Injection resistance', () => {
         await expect(eurostatDownloadDataset.handler(input, ctx)).resolves.toBeDefined();
       });
     }
+
+    it('rejects a path-shaped filter value as invalid_dimension before any request (#100)', async () => {
+      const ctx = createMockContext({
+        errors: eurostatDownloadDataset.errors,
+        tenantId: 'default',
+      });
+      const input = eurostatDownloadDataset.input.parse({
+        dataset_code: 'nama_10_gdp',
+        filters: { geo: ['../../../etc/passwd'] },
+      });
+      await expect(eurostatDownloadDataset.handler(input, ctx)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'invalid_dimension' },
+      });
+      expect(vi.mocked(getEurostatDataService)().getDimensionOrder).not.toHaveBeenCalled();
+      expect(vi.mocked(getEurostatBulkService)().startDownload).not.toHaveBeenCalled();
+    });
 
     for (const [bound, injection] of [
       ['since_period', "'; DROP TABLE; --"],

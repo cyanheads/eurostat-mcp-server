@@ -6,8 +6,10 @@
 import { readFileSync } from 'node:fs';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { eurostatSearchDatasets } from '@/mcp-server/tools/definitions/eurostat-search-datasets.tool.js';
+import { buildDimensionValueIndex } from '@/services/eurostat-catalogue/dimension-value-index.js';
 
 // Only the accessor is replaced, so a test can hand the tool the real service class.
 vi.mock('@/services/eurostat-catalogue/eurostat-catalogue-service.js', async (importOriginal) => ({
@@ -168,6 +170,27 @@ describe('eurostatSearchDatasets', () => {
       'without a cursor',
     );
   });
+
+  it.each(['gdp*', 'nace [rev2]', '_foo'])(
+    'quotes %s in the invalid_cursor hint as the caller must send it back',
+    async (query) => {
+      vi.mocked(getEurostatCatalogueService).mockReturnValue({
+        search: vi.fn().mockRejectedValue(
+          Object.assign(new Error('Unusable pagination cursor.'), {
+            data: { reason: 'invalid_cursor' },
+          }),
+        ),
+      } as never);
+      const result = await runToolContract(eurostatSearchDatasets, { query, cursor: 'STALE' });
+      const hint = `Repeat the search for "${query}" without a cursor, then page using the nextCursor it returns.`;
+      expect(
+        (result.structuredContent as { error: { data: { recovery: { hint: string } } } }).error.data
+          .recovery.hint,
+      ).toBe(hint);
+      const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+      expect(text).toContain(`Repeat the search for "\`${query}\`" without a cursor`);
+    },
+  );
 
   it('formats output with all relevant fields', () => {
     const result = {
@@ -560,6 +583,38 @@ describe('eurostatSearchDatasets — no_match from a catalogue a failed refresh 
   });
 });
 
+/** The tier order (#101) on both surfaces, from the real service over the 2026-10-14 TOC excerpt. */
+describe('eurostatSearchDatasets — tier order on structuredContent and content[]', () => {
+  it('lists the label phrase first and the breadcrumb-only match last on both surfaces', async () => {
+    const service = new EurostatCatalogueService({} as never, {} as never);
+    const internals = service as unknown as {
+      buildCache(entries: unknown, flows: unknown[], loadedAt: Date): unknown;
+      cache: unknown;
+      parseToc(text: string): unknown;
+    };
+    internals.cache = internals.buildCache(
+      internals.parseToc(
+        readFileSync(new URL('../fixtures/toc-2026-10-14-excerpt.tsv', import.meta.url), 'utf8'),
+      ),
+      [],
+      new Date(),
+    );
+    vi.mocked(getEurostatCatalogueService).mockReturnValue(service);
+    const result = await runToolContract(eurostatSearchDatasets, {
+      query: 'Enterprise statistics by size class and NACE Rev.2 activity',
+    });
+    // sbs_ovw_smc carries "statistics" only in its breadcrumb; TOC order lists it second.
+    const tiered = ['sbs_sc_ovw', 'egr_mne_n2sc', 'egr_mne_empw', 'sbs_ovw_smc'];
+    expect(
+      (result.structuredContent as { datasets: Array<{ code: string }> }).datasets.map(
+        (d) => d.code,
+      ),
+    ).toEqual(tiered);
+    const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+    expect([...text.matchAll(/\*\*Code:\*\* (\S+)/g)].map((m) => m[1])).toEqual(tiered);
+  });
+});
+
 /** A cold start against a catalogue host that is down: no copy to fall back on (#71). */
 describe('eurostatSearchDatasets — an unavailable catalogue host on a cold start (#71)', () => {
   /** Search through a fresh real service over a stubbed `fetch`, past the TOC's retry backoff. */
@@ -630,11 +685,241 @@ describe('eurostatSearchDatasets — an unavailable catalogue host on a cold sta
     expect(tocReads).toHaveLength(1);
   });
 
+  it('fails a TOC answering 404 as a non-retryable upstream_fault, since its URL carries no caller input', async () => {
+    const { error, text } = await searchColdStart(
+      async () => new Response('Not Found', { status: 404, statusText: 'Not Found' }),
+    );
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.data).toMatchObject({ reason: 'upstream_fault', status: 404, retryable: false });
+    expect(text).toContain(
+      "Eurostat's catalogue endpoint answered HTTP 404 to the table-of-contents read.",
+    );
+    expect(text).toContain('reason upstream_fault · not retryable');
+  });
+
   it('describes the 501 refusal in the upstream_fault contract (#94)', () => {
     const when = eurostatSearchDatasets.errors?.find(
       ({ reason }) => reason === 'upstream_fault',
     )?.when;
     expect(when).toContain('table of contents answered HTTP 501, which is not retried');
     expect(when).toContain('could not be reached on every retry, which the error marks retryable');
+  });
+});
+
+/** Results found through dimension value labels, and what a zero-match hint adds about them (#103). */
+describe('eurostatSearchDatasets — dimension value labels (#103)', () => {
+  type Found = Record<string, unknown>;
+  type Result = Awaited<ReturnType<typeof runToolContract>>;
+  const serve = (found: Found) =>
+    vi.mocked(getEurostatCatalogueService).mockReturnValue({
+      search: vi.fn().mockResolvedValue(found),
+    } as never);
+  const run = (query: string) => runToolContract(eurostatSearchDatasets, { query });
+  const textOf = (result: Result) =>
+    result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+  const errorOf = (result: Result) =>
+    (
+      result.structuredContent as {
+        error: { message: string; data: { recovery: { hint: string } } };
+      }
+    ).error;
+
+  const PHARM = { dimension: 'med_spec', code: 'PHARM', label: 'Pharmacists' };
+  /** A label holding Markdown syntax, which content[] must read back as written. */
+  const MARKED = { dimension: 'coicop18', code: 'CP_X', label: 'Fees *excl.* VAT_rate [2015=100]' };
+  const valueRows = [
+    {
+      code: 'hlth_rs_prs2',
+      label: 'Health personnel',
+      type: 'dataset' as const,
+      themePath: ['Database by themes', 'Health care resources'],
+      matchedValues: [PHARM, MARKED],
+    },
+  ];
+
+  const THROUGH_VALUES =
+    'No dataset label, theme breadcrumb, or code holds every word of the query, so these datasets were found by also matching the words they lack at the start of a word in the English labels of their dimension values. Each row\'s matchedValues names those values; a value\'s code filters its dimension in eurostat_query_dataset, as in filters `{"med_spec": ["PHARM"]}`.';
+  const COMEXT_UNSEARCHED =
+    'The Comext dataflow list could not be loaded, so the DS-* collections (detailed trade and PRODCOM) were not searched; the merge is retried about once a minute. eurostat_get_dataset_info reads a DS-* code directly.';
+  const BROADER =
+    'Try a broader term or use eurostat_browse_themes to explore themes without text search.';
+  const INDEX_UNAVAILABLE =
+    'Dimension value labels were not searched because their index has not loaded yet; it loads in the background, so the same search may later find datasets through them.';
+  const TOO_MANY_WORDS =
+    'Dimension value labels were not searched because the query has more than 10 distinct words; a query of 10 or fewer is also matched against them.';
+  const PARTIAL =
+    'Only the first 32 distinct words of the query were checked for words no dataset carries.';
+  const COUNTED =
+    'Without "rates": 7 matches. Search again without one of those words to see its matches.';
+
+  it('carries matchedValues on both surfaces: codes as code spans, labels escaped', async () => {
+    serve({ datasets: valueRows, totalMatches: 1, matchedThroughValues: true });
+    const result = await run('pharmacists');
+    const structured = result.structuredContent as { datasets: Array<Record<string, unknown>> };
+    expect(structured.datasets[0]?.matchedValues).toEqual([PHARM, MARKED]);
+    expect(textOf(result)).toContain(
+      `**Matched values:** \`med_spec=PHARM\` Pharmacists; \`coicop18=CP_X\` ${escapeMarkdownInline(MARKED.label)}`,
+    );
+    expect(textOf(result)).not.toContain(MARKED.label);
+  });
+
+  it('says the results came through dimension values, in the one notice beside the other disclosures', async () => {
+    serve({ datasets: valueRows, totalMatches: 1, matchedThroughValues: true });
+    const alone = (await run('pharmacists')).structuredContent as Record<string, unknown>;
+    expect(alone.notice).toBe(THROUGH_VALUES);
+
+    const loadedAt = '2026-10-14T23:35:00.000Z';
+    serve({
+      datasets: valueRows,
+      totalMatches: 1,
+      matchedThroughValues: true,
+      comextListMissing: true,
+      catalogueLoadedAt: loadedAt,
+    });
+    const result = await run('pharmacists');
+    const notice = (result.structuredContent as Record<string, unknown>).notice as string;
+    expect(notice).toBe(
+      `${THROUGH_VALUES} ${COMEXT_UNSEARCHED} The catalogue could not be refreshed, so these results come from the copy loaded at ${loadedAt}; datasets Eurostat added or changed since then are not reflected.`,
+    );
+    expect(textOf(result)).toContain(notice.split('`')[0] as string);
+  });
+
+  it('renders no matched-values line for a row the catalogue text matched', () => {
+    const text = eurostatSearchDatasets.format!({ datasets: mockDatasets })
+      .map((b) => (b.type === 'text' ? b.text : ''))
+      .join('');
+    expect(text).not.toContain('Matched values');
+  });
+
+  it.each<[string, Found]>([
+    ['zebra crossings', {}],
+    ['unemployment rates', { wordRemovalCounts: [{ word: 'rates', totalMatches: 7 }] }],
+    ['tourism overnight', { unmatchedWords: ['overnight'] }],
+    ['overnight stays', { unmatchedWords: ['overnight', 'stays'], allWordsUnmatched: true }],
+    ['prodcom cn8', { comextListMissing: true, unmatchedWords: ['prodcom', 'cn8'] }],
+    ['DS-056120', { undisseminatedCodes: ['DS-056120'] }],
+  ])(
+    'differs from the zero-match error for "%s" by the not-searched sentence alone while the index is unavailable',
+    async (query, found) => {
+      serve({ datasets: [], totalMatches: 0, ...found });
+      const today = await run(query);
+      serve({ datasets: [], totalMatches: 0, ...found, valuesNotSearched: 'index_unavailable' });
+      const unsearched = await run(query);
+      const hint = errorOf(today).data.recovery.hint;
+      expect(errorOf(unsearched).message).toBe(errorOf(today).message);
+      expect(errorOf(unsearched).data.recovery.hint).toBe(`${hint} ${INDEX_UNAVAILABLE}`);
+      // content[] renders the hint escaped; the sentence holds no Markdown syntax.
+      const line = `Recovery: ${escapeMarkdownInline(hint)}`;
+      expect(textOf(today)).toContain(line);
+      expect(textOf(unsearched)).toBe(textOf(today).replace(line, `${line} ${INDEX_UNAVAILABLE}`));
+    },
+  );
+
+  it('says a query of more than 10 distinct words was not matched against value labels', async () => {
+    serve({
+      datasets: [],
+      totalMatches: 0,
+      wordRemovalCounts: [{ word: 'rates', totalMatches: 7 }],
+      valuesNotSearched: 'too_many_words',
+    });
+    const result = await run('a b c d e f g h i j rates');
+    expect(errorOf(result).data.recovery.hint).toBe(`${COUNTED} ${TOO_MANY_WORDS}`);
+    expect(textOf(result)).toContain(`Recovery: ${COUNTED} ${TOO_MANY_WORDS}`);
+  });
+
+  it.each<[string, Found, string]>([
+    [
+      'after the dead words, before the advice to drop them',
+      { unmatchedWords: ['zq1'] },
+      `"zq1" matches no dataset label, theme breadcrumb, or code. ${PARTIAL} Search again without it.`,
+    ],
+    ['before the broaden hint when no word is named', {}, `${PARTIAL} ${BROADER}`],
+    [
+      'nowhere when a removal count applies',
+      { wordRemovalCounts: [{ word: 'rates', totalMatches: 7 }] },
+      COUNTED,
+    ],
+    [
+      'nowhere while the Comext list is unmerged',
+      { comextListMissing: true },
+      `${COMEXT_UNSEARCHED} ${BROADER}`,
+    ],
+  ])(
+    'says only the first 32 distinct words were checked for dead words %s',
+    async (_, found, hint) => {
+      serve({ datasets: [], totalMatches: 0, ...found, unmatchedWordsPartial: true });
+      expect(errorOf(await run('zq1 zq2')).data.recovery.hint).toBe(hint);
+    },
+  );
+
+  /** The real service over two TOC datasets, its index slot holding `slot`. */
+  async function realService(slot: Record<string, unknown>) {
+    const service = new EurostatCatalogueService({} as never, {} as never);
+    const internals = service as unknown as {
+      buildCache(entries: unknown, flows: unknown[], loadedAt: Date): unknown;
+      cache: unknown;
+      parseToc(text: string): unknown;
+      valueIndex: unknown;
+    };
+    const row = (title: string, code: string, type: string) =>
+      [`"${title}"`, `"${code}"`, `"${type}"`, '""', '""', '""', '""'].join('\t');
+    internals.cache = internals.buildCache(
+      internals.parseToc(
+        [
+          '"title"\t"code"\t"type"\t"last update of data"\t"last table structure change"\t"data start"\t"data end"\t"values"',
+          row('Database by themes', 'data', 'folder'),
+          row('    Health care resources', 'hlth_res', 'folder'),
+          row('        Health graduates', 'hlth_rs_grd2', 'dataset'),
+          row('        Health personnel', 'hlth_rs_prs2', 'dataset'),
+        ].join('\n'),
+      ),
+      [],
+      new Date(),
+    );
+    internals.valueIndex = { failures: 0, retryAt: 0, ...slot };
+    vi.mocked(getEurostatCatalogueService).mockReturnValue(service);
+  }
+
+  async function* oneChunk(text: string): AsyncGenerator<string> {
+    yield text;
+  }
+
+  it('finds hlth_rs_prs2 for "pharmacists" through the real service, on both surfaces', async () => {
+    const index = await buildDimensionValueIndex(
+      oneChunk(
+        [
+          'hlth_rs_grd2\tmed_spec\tDENT',
+          'hlth_rs_prs2\tmed_spec\tPHARM',
+          'hlth_rs_prs2\tmed_spec\tPHYSIO',
+        ].join('\n'),
+      ),
+      oneChunk(
+        '<?xml version="1.0" encoding="UTF-8"?><m:Structure><m:Structures><s:Codelists><s:Codelist id="MED_SPEC"><s:Code id="DENT"><c:Name xml:lang="en">Dentists</c:Name></s:Code><s:Code id="PHARM"><c:Name xml:lang="en">Pharmacists</c:Name></s:Code><s:Code id="PHYSIO"><c:Name xml:lang="en">Physiotherapists</c:Name></s:Code></s:Codelist></s:Codelists></m:Structures></m:Structure>',
+      ),
+    );
+    await realService({ index });
+    const result = await run('pharmacists');
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as {
+      datasets: Array<{ code: string; matchedValues?: unknown[] }>;
+      notice: string;
+      totalMatches: number;
+    };
+    expect(structured.datasets.map((d) => [d.code, d.matchedValues])).toEqual([
+      ['hlth_rs_prs2', [PHARM]],
+    ]);
+    expect(structured).toMatchObject({ totalMatches: 1, notice: THROUGH_VALUES });
+    expect(textOf(result)).toContain('**Code:** hlth_rs_prs2');
+    expect(textOf(result)).toContain('**Matched values:** `med_spec=PHARM` Pharmacists');
+  });
+
+  it('adds the not-searched sentence to a real zero-match while the index loads', async () => {
+    await realService({ loading: new Promise(() => {}) });
+    const result = await run('pharmacists');
+    expect(errorOf(result)).toMatchObject({
+      message: 'No datasets matched "pharmacists".',
+      data: { reason: 'no_match', recovery: { hint: `${BROADER} ${INDEX_UNAVAILABLE}` } },
+    });
+    expect(textOf(result)).toContain(`Recovery: ${BROADER} ${INDEX_UNAVAILABLE}`);
   });
 });

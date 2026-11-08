@@ -55,7 +55,7 @@ const ServerConfigSchema = z.object({
     .positive()
     .default(120_000)
     .describe(
-      'Total allowance for one SDMX bulk download, including request retries, backoff and streaming body consumption, in milliseconds. Held separate from EUROSTAT_REQUEST_TIMEOUT_MS because a bulk body can take longer than a metadata call. Defaults to 2 minutes.',
+      'Total allowance for one SDMX bulk download, including request retries, backoff and streaming body consumption, in milliseconds. Also bounds each download that builds the dimension value index. Held separate from EUROSTAT_REQUEST_TIMEOUT_MS because a bulk body can take longer than a metadata call. Defaults to 2 minutes.',
     ),
   bulkMaxBytes: z.coerce
     .number()

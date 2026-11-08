@@ -59,13 +59,15 @@ const TRADE_CODES = [
 const PRODCOM_CODES = ['DS-059358', 'DS-059359', 'DS-059367', 'DS-059368'];
 
 let fetchMock: ReturnType<typeof vi.fn>;
+let tocText: string;
 let comextReply: () => Response;
 
 beforeEach(() => {
+  tocText = TOC;
   comextReply = () => xml(COMEXT_LIST);
   fetchMock = vi.fn(async (input: unknown) => {
     const request = routeOf(input);
-    if (request.route === 'toc' && request.host === 'main') return new Response(TOC);
+    if (request.route === 'toc' && request.host === 'main') return new Response(tocText);
     if (request.route === 'dataflow-list' && request.host === 'comext') return comextReply();
     throw new Error(`Unexpected request: ${request.url.href}`);
   });
@@ -134,12 +136,16 @@ describe('EurostatCatalogueService — Comext dataflows in search (#46)', () => 
     );
   });
 
-  it('keeps TOC datasets ahead of merged ones', async () => {
+  it('ranks merged collections by tier, behind the TOC datasets of the same tier (#101)', async () => {
     const { datasets } = await service().search('trade', 100, undefined, ctx());
-    const codes = datasets.map((d) => d.code);
-    expect(codes.slice(0, 2)).toEqual(['ext_st_eu27_2020sitc', 'sts_inpr_m']);
-    expect(codes.slice(2).every((code) => code.startsWith('DS-'))).toBe(true);
-    expect(codes).toHaveLength(2 + TRADE_CODES.length + PRODCOM_CODES.length);
+    // "trade" opens a word of every trade label; the production datasets carry it only in
+    // their "Industry, trade and services" breadcrumb.
+    expect(datasets.map((d) => d.code)).toEqual([
+      'ext_st_eu27_2020sitc',
+      ...TRADE_CODES,
+      'sts_inpr_m',
+      ...PRODCOM_CODES,
+    ]);
   });
 });
 
@@ -329,25 +335,59 @@ describe('EurostatCatalogueService — the merge retry across concurrent callers
   });
 
   it('keeps a cursor paged before the merge valid after it, with no match repeated or skipped', async () => {
+    /**
+     * A third TOC dataset with "trade" in its breadcrumb alone, so the first page ends on a
+     * breadcrumb-only row that every merged trade collection outranks.
+     */
+    tocText = [
+      TOC,
+      tocLine('    International trade (aggregated)', 'ext_misc', 'folder', [
+        '""',
+        '""',
+        '""',
+        '""',
+      ]),
+      tocLine('        Extra-EU imports by partner', 'ext_st_imp', 'dataset', [
+        '"15.09.2026"',
+        '""',
+        '"2002"',
+        '"2026-07"',
+        '5000',
+      ]),
+    ].join('\n');
     vi.useFakeTimers({ toFake: ['Date'] });
     comextReply = () => new Response('down', { status: 503 });
     const svc = service();
-    const first = await svc.search('trade', 1, undefined, ctx());
-    expect(first.datasets.map((d) => d.code)).toEqual(['ext_st_eu27_2020sitc']);
-    expect(first.totalMatches).toBe(2);
+    const first = await svc.search('trade', 2, undefined, ctx());
+    expect(first.datasets.map((d) => d.code)).toEqual(['ext_st_eu27_2020sitc', 'sts_inpr_m']);
+    expect(first.totalMatches).toBe(3);
 
     comextReply = () => xml(COMEXT_LIST);
     vi.setSystemTime(Date.now() + 61_000);
     const codes = first.datasets.map((d) => d.code);
     let cursor = first.nextCursor;
     while (cursor) {
-      const page = await svc.search('trade', 1, cursor, ctx());
+      const page = await svc.search('trade', 2, cursor, ctx());
       codes.push(...page.datasets.map((d) => d.code));
       cursor = page.nextCursor;
     }
+    // The walk finishes the TOC matches it began over, then pages the merged collections.
+    expect(codes).toEqual([
+      'ext_st_eu27_2020sitc',
+      'sts_inpr_m',
+      'ext_st_imp',
+      ...TRADE_CODES,
+      ...PRODCOM_CODES,
+    ]);
+    // A walk begun after the merge ranks every match by tier.
     const merged = await svc.search('trade', 100, undefined, ctx());
-    expect(codes).toEqual(merged.datasets.map((d) => d.code));
-    expect(new Set(codes).size).toBe(2 + TRADE_CODES.length + PRODCOM_CODES.length);
+    expect(merged.datasets.map((d) => d.code)).toEqual([
+      'ext_st_eu27_2020sitc',
+      ...TRADE_CODES,
+      'sts_inpr_m',
+      'ext_st_imp',
+      ...PRODCOM_CODES,
+    ]);
   });
 });
 
@@ -391,7 +431,10 @@ describe('EurostatCatalogueService — caller cancellation around the shared loa
       } else {
         expect(await second).toMatchObject({ comextListMissing: true, totalMatches: 2 });
       }
-      expect(requests).toHaveLength(2);
+      // The catalogue load's two requests; the dimension value index load it starts makes its own.
+      expect(
+        requests.filter((request) => ['toc', 'dataflow-list'].includes(routeOf(request.url).route)),
+      ).toHaveLength(2);
       expect(requests.find((request) => routeOf(request.url).route === route)?.signal.aborted).toBe(
         true,
       );
@@ -475,9 +518,15 @@ describe('EurostatCatalogueService — caller cancellation around the shared loa
 });
 
 describe('EurostatCatalogueService — undisseminated DS-* codes (#45)', () => {
+  // The stub serves no dimension value index, so a search that matches nothing says so (#103).
   it('names a DS-* code on neither list', async () => {
     const result = await service().search('DS-056120', 10, undefined, ctx());
-    expect(result).toEqual({ datasets: [], totalMatches: 0, undisseminatedCodes: ['DS-056120'] });
+    expect(result).toEqual({
+      datasets: [],
+      totalMatches: 0,
+      undisseminatedCodes: ['DS-056120'],
+      valuesNotSearched: 'index_unavailable',
+    });
   });
 
   it('names only the absent codes when the query names several', async () => {
@@ -492,6 +541,7 @@ describe('EurostatCatalogueService — undisseminated DS-* codes (#45)', () => {
       totalMatches: 0,
       unmatchedWords: ['zebra', 'crossings'],
       allWordsUnmatched: true,
+      valuesNotSearched: 'index_unavailable',
     });
   });
 

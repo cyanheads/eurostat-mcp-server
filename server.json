@@ -72,7 +72,7 @@
         },
         {
           "name": "EUROSTAT_BULK_TIMEOUT_MS",
-          "description": "Total allowance for one eurostat_download_dataset transfer across request retries, backoff and streaming body consumption, in milliseconds. Defaults to 120000.",
+          "description": "Total allowance for one eurostat_download_dataset transfer across request retries, backoff and streaming body consumption, and for each download that builds the dimension value index, in milliseconds. Defaults to 120000.",
           "format": "string",
           "isRequired": false,
           "default": "120000"
@@ -221,7 +221,7 @@
         },
         {
           "name": "EUROSTAT_BULK_TIMEOUT_MS",
-          "description": "Total allowance for one eurostat_download_dataset transfer across request retries, backoff and streaming body consumption, in milliseconds. Defaults to 120000.",
+          "description": "Total allowance for one eurostat_download_dataset transfer across request retries, backoff and streaming body consumption, and for each download that builds the dimension value index, in milliseconds. Defaults to 120000.",
           "format": "string",
           "isRequired": false,
           "default": "120000"

@@ -25,6 +25,16 @@ export interface TocEntry {
   type: 'dataset' | 'table' | 'folder';
 }
 
+/** A dimension value of a dataset whose English label carries a search word. */
+export interface MatchedValue {
+  /** The value's code, e.g. "PHARM". */
+  code: string;
+  /** The dimension the code belongs to, e.g. "med_spec". */
+  dimension: string;
+  /** The code's English label, e.g. "Pharmacists". */
+  label: string;
+}
+
 /** A dataset result from search or browse. */
 export interface DatasetResult {
   code: string;
@@ -32,6 +42,8 @@ export interface DatasetResult {
   dataStart?: string;
   label: string;
   lastUpdated?: string;
+  /** Values whose labels carry the search words this dataset's own text lacks. */
+  matchedValues?: MatchedValue[];
   obsCount?: number;
   /** Breadcrumb path from root to this entry's parent folder. */
   themePath: string[];

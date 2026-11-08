@@ -8,6 +8,7 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import {
   invalidParams,
+  McpError,
   notFound,
   serviceUnavailable,
   validationError,
@@ -17,7 +18,10 @@ import {
   decodeCursor,
   encodeCursor,
   fetchWithTimeout,
+  logger,
   type PaginationState,
+  requestContextService,
+  runDetached,
   withExtra,
   withRetry,
 } from '@cyanheads/mcp-ts-core/utils';
@@ -28,10 +32,18 @@ import {
 } from '@/services/eurostat-data/sdmx-metadata.js';
 import { upstreamOutage } from '@/services/eurostat-outage.js';
 import { awaitShared } from '@/services/shared-load.js';
+import { type DimensionValueIndex, fetchDimensionValueIndex } from './dimension-value-index.js';
+import { foldSearchText, occursAtWordStart } from './search-text.js';
 import type { BrowseItem, DatasetResult, TocEntry } from './types.js';
 
 /** Upper bound on datasets returned per search page, mirroring the tool's `limit` cap. */
 const MAX_PAGE_SIZE = 100;
+
+/** Most distinct words a search that matches no catalogue text looks for in dimension values. */
+export const MAX_VALUE_SEARCH_WORDS = 10;
+
+/** Most distinct words, in query order, a search that matches nothing names as held by no dataset. */
+export const MAX_UNMATCHED_WORD_CHECKS = 32;
 
 /**
  * How long a failed refresh keeps the stale cache in service before upstream is
@@ -72,12 +84,39 @@ const COMEXT_PARENT_FOLDERS = new Set(Object.values(COMEXT_FOLDERS).map((f) => f
 const DS_CODE_TOKEN = /^ds-\d+$/;
 
 /**
- * Whitespace beside punctuation other than `_`, removed from search text so `Rev.2` finds
- * `Rev. 2` and `2015=100` finds `2015 = 100`. A run is taken whole after a punctuation mark,
- * or from its first blank when one follows it — never retried from inside a run, which keeps
- * a long run of blanks linear.
+ * How a dataset matched a search, best first: 0, its label holds the words as a phrase
+ * starting at a word start; 1, its label or code holds every word; 2, some word matched
+ * only in its theme breadcrumb.
  */
-const SPACE_BESIDE_PUNCTUATION = /(?<=[^\p{L}\p{N}_\s])\s+|(?<!\s)\s+(?=[^\p{L}\p{N}_\s])/gu;
+export type SearchTier = 0 | 1 | 2;
+
+/**
+ * The tier test for one search over `words`, whitespace-free tokens as `search()` splits a
+ * query. The returned function ranks a dataset from its label, folded by
+ * {@link foldSearchText}, and its code, never its breadcrumb, so every TOC placement of a
+ * code ranks alike. The phrase is the words joined by single spaces and folded the same way;
+ * it must start where no letter or digit precedes it, so "employment rate" is not found
+ * inside "Unemployment rate". The word test is the substring test matching applies.
+ */
+export function searchTierOf(
+  words: readonly string[],
+): (foldedLabel: string, code: string) => SearchTier {
+  const phrase = foldSearchText(words.join(' '));
+  const distinct = [...new Set(words.map((word) => word.toLowerCase()))];
+  return (label, code) => {
+    if (occursAtWordStart(label, phrase)) return 0;
+    const lowerCode = code.toLowerCase();
+    return distinct.every((word) => label.includes(word) || lowerCode.includes(word)) ? 1 : 2;
+  };
+}
+
+/** One dataset's text as search reads it ({@link foldSearchText}). */
+interface SearchText {
+  /** The label alone, which the tier test reads. */
+  label: string;
+  /** Label, breadcrumb, and code, which matching reads. */
+  text: string;
+}
 
 /** Parsed TOC held in memory until its TTL expires and the next call refreshes it. */
 interface TocCache {
@@ -93,14 +132,46 @@ interface TocCache {
   entries: TocEntry[];
   loadedAt: Date;
   /** Search text per entry, indexed like `entries` — built by the snapshot's first search. */
-  searchText?: (string | undefined)[];
+  searchText?: (SearchText | undefined)[];
 }
 
 /** What `countWithoutEachWord` finds for a query that matched nothing; each field is omitted when empty. */
 interface BlockingWords {
   allWordsUnmatched?: true;
   unmatchedWords?: string[];
+  unmatchedWordsPartial?: true;
   wordRemovalCounts?: Array<{ totalMatches: number; word: string }>;
+}
+
+/** The dimension value index and its loading state. */
+interface ValueIndexSlot {
+  /** Consecutive failed loads, which set the backoff before the next. */
+  failures: number;
+  /** The index in service: the last one that loaded, kept through a failed refresh. */
+  index?: DimensionValueIndex;
+  /** The load in flight. It settles without rejecting. */
+  loading?: Promise<void>;
+  /** Epoch ms before which no load starts after a failure; 0 once one succeeds. */
+  retryAt: number;
+}
+
+/** A dataset found through dimension values, with what ranks it. */
+interface ValueRow {
+  dataset: number;
+  /** Its TOC placement whose text matched the most query words. */
+  i: number;
+  /** Bit k set: query word k was found only in a dimension value label. */
+  through: number;
+}
+
+/** Why a search that matched no catalogue text did not read dimension values. */
+export type ValuesNotSearched = 'index_unavailable' | 'too_many_words';
+
+/** The number of set bits of a mask of query words. */
+function wordCount(mask: number): number {
+  let count = 0;
+  for (let rest = mask; rest !== 0; rest &= rest - 1) count += 1;
+  return count;
 }
 
 export class EurostatCatalogueService {
@@ -115,6 +186,11 @@ export class EurostatCatalogueService {
    * past its TTL that the refresh could not replace.
    */
   private refreshRetryAt = 0;
+  /**
+   * The dimension value index a search that matches no catalogue text reads. Undefined until
+   * a TOC load starts the first index load.
+   */
+  private valueIndex: ValueIndexSlot | undefined;
 
   // config and storage accepted to match the standard service init pattern;
   // this service uses only the Eurostat public API and per-request config.
@@ -141,6 +217,7 @@ export class EurostatCatalogueService {
   }
 
   private async loadShared(ctx: Context): Promise<TocCache> {
+    if (this.valueIndex) this.loadValueIndex(this.valueIndex);
     const cached = this.cache;
     const now = Date.now();
     if (
@@ -187,8 +264,12 @@ export class EurostatCatalogueService {
    * Only the TOC is required. A Comext list that fails to load leaves the catalogue
    * answering from the TOC alone: the failure is logged, and the merge is retried
    * after `REFRESH_RETRY_COOLDOWN_MS` without re-fetching the TOC.
+   *
+   * Every TOC load also starts the dimension value index load, which nothing awaits.
    */
   private async fetchAndParseToc(ctx: Context): Promise<TocCache> {
+    this.valueIndex ??= { failures: 0, retryAt: 0 };
+    this.loadValueIndex(this.valueIndex);
     const comext = this.fetchComextFlows(ctx).then(
       (flows) => ({ flows }),
       (error: unknown) => ({ error }),
@@ -232,10 +313,60 @@ export class EurostatCatalogueService {
   }
 
   /**
+   * Start a dimension value index load unless one is in flight, a failed load's backoff has
+   * not elapsed, or the index in service is younger than the TOC's TTL. Catalogue calls never
+   * wait for it: the load runs detached from the calling request and its trace, logs to the
+   * server log, and settles into the slot. A failure keeps the previous index in service and
+   * holds off the next attempt for `REFRESH_RETRY_COOLDOWN_MS`, doubling with each failure in
+   * a row up to the TOC's TTL.
+   */
+  private loadValueIndex(slot: ValueIndexSlot): void {
+    const now = Date.now();
+    const { tocCacheTtlMs } = getServerConfig();
+    if (slot.loading || now < slot.retryAt) return;
+    if (slot.index && now - slot.index.loadedAt < tocCacheTtlMs) return;
+
+    const context = requestContextService.createRequestContext({
+      operation: 'loadDimensionValueIndex',
+    });
+    slot.loading = runDetached(() => fetchDimensionValueIndex(context))
+      .then(
+        (index) => {
+          slot.index = index;
+          slot.failures = 0;
+          slot.retryAt = 0;
+          logger.info('Dimension value index loaded', withExtra(context, index.size));
+        },
+        (error: unknown) => {
+          slot.failures += 1;
+          const retryAfterMs = Math.min(
+            REFRESH_RETRY_COOLDOWN_MS * 2 ** (slot.failures - 1),
+            tocCacheTtlMs,
+          );
+          slot.retryAt = Date.now() + retryAfterMs;
+          logger.warning(
+            slot.index
+              ? 'Dimension value index refresh failed — the previous index stays in service'
+              : 'Dimension value index unavailable — searches that match no catalogue text do not read dimension values',
+            withExtra(context, {
+              error: error instanceof Error ? error.message : String(error),
+              failures: slot.failures,
+              retryAfterMs,
+            }),
+          );
+        },
+      )
+      .finally(() => {
+        delete slot.loading;
+      });
+  }
+
+  /**
    * Assemble a catalogue snapshot. `flows` undefined means the Comext list failed to
    * load, which arms the merge retry. `loadedAt` is the TOC's load time — the TTL and
-   * the cursor generation both key on it. A later merge only appends entries, so a
-   * cursor paged over the TOC alone still addresses the same leading matches.
+   * the cursor generation both key on it. A later merge only appends entries, and
+   * `search()` pages entries appended after a walk began behind the ones it began over, so
+   * a cursor paged over the TOC alone still pages every match once.
    */
   private buildCache(
     tocEntries: TocEntry[],
@@ -354,10 +485,23 @@ export class EurostatCatalogueService {
       { operation: 'fetchToc', context: fetchCtx, baseDelayMs: 1000, deadlineMs: requestTimeoutMs },
     ).catch((error: unknown) => {
       // The load is shared and runs without a caller's signal, so nothing here is a cancellation.
-      throw (
-        upstreamOutage(error, "Eurostat's catalogue endpoint", 'the table-of-contents read', {}) ??
-        error
+      const outage = upstreamOutage(
+        error,
+        "Eurostat's catalogue endpoint",
+        'the table-of-contents read',
+        {},
       );
+      if (outage) throw outage;
+      // The TOC URL carries no caller input, so any other HTTP status is a fault on Eurostat's side too.
+      const status = error instanceof McpError ? error.data?.status : undefined;
+      if (typeof status === 'number') {
+        throw serviceUnavailable(
+          `Eurostat's catalogue endpoint answered HTTP ${status} to the table-of-contents read.`,
+          { reason: 'upstream_fault', status, retryable: false },
+          { cause: error },
+        );
+      }
+      throw error;
     });
 
     const entries = this.parseToc(text);
@@ -656,38 +800,63 @@ export class EurostatCatalogueService {
    * Decode a search cursor and confirm it belongs to this search. Malformed,
    * cross-query and superseded-snapshot cursors are rejected identically —
    * the caller's recovery is the same in all three cases, and the cursor is
-   * opaque, so telling them apart would only describe its internal shape.
+   * opaque, so telling them apart would only describe its internal shape. `entryCount`,
+   * the snapshot's length when the walk began, can be no more than its length now.
+   * `valueIndex`, present on a walk over rows found through dimension values, is checked
+   * once `search()` knows which rows it pages.
    */
   private decodeSearchCursor(
     cursor: string,
     queryKey: string,
     generation: number,
+    entryCount: number,
     ctx: Context,
-  ): PaginationState {
+  ): PaginationState & { entryCount: number } {
     try {
       const state = decodeCursor(cursor, ctx);
-      if (state.query === queryKey && state.generation === generation) return state;
+      const walked = state.entryCount;
+      if (
+        state.query === queryKey &&
+        state.generation === generation &&
+        typeof walked === 'number' &&
+        Number.isInteger(walked) &&
+        walked >= 0 &&
+        walked <= entryCount
+      ) {
+        return { ...state, entryCount: walked };
+      }
     } catch {
       // Undecodable cursor — same rejection as one that decodes but does not match.
     }
-    throw invalidParams(
-      'Unusable pagination cursor: it is malformed, was issued for a different query, or was issued against a catalogue snapshot that has since refreshed. Repeat the search without a cursor, then page with the nextCursor it returns.',
-      { reason: 'invalid_cursor' },
-    );
+    throw invalidCursor();
+  }
+
+  /** One search result row for the TOC placement `entries[i]`. */
+  private toDatasetResult(entries: TocEntry[], e: TocEntry, i: number): DatasetResult {
+    return {
+      code: e.code,
+      label: e.label,
+      type: e.type as 'dataset' | 'table',
+      ...(e.dataStart && { dataStart: e.dataStart }),
+      ...(e.dataEnd && { dataEnd: e.dataEnd }),
+      ...(e.lastUpdated && { lastUpdated: e.lastUpdated }),
+      ...(e.obsCount !== undefined && { obsCount: e.obsCount }),
+      themePath: this.buildPath(entries, i),
+    };
   }
 
   /**
-   * Each dataset's search text — label, breadcrumb, and code, lowercased, with whitespace
-   * beside punctuation removed — indexed like `entries`. Folders, which search never
+   * Each dataset's search text, indexed like `entries`. Folders, which search never
    * returns, are undefined.
    */
-  private buildSearchText(entries: TocEntry[]): (string | undefined)[] {
+  private buildSearchText(entries: TocEntry[]): (SearchText | undefined)[] {
     return entries.map((e, i) =>
       e.type === 'folder'
         ? undefined
-        : `${e.label} ${this.buildPath(entries, i).join(' ')} ${e.code}`
-            .toLowerCase()
-            .replace(SPACE_BESIDE_PUNCTUATION, ''),
+        : {
+            label: foldSearchText(e.label),
+            text: foldSearchText(`${e.label} ${this.buildPath(entries, i).join(' ')} ${e.code}`),
+          },
     );
   }
 
@@ -699,28 +868,40 @@ export class EurostatCatalogueService {
    * typed. One pass: a placement missing exactly one word rescues its code for that
    * word, and a code counts once per word whichever placement rescued it — so each count
    * equals the `totalMatches` of the same search without that word.
+   *
+   * `unmatchedWords` is drawn from the first {@link MAX_UNMATCHED_WORD_CHECKS} distinct
+   * words. `unmatchedWordsPartial` is set when a word past them is held by no text the pass
+   * read, so it may be one no dataset carries.
    */
   private countWithoutEachWord(
     toc: TocCache,
-    texts: (string | undefined)[],
+    texts: (SearchText | undefined)[],
     words: Map<string, string>,
   ): BlockingWords {
+    const tokens = [...words.keys()];
     const rescued = new Map<string, Set<string>>();
-    const unmatched = new Set(words.keys());
+    /** The words checked against every text, while no text read so far holds them. */
+    const unmatched = new Set(tokens.slice(0, MAX_UNMATCHED_WORD_CHECKS));
+    /** The words past those, while no text read so far holds them. */
+    const unchecked = new Set(tokens.slice(MAX_UNMATCHED_WORD_CHECKS));
     toc.entries.forEach((e, i) => {
-      const text = texts[i];
+      const text = texts[i]?.text;
       if (text === undefined) return;
       let missing: string | undefined;
       let misses = 0;
-      for (const token of words.keys()) {
-        // Past a second miss nothing is rescued; only a word not yet seen anywhere needs checking.
-        if (misses > 1 && !unmatched.has(token)) continue;
+      for (const token of tokens) {
         if (text.includes(token)) {
           unmatched.delete(token);
+          unchecked.delete(token);
+        } else if (++misses > 1) {
+          break;
         } else {
-          misses += 1;
           missing = token;
         }
+      }
+      // Past a second miss nothing is rescued; the checked words this text may hold still count.
+      if (misses > 1) {
+        for (const token of unmatched) if (text.includes(token)) unmatched.delete(token);
       }
       if (misses !== 1 || missing === undefined) return;
       const codes = rescued.get(missing) ?? new Set<string>();
@@ -737,7 +918,88 @@ export class EurostatCatalogueService {
       ...(wordRemovalCounts.length > 0 && { wordRemovalCounts }),
       ...(unmatchedWords.length > 0 && { unmatchedWords }),
       ...(unmatched.size === words.size && { allWordsUnmatched: true as const }),
+      ...(unchecked.size > 0 && { unmatchedWordsPartial: true as const }),
     };
+  }
+
+  /**
+   * The datasets a query that matched no catalogue text finds when a word may also occur
+   * at a word start of the English label of a value the metabase lists for the dataset.
+   * Every word must still be found, in the dataset's own text or in a value's label. Each
+   * code keeps its placement whose text holds the most words, the first such in TOC order.
+   *
+   * Ordered by fewer words found only through values; then rows where one value's label
+   * carries all of those words; then {@link searchTierOf} over the tokens the dataset's text
+   * holds, in query order; then TOC order. `marks` holds, for each word found through
+   * values, which labels carry it. `words` are the query's distinct tokens, at most
+   * {@link MAX_VALUE_SEARCH_WORDS}.
+   */
+  private searchValues(
+    index: DimensionValueIndex,
+    toc: TocCache,
+    texts: (SearchText | undefined)[],
+    tokens: string[],
+    words: string[],
+  ): Array<ValueRow & { marks: Uint8Array[] }> {
+    const marksOf = new Map<number, Uint8Array | undefined>();
+    let live: ValueRow[] = [];
+    toc.entries.forEach((e, i) => {
+      const dataset = texts[i] && index.datasetOf(e.code);
+      if (dataset !== undefined) live.push({ dataset, i, through: 0 });
+    });
+    for (let k = 0; k < words.length && live.length > 0; k++) {
+      const word = words[k] as string;
+      const found = new Map<number, boolean>();
+      live = live.filter((row) => {
+        if (texts[row.i]?.text.includes(word)) return true;
+        let has = found.get(row.dataset);
+        if (has === undefined) {
+          if (!marksOf.has(k)) marksOf.set(k, index.labelsAtWordStart(word));
+          const marks = marksOf.get(k);
+          has = marks !== undefined && index.hasValue(row.dataset, marks);
+          found.set(row.dataset, has);
+        }
+        if (has) row.through |= 1 << k;
+        return has;
+      });
+    }
+
+    const best = new Map<string, ValueRow>();
+    for (const row of live) {
+      const code = (toc.entries[row.i] as TocEntry).code;
+      const kept = best.get(code);
+      if (!kept || wordCount(row.through) < wordCount(kept.through)) best.set(code, row);
+    }
+
+    const wordIndex = new Map(words.map((word, k) => [word, k]));
+    const tierOfThrough = new Map<number, ReturnType<typeof searchTierOf>>();
+    return [...best.values()]
+      .map((row) => {
+        const marks = words.flatMap((_, k) =>
+          row.through & (1 << k) ? [marksOf.get(k) as Uint8Array] : [],
+        );
+        let tierOf = tierOfThrough.get(row.through);
+        if (!tierOf) {
+          tierOf = searchTierOf(
+            tokens.filter((token) => (row.through & (1 << (wordIndex.get(token) as number))) === 0),
+          );
+          tierOfThrough.set(row.through, tierOf);
+        }
+        const e = toc.entries[row.i] as TocEntry;
+        return {
+          ...row,
+          marks,
+          sharesOne: marks.length === 1 || index.hasValueMarkedByAll(row.dataset, marks),
+          tier: tierOf((texts[row.i] as SearchText).label, e.code),
+        };
+      })
+      .sort(
+        (a, b) =>
+          a.marks.length - b.marks.length ||
+          Number(b.sharesOne) - Number(a.sharesOne) ||
+          a.tier - b.tier ||
+          a.i - b.i,
+      );
   }
 
   /**
@@ -754,18 +1016,36 @@ export class EurostatCatalogueService {
    * several TOC branches keeps its first matching placement as the canonical
    * `themePath`, so totals and page slots count unique query targets.
    *
+   * Matches are ordered by {@link searchTierOf} over the tokens — label phrase, then
+   * every word in label or code, then breadcrumb-only — and by that first matching
+   * placement within a tier. A tier reads the label and code alone, so it is the same
+   * whichever placement supplied the `themePath`.
+   *
    * Results are paginated with an opaque cursor (`limit` = page size, capped at
    * 100) bound to the normalized query and the catalogue snapshot that produced
    * it. An unusable cursor — malformed, from another query, or from a catalogue
    * since refreshed — is rejected as `invalid_cursor` instead of silently paging
-   * a different result set.
+   * a different result set. A Comext merge that lands mid-walk keeps the snapshot,
+   * so the cursor also carries the snapshot's length when the walk began: the
+   * datasets the merge appended page after every match the walk began over, each
+   * match still once.
+   *
+   * When no dataset's text holds every token, {@link searchValues} looks for the tokens
+   * the text lacks in the English labels of the dataset's dimension values. Its rows
+   * carry `matchedValues` and the result `matchedThroughValues`, and their cursor also
+   * binds the value index snapshot (`valueIndex`), so an index refresh mid-walk rejects it
+   * like a catalogue refresh. No search waits for the index: until one has loaded,
+   * `valuesNotSearched` is `index_unavailable`; past {@link MAX_VALUE_SEARCH_WORDS}
+   * distinct tokens it is `too_many_words`.
    *
    * An empty match reports the `DS-*` codes the query names that neither source lists
    * (`undisseminatedCodes`), so the caller can be told the collection is not
    * disseminated rather than to broaden the search, and — for two or more distinct
    * words — each word whose removal alone finds matches (`wordRemovalCounts`) and each
    * word no dataset's search text contains (`unmatchedWords`, as first typed), with
-   * `allWordsUnmatched` when that is every word. `comextListMissing` flags that the
+   * `allWordsUnmatched` when that is every word. `unmatchedWords` reads the first
+   * {@link MAX_UNMATCHED_WORD_CHECKS} distinct words; `unmatchedWordsPartial` flags a query
+   * with a later word that may be one no dataset carries. `comextListMissing` flags that the
    * Comext list is not merged right now, so the `DS-*` collections were not searched and
    * absence from that list proves nothing; `catalogueLoadedAt` marks a catalogue a
    * failed refresh could not replace.
@@ -780,27 +1060,18 @@ export class EurostatCatalogueService {
     catalogueLoadedAt?: string;
     comextListMissing?: boolean;
     datasets: DatasetResult[];
+    matchedThroughValues?: true;
     nextCursor?: string;
     totalMatches: number;
     undisseminatedCodes?: string[];
     unmatchedWords?: string[];
+    unmatchedWordsPartial?: true;
+    valuesNotSearched?: ValuesNotSearched;
     wordRemovalCounts?: Array<{ totalMatches: number; word: string }>;
   }> {
     const toc = await this.ensureLoaded(ctx);
     const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
     if (tokens.length === 0) return { datasets: [], totalMatches: 0 };
-
-    toc.searchText ??= this.buildSearchText(toc.entries);
-    const texts = toc.searchText;
-    const seen = new Set<string>();
-    const matched = toc.entries.flatMap((e, i) => {
-      const text = texts[i];
-      if (text === undefined || seen.has(e.code) || !tokens.every((t) => text.includes(t))) {
-        return [];
-      }
-      seen.add(e.code);
-      return [{ e, i }];
-    });
 
     /** Cursor identity: the normalized query plus the catalogue snapshot it was paged over. */
     const queryKey = tokens.join(' ');
@@ -808,55 +1079,118 @@ export class EurostatCatalogueService {
 
     let offset = 0;
     let pageSize = limit;
+    /** The snapshot's length when this walk began; any entry past it came from a Comext merge since. */
+    let entryCount = toc.entries.length;
+    /** The value index snapshot a walk over rows found through dimension values began on. */
+    let walkedValueIndex: unknown;
     if (cursor) {
-      const state = this.decodeSearchCursor(cursor, queryKey, generation, ctx);
+      const state = this.decodeSearchCursor(cursor, queryKey, generation, entryCount, ctx);
       offset = state.offset;
       pageSize = Math.min(state.limit, MAX_PAGE_SIZE);
+      entryCount = state.entryCount;
+      walkedValueIndex = state.valueIndex;
     }
-
-    const datasets: DatasetResult[] = matched.slice(offset, offset + pageSize).map(({ e, i }) => ({
-      code: e.code,
-      label: e.label,
-      type: e.type as 'dataset' | 'table',
-      ...(e.dataStart && { dataStart: e.dataStart }),
-      ...(e.dataEnd && { dataEnd: e.dataEnd }),
-      ...(e.lastUpdated && { lastUpdated: e.lastUpdated }),
-      ...(e.obsCount !== undefined && { obsCount: e.obsCount }),
-      themePath: this.buildPath(toc.entries, i),
-    }));
-
-    let undisseminatedCodes: string[] = [];
-    let blockingWords: BlockingWords = {};
-    if (matched.length === 0) {
-      undisseminatedCodes = tokens
-        .filter((t) => DS_CODE_TOKEN.test(t) && !toc.codeIndex.has(t.toUpperCase()))
-        .map((t) => t.toUpperCase());
-      // The typed words line up with the tokens: lowercasing neither adds nor removes whitespace.
-      const typed = query.split(/\s+/).filter(Boolean);
-      const words = new Map<string, string>();
-      tokens.forEach((token, n) => {
-        if (!words.has(token)) words.set(token, typed[n] ?? token);
-      });
-      if (words.size > 1) blockingWords = this.countWithoutEachWord(toc, texts, words);
-    }
-    const nextOffset = offset + pageSize;
-    return {
-      datasets,
-      totalMatches: matched.length,
-      ...(undisseminatedCodes.length > 0 && { undisseminatedCodes }),
-      ...blockingWords,
+    const sources = {
       ...(toc.comextRetryAt !== undefined && { comextListMissing: true }),
       ...this.staleness(toc),
-      ...(nextOffset < matched.length && {
+    };
+    const nextOffset = offset + pageSize;
+    const nextCursor = (total: number, valueIndex?: number) =>
+      nextOffset < total && {
         nextCursor: encodeCursor({
           offset: nextOffset,
           limit: pageSize,
           query: queryKey,
           generation,
+          entryCount,
+          ...(valueIndex !== undefined && { valueIndex }),
         }),
-      }),
+      };
+
+    toc.searchText ??= this.buildSearchText(toc.entries);
+    const texts = toc.searchText;
+    const tierOf = searchTierOf(tokens);
+    const distinct = [...new Set(tokens)];
+    const seen = new Set<string>();
+    const matched = toc.entries
+      .flatMap((e, i) => {
+        const text = texts[i];
+        if (
+          text === undefined ||
+          seen.has(e.code) ||
+          !distinct.every((t) => text.text.includes(t))
+        ) {
+          return [];
+        }
+        seen.add(e.code);
+        return [{ e, i, appended: i >= entryCount, tier: tierOf(text.label, e.code) }];
+      })
+      .sort((a, b) => Number(a.appended) - Number(b.appended) || a.tier - b.tier);
+
+    if (matched.length > 0) {
+      if (walkedValueIndex !== undefined) throw invalidCursor();
+      return {
+        datasets: matched
+          .slice(offset, offset + pageSize)
+          .map(({ e, i }) => this.toDatasetResult(toc.entries, e, i)),
+        totalMatches: matched.length,
+        ...sources,
+        ...nextCursor(matched.length),
+      };
+    }
+
+    const index = this.valueIndex?.index;
+    const valuesNotSearched: ValuesNotSearched | undefined =
+      distinct.length > MAX_VALUE_SEARCH_WORDS
+        ? 'too_many_words'
+        : this.valueIndex && !index
+          ? 'index_unavailable'
+          : undefined;
+    if (cursor && (walkedValueIndex === undefined || walkedValueIndex !== index?.loadedAt)) {
+      throw invalidCursor();
+    }
+    if (index && !valuesNotSearched) {
+      const rows = this.searchValues(index, toc, texts, tokens, distinct);
+      if (rows.length > 0) {
+        return {
+          datasets: rows.slice(offset, offset + pageSize).map(({ dataset, i, marks }) => ({
+            ...this.toDatasetResult(toc.entries, toc.entries[i] as TocEntry, i),
+            matchedValues: index.valuesMarked(dataset, marks),
+          })),
+          totalMatches: rows.length,
+          matchedThroughValues: true,
+          ...sources,
+          ...nextCursor(rows.length, index.loadedAt),
+        };
+      }
+    }
+
+    const undisseminatedCodes = tokens
+      .filter((t) => DS_CODE_TOKEN.test(t) && !toc.codeIndex.has(t.toUpperCase()))
+      .map((t) => t.toUpperCase());
+    // The typed words line up with the tokens: lowercasing neither adds nor removes whitespace.
+    const typed = query.split(/\s+/).filter(Boolean);
+    const words = new Map<string, string>();
+    tokens.forEach((token, n) => {
+      if (!words.has(token)) words.set(token, typed[n] ?? token);
+    });
+    return {
+      datasets: [],
+      totalMatches: 0,
+      ...(undisseminatedCodes.length > 0 && { undisseminatedCodes }),
+      ...(words.size > 1 && this.countWithoutEachWord(toc, texts, words)),
+      ...(valuesNotSearched && { valuesNotSearched }),
+      ...sources,
     };
   }
+}
+
+/** The one rejection for every unusable search cursor. */
+function invalidCursor() {
+  return invalidParams(
+    'Unusable pagination cursor: it is malformed, was issued for a different query, or was issued against a catalogue snapshot that has since refreshed. Repeat the search without a cursor, then page with the nextCursor it returns.',
+    { reason: 'invalid_cursor' },
+  );
 }
 
 /**

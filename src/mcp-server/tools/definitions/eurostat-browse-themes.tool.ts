@@ -127,7 +127,7 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
     {
       reason: 'upstream_fault',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: "The server had no catalogue loaded yet, and Eurostat's table of contents answered HTTP 501, which is not retried; or it answered another HTTP 5xx or could not be reached on every retry, which the error marks retryable. Once a catalogue is loaded, a failed refresh serves that copy instead.",
+      when: "The server had no catalogue loaded yet, and Eurostat's table of contents answered HTTP 501, which is not retried, or a 4xx status, which its URL carries no caller input to cause; or it answered another HTTP 5xx or could not be reached on every retry, which the error marks retryable. Once a catalogue is loaded, a failed refresh serves that copy instead.",
       recovery:
         "Retry in a few minutes: the catalogue load failed on Eurostat's side and runs again on the next call.",
     },
@@ -229,7 +229,7 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
         lines.push(`  **Period:** ${item.dataStart ?? '?'} – ${item.dataEnd ?? '?'}`);
       }
       if (item.obsCount != null)
-        lines.push(`  **Observations:** ${item.obsCount.toLocaleString()}`);
+        lines.push(`  **Observations:** ${item.obsCount.toLocaleString('en-US')}`);
     }
     if (result.otherPlacements && result.otherPlacements.length > 0) {
       lines.push(
