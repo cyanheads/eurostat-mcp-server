@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.11.4](changelog/0.11.x/0.11.4.md) — 2026-11-14
+
+eurostat_download_dataset runs on a 55 s time budget and keeps rows read when it ends; async_response and async_queued refusals are retryable; the download caches its dimension order; tool descriptions shrink tools/list from 81,757 to 59,469 B; eurostat_browse_themes items carry lastUpdated.
+
 ## [0.11.3](changelog/0.11.x/0.11.3.md) — 2026-11-08
 
 Both data tools name selected values with no cell (emptyValues) and count absent periods only inside each frequency's span; search ranks label matches first and falls back to dimension value labels; eurostat_get_dimension_values gains code_prefix and a geo level column; the query declares retry_deadline_exceeded.

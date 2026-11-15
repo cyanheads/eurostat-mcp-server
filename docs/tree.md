@@ -1,6 +1,6 @@
 # eurostat-mcp-server - Directory Structure
 
-Generated on: 2026-11-08 18:19:34
+Generated on: 2026-11-15 02:32:39
 
 ```text
 eurostat-mcp-server/
@@ -252,6 +252,7 @@ eurostat-mcp-server/
 │   │   │   └── tgs00010-dataflow.xml
 │   │   ├── demo-r-mwk-ts-de-2022-to-2023.json
 │   │   ├── demo-r-mwk-ts-de-2022-to-2023.tsv
+│   │   ├── ds-045409-queue-ticket.xml
 │   │   ├── earn-ses-annual-de-2020.json
 │   │   ├── ert-bil-eur-d-usd-2022-06-15.json
 │   │   ├── ert-bil-eur-d-usd-no-period.json
