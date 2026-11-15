@@ -14,6 +14,7 @@ import {
   dimensionsToNarrow,
   dimensionValuesForHint,
   dottedValueAdvice,
+  narrowingAdvice,
   unmatchedValuesAdvice,
 } from '@/mcp-server/tools/narrowing-advice.js';
 import type { SdmxDatasetMetadata } from '@/services/eurostat-data/sdmx-metadata.js';
@@ -134,6 +135,26 @@ describe('dimensionsToNarrow — one deadline across the read (#85)', () => {
     expect(new URL(String(fetchMock.mock.calls[0]?.[0])).pathname).toBe(
       '/eurostat/api/dissemination/sdmx/2.1/datastructure/ESTAT/nama_10_gdp',
     );
+  });
+
+  it('sends nothing for a dataset whose order an earlier read cached (#105)', async () => {
+    fetchMock.mockImplementation(
+      async () =>
+        new Response(
+          readFileSync(
+            new URL('../fixtures/nama-10-gdp-datastructure.xml', import.meta.url),
+            'utf8',
+          ),
+        ),
+    );
+    await dimensionsToNarrow('nama_10_gdp', [], createMockContext());
+    await expect(dimensionsToNarrow('NAMA_10_GDP', [], createMockContext())).resolves.toEqual([
+      'freq',
+      'unit',
+      'na_item',
+      'geo',
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('gives up on a read that never answers at 5 s, on its one attempt', async () => {
@@ -478,5 +499,39 @@ describe('unmatchedValuesAdvice (#104)', () => {
       unresolved: ['nope', 'empty'],
       validValues: { mortalit: { totalCount: 3 } },
     });
+  });
+});
+
+describe('narrowingAdvice', () => {
+  it('names the one dimension left unfiltered in the singular', () => {
+    expect(
+      narrowingAdvice(
+        'DS-045409',
+        ['freq', 'reporter', 'partner', 'product', 'time'],
+        ['FREQ', 'reporter', 'partner'],
+      ),
+    ).toBe(
+      'Filter on product — the dimension of "DS-045409" this request left unfiltered — or narrow since_period/until_period.',
+    );
+  });
+
+  it('names several dimensions left unfiltered in the plural, leaving out time', () => {
+    expect(
+      narrowingAdvice('nama_10_gdp', ['freq', 'unit', 'na_item', 'geo', 'time'], ['unit']),
+    ).toBe(
+      'Filter on freq, na_item, geo — the dimensions of "nama_10_gdp" this request left unfiltered — or narrow since_period/until_period.',
+    );
+  });
+
+  it('asks for fewer values when every dimension is filtered', () => {
+    expect(narrowingAdvice('nama_10_gdp', ['unit', 'geo'], ['GEO', 'unit'])).toBe(
+      'Every dimension of "nama_10_gdp" (unit, geo) is already filtered: select fewer values per dimension, or a narrower since_period/until_period range.',
+    );
+  });
+
+  it('points at eurostat_get_dataset_info when the dimensions are unknown', () => {
+    expect(narrowingAdvice('nama_10_gdp', undefined, ['geo'])).toBe(
+      'Add dimension filters — eurostat_get_dataset_info lists the dimensions of "nama_10_gdp" — or a narrower since_period/until_period range.',
+    );
   });
 });

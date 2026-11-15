@@ -53,9 +53,9 @@ const ServerConfigSchema = z.object({
     .number()
     .int()
     .positive()
-    .default(120_000)
+    .default(55_000)
     .describe(
-      'Total allowance for one SDMX bulk download, including request retries, backoff and streaming body consumption, in milliseconds. Also bounds each download that builds the dimension value index. Held separate from EUROSTAT_REQUEST_TIMEOUT_MS because a bulk body can take longer than a metadata call. Defaults to 2 minutes.',
+      "Time budget for one eurostat_download_dataset call, in milliseconds, counted from the start of the call: a filtered download's structure read, every request attempt and backoff, and the streamed body with its staging all come out of it. Reached after rows have streamed, it ends the transfer and keeps the rows read so far as a prefix with budgetExceeded set; reached before the first row, the call fails as retry_deadline_exceeded. Defaults to 55 seconds, under the 60-second request timeout of MCP SDK clients; raise it for clients that wait longer, to let a download run further.",
     ),
   bulkMaxBytes: z.coerce
     .number()

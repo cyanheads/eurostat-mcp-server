@@ -8,6 +8,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { getServerConfig } from '@/config/server-config.js';
 import { clampReadLimit } from '@/mcp-server/tools/clamp-read-limit.js';
 import { hoistDimensions } from '@/mcp-server/tools/hoist-dimensions.js';
 import {
@@ -28,9 +29,13 @@ import {
 import {
   bulkRowSchema,
   getEurostatBulkService,
+  remainingBudgetMs,
 } from '@/services/eurostat-bulk/eurostat-bulk-service.js';
 import { type BulkRow, TIME_COLUMN } from '@/services/eurostat-bulk/types.js';
-import { getEurostatDataService } from '@/services/eurostat-data/eurostat-data-service.js';
+import {
+  getEurostatDataService,
+  TIME_DIMENSION_KEYS,
+} from '@/services/eurostat-data/eurostat-data-service.js';
 import type { OutsideSpan } from '@/services/eurostat-data/types.js';
 import { normalizeFilters } from '@/services/eurostat-filters.js';
 import { isComextDataset } from '@/services/eurostat-hosts.js';
@@ -40,6 +45,7 @@ import {
   frequenciesOf,
   PERIOD_FORMS,
   periodCuts,
+  periodSpan,
   resolvePeriods,
 } from '@/services/eurostat-periods.js';
 
@@ -74,32 +80,32 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
   tool('eurostat_download_dataset', {
     title: 'Download Eurostat Dataset',
     description:
-      'Download a Eurostat dataset in bulk through the SDMX 2.1 TSV endpoint and stage it as a SQL table on the dataframe canvas — the route to a whole dataset, where eurostat_query_dataset is the route to a slice of one. The TSV wire format is roughly half the bytes of the JSON-stat body eurostat_query_dataset reads, so it reaches datasets that would otherwise time out, and it is expanded here into one row per non-blank TSV cell, including the unflagged ":" cells that mark a period a series lacks or a period of a frequency it has no observation of. Filters take the same dimension-code map eurostat_query_dataset uses and are applied server-side by Eurostat; call eurostat_get_dataset_info first for the dimension codes and eurostat_get_dimension_values for their values. Narrow with since_period/until_period rather than asking for the most recent N periods — the TSV layout keeps a column for every period whichever is requested, so a period range is what actually shrinks the response. Transfers are bounded by a decoded-byte budget enforced while streaming: complete rows within the allowed prefix are retained with budgetExceeded set; a budget too small for a usable row fails as byte_budget_exceeded with narrowing guidance. Only preview_limit rows come back inline. When a table is staged, call eurostat_dataframe_describe first to confirm its columns, then eurostat_dataframe_query; without a canvas, rows past the preview are not retained.',
+      'Download a Eurostat dataset through the SDMX bulk TSV endpoint and stage it as a SQL table on the dataframe canvas — the route to a whole dataset, where eurostat_query_dataset is the route to a slice. It is expanded into one row per non-blank TSV cell; absentCellCount says which rows are not observations. Filter keys come from eurostat_get_dataset_info and values from eurostat_get_dimension_values. Two budgets bound every transfer: a decoded-byte budget (50 MiB by default) and a time budget counted from the start of the call (55 seconds by default, inside the 60 seconds an MCP client waits), so a download that reaches the time budget returns after about 55 seconds. Reached after rows have streamed, either budget keeps them as a prefix with budgetExceeded set; reached before the first row, the call fails. Only preview_limit rows come back inline; without a canvas the rest are not kept.',
     annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
     input: z.object({
       dataset_code: z
         .string()
         .min(1)
         .describe(
-          'Dataset code (e.g., "nama_10_gdp"). Required. A DS-* code — Comext detailed trade or PRODCOM, in any case — is served by the Comext host, which refuses an unfiltered download of its large collections as extraction_too_big: filter it, including freq on the trade flows, which mix annual and monthly series.',
+          'Dataset code (e.g., "nama_10_gdp"). Filter a DS-* code (Comext trade or PRODCOM, in any case): an unfiltered download of a large collection is refused as extraction_too_big, and its trade flows mix annual and monthly series, so filter freq.',
         ),
       filters: z
         .record(z.string(), z.array(z.string()))
         .default({})
         .describe(
-          'Dimension filters as a map of dimension code → array of accepted values, applied by Eurostat before the body is sent. Example: {"unit": ["CP_MEUR"], "na_item": ["B1G"], "geo": ["DE", "FR"]}. Omit a dimension or pass an empty array to accept every value for it; a blank or whitespace-only value is likewise unset and dropped ([""] accepts every value, ["", "DE"] is ["DE"]). A value holding "+" is split into separate values (OR): ["DE+FR"] is ["DE", "FR"]. A value holding "." is rejected as invalid_dimension before any request: no Eurostat code contains one. Dimension codes match in any case ("GEO" is geo). Do not put "time" here — use since_period/until_period. Naming a dimension the dataset does not have is rejected with the dataset\'s dimension list rather than silently ignored. A value Eurostat does not know fails the download as invalid_dimension; a valid value with no observation in the selected periods adds none, and the response names it in emptyValues.',
+          'Map of dimension code → values to keep, e.g. {"unit": ["CP_MEUR"], "geo": ["DE", "FR"]}. Keys match in any case; a key the dataset lacks, "time" included (use since_period/until_period), is rejected with its dimension list. An empty array or a blank value is no filter. A value holding "+" is split into separate values (OR). A value holding "." is rejected as invalid_dimension before any request: no Eurostat code contains one. A value Eurostat does not know fails the download as invalid_dimension; a valid one with no observation in the selected periods is named in emptyValues.',
         ),
       since_period: z
         .string()
         .optional()
         .describe(
-          `Start of the period range, inclusive, sent as startPeriod. Accepted forms: ${PERIOD_FORMS} (e.g., "2020", "2023-Q1", "2024-01"). Extra leading zeros after the letter are dropped ("2020-W001" is sent as "2020-W01"), a day of the year is sent as three digits ("2026-D1" as "2026-D001"), and YYYY-A1 is sent as YYYY. Any form works on any dataset, read as a span of days, but Eurostat keeps only periods wholly inside the range, per frequency: "2022-06" on annual data excludes 2022, which starts before the bound, and a notice names that period when the TSV header shows its frequency. A range whose first and last day are the same day is requested as that day and the next, and the next day is dropped before anything is counted or staged. A malformed or non-existent period (e.g., "2020-13") is rejected as invalid_period. The most effective way to shrink a bulk response: it removes period columns from the TSV rather than blanking their cells.`,
+          `Start of the range, inclusive: ${PERIOD_FORMS}, e.g. "2020", "2023-Q1", "2024-01". A range is the most effective way to shrink a download. Any form works on any dataset, but Eurostat keeps only periods wholly inside the range, per frequency: a bound that falls inside a period excludes it, and a notice names that period when the TSV header shows its frequency. A one-day range (both bounds on the same day) selects that day alone. A malformed or non-existent period, or a since_period after until_period, fails as invalid_period.`,
         ),
       until_period: z
         .string()
         .optional()
         .describe(
-          'End of the period range, inclusive (e.g., "2024"), sent as endPeriod, in the same forms as since_period. Omit for data through the latest available period. A bound that falls inside a period excludes it here too: "2023-06" on annual data excludes 2023, which ends after the bound. The range must hold at least one day: a since_period that starts after until_period ends is rejected as invalid_period, and bounds of different frequencies are compared by day.',
+          'End of the range, inclusive (e.g., "2024"), in the forms and under the wholly-inside rule of since_period. Omit for data through the latest period.',
         ),
       preview_limit: (clampLimits
         ? z.number().multipleOf(1).min(1)
@@ -107,10 +113,10 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
       )
         .default(25)
         .describe(
-          `How many rows to echo inline, from the start of the download. Default 25; ${clampLimits ? 'positive integers above 500 are clamped to 500 with a notice' : 'maximum 500; larger values are rejected'}. The full download is on the canvas table when one was staged; this is orientation, not the result set.`,
+          `Rows echoed inline, from the start of the download. Default 25; ${clampLimits ? 'positive integers above 500 are clamped to 500 with a notice' : 'maximum 500; larger values are rejected'}. The staged table, when there is one, holds every row.`,
         ),
       canvas_id: CanvasIdSchema.optional().describe(
-        'Reuse an existing dataframe canvas so this download lands beside earlier results and can be joined against them. Pass the canvasId a previous eurostat_download_dataset or eurostat_query_dataset response returned; omit to start a fresh canvas. Ignored on deployments without a dataframe canvas. A download that yields no row (a header-only table) fails as no_results and leaves the canvas untouched.',
+        'A canvasId from an earlier staging response, to stage this download beside its tables for joins; omit for a fresh canvas.',
       ),
     }),
     output: z.object({
@@ -118,28 +124,28 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
       dimensionsUsed: z
         .array(z.string())
         .describe(
-          'Dimension codes carried by the downloaded rows, in the order Eurostat keys them (e.g., ["freq", "unit", "na_item", "geo"]). Read from the TSV header, so it reflects the response rather than metadata. The period lives in the separate "time" column.',
+          'Dimension codes of the downloaded rows, in key order, from the TSV header; the period is the "time" column.',
         ),
       rowCount: z
         .number()
         .describe(
-          'Rows expanded from the download, one per non-blank cell. A row carrying a value, a flag, a status or a text value is an observation, a flagged ":" (a value Eurostat reports as unavailable) included. A row holding an unflagged ":" — obs_value null with no flag, status or text — is not: it is a period its series lacks (counted in absentCellCount when the series has an observation of that frequency and the period lies inside that frequency\'s span, from its first to its latest period any downloaded row has an observation in; counted in the notice when it lies outside) or a period of a frequency its series has no observation of.',
+          'Rows downloaded, one per non-blank TSV cell, unflagged ":" rows included (see absentCellCount).',
         ),
       missingCount: z
         .number()
         .describe(
-          'Rows carrying no numeric value (obs_value is null): observations published without a number — a flagged ":" or a text value — and every unflagged ":" row, a period its series lacks (inside or outside the span absentCellCount counts) or a period of a frequency its series has no observation of.',
+          'Rows with obs_value null: observations published without a number (a flagged ":" or a text value), and every unflagged ":" row (see absentCellCount).',
         ),
       absentCellCount: z
         .number()
         .describe(
-          'Unflagged ":" rows — obs_value null with no flag, status or text — at a period of a frequency the same series carries in another downloaded row: periods that series lacks, where Eurostat publishes no observation. Only periods inside that frequency\'s span count: from its first to its latest period any downloaded row has an observation in. The rows at a period before or after the span, which no downloaded row has an observation in, are counted and named in the notice instead. Unflagged rows at the periods of a frequency the series has no observation of (the padding of a mixed-frequency slice, or a series that is ":" throughout) are left out, and a flagged ":" or a text value is an observation, never counted. Part of rowCount and missingCount, and counted over the rows downloaded, so a budget-cut download counts its prefix and settles the span over it.',
+          'An unflagged ":" row (obs_value null with no flag, status or text) is not an observation: it is a period its series lacks, or a period of a frequency the series has no observation of. This counts the first kind: rows at a period of a frequency the same series carries in another downloaded row, inside that frequency\'s span from its first to its latest period any downloaded row has an observation in. Rows before or after the span are named in the notice instead, and rows at a frequency the series has no observation of (mixed-frequency padding, or a series that is ":" throughout) are left out. A flagged ":" or a text value is an observation. Part of rowCount and missingCount; a budget-cut download counts over its prefix.',
         ),
       emptyValues: z
         .record(z.string(), z.array(z.string()))
         .optional()
         .describe(
-          'Filter values the dataset has but no downloaded row carries an observation for — no value, flag, status or text in the selected periods — keyed by filter key, spelled as sent (matching ignores case). Eurostat fails a download naming a code it does not know, so each is a valid value; it can carry data in other periods or beside other filter values. Never a period. Omitted when every filter value has an observation, and when budgetExceeded is true, since the rows not downloaded could hold any of them.',
+          'Valid filter values with no observation in the download, by filter key, as sent; such a value can have data in other periods or beside other filter values. Omitted when every filter value has an observation, and when budgetExceeded is true, since the rows not downloaded could hold any of them.',
         ),
       periodRange: z
         .object({
@@ -147,39 +153,35 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
             .string()
             .optional()
             .describe(
-              'Earliest period of a row carrying an observation — a value, a flag, a status or a text value; an unflagged ":" row sets no bound. Omitted, with the other bound, when no row carries an observation.',
+              'Earliest period of a row carrying an observation; an unflagged ":" row sets no bound. Omitted, with the other bound, when no row carries an observation.',
             ),
           end: z
             .string()
             .optional()
             .describe(
-              'Latest period of a row carrying an observation, read the same way as start. Omitted, with the other bound, when no row carries an observation.',
+              'Latest period of a row carrying an observation. Omitted, with the other bound, when no row carries an observation.',
             ),
         })
         .describe(
-          'Period coverage of the observations actually downloaded. Narrower than the dataset when budgetExceeded is true or a period range was applied.',
+          'Period coverage of the downloaded observations; narrower than the dataset when budgetExceeded is true or a range was set.',
         ),
       bytesRead: z
         .number()
         .describe(
-          'Decoded TSV bytes accepted for parsing, after decompression when applicable; never more than EUROSTAT_BULK_MAX_BYTES, including an incomplete trailing line that is discarded.',
+          'Decoded TSV bytes read, never more than the byte budget (50 MiB by default). With budgetExceeded true, a value equal to the byte budget means that budget ended the transfer; a smaller one, that the time budget did.',
         ),
-      compressed: z
-        .boolean()
-        .describe(
-          'True when Eurostat sent the body gzip-compressed. It does so without a Content-Encoding header on large responses, so this reports what the stream actually carried.',
-        ),
+      compressed: z.boolean().describe('True when the body arrived gzip-compressed.'),
       budgetExceeded: z
         .boolean()
         .describe(
-          'True when the byte budget stopped the transfer before the dataset ended, making the rows a prefix rather than the whole thing. Narrow with filters or a period range, or raise EUROSTAT_BULK_MAX_BYTES.',
+          'True when the byte budget or the time budget counted from the start of the call ended the transfer early: the rows are a prefix, and the notice names which budget. Where a time cut lands depends on how fast the body arrived, so a repeat can stop at a different row.',
         ),
       observations: z
         .array(
           z
             .record(z.string(), z.union([z.string(), z.number(), z.null()]))
             .describe(
-              'One downloaded row: one column per dimension holding its code, "time" for the period, then obs_value, obs_flag, obs_flag_label, conf_status, conf_status_label. A label column is null when Eurostat publishes no label for that code. Rows of a DS-* dataset also carry obs_value_text after obs_value: a value Eurostat published as text, such as a PRODCOM quantity unit ("KG"), kept verbatim with obs_value null; a PRODCOM ":C" arrives as conf_status "C" instead.',
+              'One downloaded row: one column per dimension with its code, "time", then obs_value, obs_flag, obs_flag_label, conf_status, conf_status_label (a label is null when Eurostat publishes none). DS-* rows add obs_value_text: a value published as text, such as a PRODCOM unit ("KG"), with obs_value null; PRODCOM\'s ":C" arrives as conf_status "C".',
             ),
         )
         .describe(
@@ -189,40 +191,38 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
         .string()
         .optional()
         .describe(
-          'Dataframe canvas holding the staged download. Pass to eurostat_dataframe_describe, eurostat_dataframe_query, or a later staging call. Omitted when nothing was staged.',
+          'Canvas holding the staged table; pass it as canvas_id to the dataframe tools or a later staging call. Omitted when nothing was staged.',
         ),
       tableName: z
         .string()
         .optional()
         .describe(
-          'Canvas table holding every downloaded row. Call eurostat_dataframe_describe with canvasId first to confirm the table and columns, then eurostat_dataframe_query. Omitted when this deployment runs without a dataframe canvas, in which case only the inline preview survives the call.',
+          'Canvas table holding every downloaded row. Call eurostat_dataframe_describe with canvasId for its columns first, then eurostat_dataframe_query. Omitted without a dataframe canvas, when only the inline rows survive the call.',
         ),
       stagedRowCount: z
         .number()
         .optional()
-        .describe(
-          'Rows written to the canvas table. Matches rowCount. Omitted alongside tableName.',
-        ),
+        .describe('Rows staged; equals rowCount. Omitted with tableName.'),
     }),
     enrichment: {
       totalCount: z
         .number()
         .describe(
-          'Rows the download produced — equal to rowCount, unflagged ":" rows included: a period their series lacks (absentCellCount inside its frequency\'s span of periods with an observation, the notice outside it) or a period of a frequency their series has no observation of. The inline observations array holds only the first preview_limit of them; budgetExceeded, not this count, says whether the download is the whole dataset.',
+          'Rows downloaded, equal to rowCount (see absentCellCount). observations holds only the first preview_limit; budgetExceeded, not this count, says whether the download is whole.',
         ),
       appliedQuery: z
         .object({
           filters: z
             .record(z.string(), z.array(z.string()))
             .describe(
-              'Dimension filters sent to Eurostat. A value holding "+" appears as its pieces; blank values and dimensions left with no value are dropped.',
+              'Filters sent to Eurostat: "+" values split, blank values and empty dimensions dropped.',
             ),
           sincePeriod: z.string().optional().describe('since_period applied, if any.'),
           untilPeriod: z.string().optional().describe('until_period applied, if any.'),
           url: z
             .string()
             .describe(
-              'The SDMX request URL, so the download can be reproduced. A one-day range goes out as that day and the next, so its endPeriod is a day past untilPeriod.',
+              'The SDMX request URL, to reproduce the download. A one-day range asks for that day and the next, so the URL ends a day past untilPeriod.',
             ),
         })
         .describe('The bulk request as the server built it.'),
@@ -230,7 +230,7 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
         .string()
         .optional()
         .describe(
-          'Guidance on every download: the staged table with the required eurostat_dataframe_describe then eurostat_dataframe_query sequence (or, without a canvas, what was returned inline and what was discarded), preceded by a period a bound falls inside when the TSV header shows that frequency, by byte-budget disclosure when the budget stopped the transfer, by what the unflagged ":" rows are — the rows at periods no downloaded row has an observation in, before or after a frequency\'s span of periods with one, counted and named per frequency; periods a series lacks inside that span (absentCellCount); the padding of a mixed-frequency slice — by the filter values with no observation (emptyValues), up to 24 named with an omitted count, and by the inline-preview length when preview_limit returns fewer rows than were downloaded.',
+          'Disclosures on every download: the staged table with the eurostat_dataframe_describe then eurostat_dataframe_query sequence, or without a canvas what was kept inline. Before it, when they apply: a period a bound excludes, the budget that stopped the transfer, the unflagged ":" rows (see absentCellCount) before or after a frequency\'s span, inside it and from mixed frequencies, emptyValues (up to 24 named), and the inline-preview length.',
         ),
     },
 
@@ -256,15 +256,15 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
       {
         reason: 'byte_budget_exceeded',
         code: JsonRpcErrorCode.ValidationError,
-        when: 'The decoded TSV byte budget was exhausted before a complete header and usable row could be read.',
+        when: 'The byte budget ran out before a complete header and first row were read.',
         recovery:
-          'Add dimension filters or narrow since_period/until_period to reduce the transfer, or raise EUROSTAT_BULK_MAX_BYTES.',
+          'Add dimension filters or narrow since_period/until_period so the first rows arrive within the byte budget.',
         thrownBy: 'service',
       },
       {
         reason: 'not_found',
         code: JsonRpcErrorCode.NotFound,
-        when: 'The dataset code is not available for dissemination (HTTP 404, SDMX faultcode 100).',
+        when: 'The dataset code is not available for dissemination.',
         recovery:
           'Use eurostat_search_datasets or eurostat_browse_themes to find a valid dataset code.',
         thrownBy: 'service',
@@ -272,14 +272,14 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
       {
         reason: 'invalid_dimension',
         code: JsonRpcErrorCode.ValidationError,
-        when: `${UNKNOWN_FILTER_KEY_WHEN}; a filter value contains "." (rejected before any request); or Eurostat rejects a filter value, or the period range selects no period of the dataset (SDMX faultcode 150): it misses the coverage, or holds no whole period. The fault covers both; its TIME_PERIOD clause tells the period range apart.`,
+        when: `${UNKNOWN_FILTER_KEY_WHEN}; a filter value contains "." (rejected before any request); Eurostat rejects a filter value; or the period range selects no period of the dataset, missing its coverage or holding no whole period.`,
         recovery:
           'Check dimension codes with eurostat_get_dataset_info and their values with eurostat_get_dimension_values, and keep the period range inside the dataset coverage, holding a whole period.',
       },
       {
         reason: 'filter_arity',
         code: JsonRpcErrorCode.ValidationError,
-        when: 'Eurostat rejected the positional dimension key because it carried the wrong number of positions (SDMX faultcode 140, INVALID_QUERY_NB_FILTERS), meaning the dataset structure has changed since the metadata call.',
+        when: "Eurostat rejected the filter key's number of positions: the dataset's structure changed since it was read.",
         recovery:
           'Re-read the dimensions with eurostat_get_dataset_info and rebuild the filters on them, or retry without filters to download the whole dataset, except a DS-* Comext collection, which Eurostat serves only filtered.',
         thrownBy: 'service',
@@ -287,29 +287,29 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
       {
         reason: 'invalid_period',
         code: JsonRpcErrorCode.ValidationError,
-        when: 'since_period or until_period is not a period literal, or names a month, quarter, semester, trimester, week or day that does not exist, or since_period starts after until_period ends. Checked before any request — the bulk endpoint would otherwise roll an out-of-range period into a neighbouring one, and answer an inverted range with the whole series — and SDMX faultcode 140 TIME_PERIOD_FILTER_SPEC_INVALID maps here too.',
+        when: 'A period bound is not an accepted form or names a period that does not exist, or since_period starts after until_period ends (bounds of different frequencies compare by day). Checked before any request.',
         recovery: `Write since_period/until_period as ${PERIOD_FORMS}, for example "2020", "2020-01" or "2020-Q1", with since_period starting no later than until_period ends.`,
       },
       {
         reason: 'async_queued',
         code: JsonRpcErrorCode.ServiceUnavailable,
-        when: 'Eurostat answered HTTP 200 with a SOAP syncResponse queue ticket (status SUBMITTED) instead of data, because the extraction was too costly to serve synchronously.',
-        retryable: false,
+        when: 'Eurostat queued the extraction instead of sending data: it prepares it in the background and serves the identical download minutes later. The server sends the request once and does not repeat it.',
+        retryable: true,
         recovery:
-          'Add dimension filters or a period range so Eurostat serves the extraction inline; the queued result cannot be collected here.',
+          'Repeat the identical call in a few minutes, once Eurostat has prepared the extraction, or filter on the dimensions this download left unfiltered or narrow since_period/until_period.',
         thrownBy: 'service',
       },
       {
         reason: 'no_results',
         code: JsonRpcErrorCode.NotFound,
-        when: 'The download completed but yielded no row: a header-only table, or a one-day reply whose only cells fall on the next day. Nothing is staged, and no canvas is created or touched. A table whose only rows are unflagged ":" cells succeeds with those rows, with periodRange omitted.',
+        when: 'The download yielded no row: a header-only table, or a one-day range whose only cells fall on the next day (see appliedQuery.url). Nothing is staged, and no canvas is created or touched.',
         recovery:
           "Verify the filter values with eurostat_get_dimension_values and keep since_period/until_period inside the series' coverage, holding a whole period — a combination that exists in no cell and a range that misses the series both download as an empty table.",
       },
       {
         reason: 'extraction_too_big',
         code: JsonRpcErrorCode.ServiceUnavailable,
-        when: 'Eurostat refused the extraction as too large (SDMX faultcode 413, HTTP 413): past its 5,000,000-row extraction limit, or an unfiltered download of a large DS-* Comext collection, which Eurostat serves only filtered. Covers every dataset, on either host.',
+        when: 'Eurostat refused the extraction as too large: past its 5,000,000-row limit, or an unfiltered download of a large DS-* collection, which it serves only filtered.',
         retryable: false,
         recovery:
           'Add dimension filters or a narrower since_period/until_period range to shrink the extraction; the same request fails the same way on every retry.',
@@ -318,14 +318,14 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
       {
         reason: 'upstream_fault',
         code: JsonRpcErrorCode.ServiceUnavailable,
-        when: 'The SDMX data endpoint returned a fault this server does not model, or a body that is not a TSV table; for a filtered download, the structure endpoint returned a structure this server cannot build a filter key from; the data endpoint — or, for a filtered download, the structure endpoint — answered HTTP 501, which is not retried; or it answered another HTTP 5xx or could not be reached on every retry, which the error marks retryable.',
+        when: "Eurostat's data endpoint, or a filtered download's structure endpoint, failed or was unreachable on every attempt, broke the body off, or sent an unmodeled fault, a non-TSV body or an unusable structure; retryable says whether a later call can succeed.",
         recovery: 'Retry in a few minutes, or narrow the request with dimension filters.',
         thrownBy: 'service',
       },
       {
         reason: 'retry_deadline_exceeded',
         code: JsonRpcErrorCode.Timeout,
-        when: 'The download did not complete within EUROSTAT_BULK_TIMEOUT_MS (120 s by default), every attempt, backoff and the streamed body included; or, for a filtered download, the structure read that orders its filter key did not answer within the request deadline.',
+        when: "The call's time budget (55 seconds by default, counted from the start of the call, every attempt and a filtered download's structure read included) ran out before the first row arrived; reached later, it keeps the rows as a prefix with budgetExceeded instead. Or a filtered download's structure read did not answer within its deadline.",
         recovery:
           'Add dimension filters or a narrower since_period/until_period range to shrink the transfer, retry a structure read that timed out in a few minutes, or read a slice small enough to return with eurostat_query_dataset.',
         thrownBy: 'service',
@@ -333,12 +333,14 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
       {
         reason: 'canvas_not_found',
         code: JsonRpcErrorCode.NotFound,
-        when: 'A canvas_id was supplied for staging but is unknown or its lifetime has elapsed.',
+        when: 'canvas_id is unknown or has expired.',
         recovery: 'Omit canvas_id so the download starts a fresh canvas and returns its canvasId.',
       },
     ],
 
     async handler(request, ctx) {
+      // The call's time budget counts from here, so a filtered download's structure read spends it too.
+      const startedAt = Date.now();
       const previewLimit = clampReadLimit(
         request.preview_limit,
         PREVIEW_MAX,
@@ -385,45 +387,87 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
 
       /**
        * The positional key needs every dimension in order, not just the filtered
-       * ones, so a filtered download first reads the dataset's structure
-       * definition, a few KB whatever the dataset's size. An unfiltered download
+       * ones, so a filtered download first reads the dataset's dimension order from
+       * its structure definition, a few KB whatever the dataset's size. The data
+       * service caches the order for an hour beside the dataset's metadata, so a
+       * repeat within the hour sends no structure request. An unfiltered download
        * needs no key and skips it — the TSV header names the dimensions anyway.
        */
       let dimensionOrder: string[] = [];
 
       /**
-       * `ctx.fail` is typed against this tool's reason union, so the mapping stays
-       * here rather than inside a helper that would have to take a bare string.
+       * A service failure as the declared contract has it, or the failure unchanged when no
+       * reason maps. `ctx.fail` is typed against this tool's reason union, so the mapping
+       * stays here rather than inside a helper that would have to take a bare string.
        */
+      const contractFailure = async (endpoint: OutageEndpoint, err: unknown): Promise<unknown> => {
+        const { reason, periodRange } = (err as McpError).data ?? {};
+        const mapped = mapBulkFailure(err, input.dataset_code, {
+          dimensions:
+            reason === 'extraction_too_big' || reason === 'async_queued'
+              ? await dimensionsToNarrow(input.dataset_code, dimensionOrder, ctx)
+              : undefined,
+          endpoint,
+          filters,
+          periodSet: sinceP !== undefined || untilP !== undefined,
+        });
+        if (!mapped) return err;
+        /**
+         * A key the cached dimension order built can go stale with a structure change since
+         * the read: a wrong number of positions (`filter_arity`), a filter key the order
+         * lacks, or a value Eurostat rejects at the position the order put it. Dropped, the
+         * next filtered download reads the structure again instead of failing until the
+         * entry expires. A rejected period range says nothing about the order and keeps it.
+         */
+        const staleOrder =
+          mapped.reason === 'filter_arity' ||
+          (mapped.reason === 'invalid_dimension' && periodRange !== true);
+        if (staleOrder && dimensionOrder.length > 0) {
+          getEurostatDataService().forgetDimensionOrder(input.dataset_code);
+        }
+        return ctx.fail(
+          mapped.reason,
+          mapped.message,
+          {
+            ...(mapped.retryable && { retryable: true }),
+            ...mapped.data,
+            recovery: { hint: mapped.hint },
+          },
+          mapped.literals && { literals: mapped.literals },
+        );
+      };
       const asContract = async <T>(endpoint: OutageEndpoint, run: () => Promise<T>): Promise<T> => {
         try {
           return await run();
         } catch (err) {
-          const mapped = mapBulkFailure(err, input.dataset_code, {
-            dimensions:
-              (err as McpError).data?.reason === 'extraction_too_big'
-                ? await dimensionsToNarrow(input.dataset_code, dimensionOrder, ctx)
-                : undefined,
-            endpoint,
-            filtered: Object.keys(filters),
-          });
-          if (!mapped) throw err;
-          throw ctx.fail(mapped.reason, mapped.message, {
-            ...(mapped.retryable && { retryable: true }),
-            ...mapped.data,
-            recovery: { hint: mapped.hint },
-          });
+          throw await contractFailure(endpoint, err);
         }
       };
 
       if (Object.keys(filters).length > 0) {
+        // The read keeps its own request deadline, cut to what is left of the call's budget.
         dimensionOrder = await asContract('structure', () =>
-          getEurostatDataService().getDimensionOrder(input.dataset_code, ctx),
+          getEurostatDataService().getDimensionOrder(
+            input.dataset_code,
+            ctx,
+            Math.min(
+              getServerConfig().requestTimeoutMs,
+              remainingBudgetMs(input.dataset_code, startedAt),
+            ),
+          ),
         );
       }
 
       const download = await asContract('data', () =>
-        bulk.startDownload(input.dataset_code, dimensionOrder, filters, sinceP, untilP, ctx),
+        bulk.startDownload(
+          input.dataset_code,
+          dimensionOrder,
+          filters,
+          sinceP,
+          untilP,
+          ctx,
+          startedAt,
+        ),
       );
 
       const preview: BulkRow[] = [];
@@ -435,6 +479,10 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
        * canvas that cannot be acquired, or a staging call that fails before it
        * pulls a row, would otherwise leave the body undrained and its connection
        * held. Closing a stream that already ended is a no-op.
+       *
+       * The body streams while the rows are staged or drained, so a failure the
+       * service raises there takes the data endpoint's contract mapping, as one
+       * raised before the first row does.
        */
       try {
         /**
@@ -490,7 +538,7 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
            * Without a canvas the stream still runs to completion. Everything past
            * the preview is discarded, but the counts, the period coverage and the
            * budget verdict then describe the download rather than describing the
-           * preview — and the byte budget still bounds what is transferred. Stopping
+           * preview — and the byte and time budgets still bound what is transferred. Stopping
            * at preview_limit instead would report a row count of 25 for a dataset of
            * millions.
            */
@@ -498,6 +546,8 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
             // Drained for its counters; nothing is retained past the preview.
           }
         }
+      } catch (err) {
+        throw await contractFailure('data', err);
       } finally {
         await rows.return(undefined);
       }
@@ -538,9 +588,14 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
         const cuts = periodCuts({ since_period: sinceP, until_period: untilP }, frequencies);
         if (cuts.length > 0) notices.push(cutNotice(cuts, written));
       }
-      if (stats.budgetExceeded) {
+      if (stats.budgetExceeded === 'bytes') {
         notices.push(
-          `The byte budget stopped this transfer after ${stats.bytesRead.toLocaleString('en-US')} bytes, so these ${stats.rowCount.toLocaleString('en-US')} rows are the start of "${escapeMarkdownInline(input.dataset_code)}" and not all of it. Add dimension filters or a since_period/until_period range to fit the dataset inside the budget, or raise EUROSTAT_BULK_MAX_BYTES.`,
+          `The byte budget stopped this transfer after ${stats.bytesRead.toLocaleString('en-US')} bytes, so these ${stats.rowCount.toLocaleString('en-US')} rows are the start of "${escapeMarkdownInline(input.dataset_code)}" and not all of it. Add dimension filters or a since_period/until_period range to fit the dataset inside the budget.`,
+        );
+      } else if (stats.budgetExceeded === 'time') {
+        const seconds = (getServerConfig().bulkTimeoutMs / 1000).toLocaleString('en-US');
+        notices.push(
+          `The ${seconds}-second time budget of this call ended the transfer after ${stats.bytesRead.toLocaleString('en-US')} bytes, so these ${stats.rowCount.toLocaleString('en-US')} rows are the start of "${escapeMarkdownInline(input.dataset_code)}" and not all of it. Where the budget cuts depends on how fast the body arrives, so a repeat call can stop at a different row. Add dimension filters or a since_period/until_period range so the dataset arrives within the budget.`,
         );
       }
       // With no observation at all every period lies outside a span, which the sentence below says.
@@ -588,8 +643,8 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
             ? `This deployment runs without a dataframe canvas, so nothing was staged; all ${stats.rowCount.toLocaleString('en-US')} downloaded rows are returned inline.`
             : `This deployment runs without a dataframe canvas, so nothing was staged: only the ${preview.length.toLocaleString('en-US')} rows returned inline are retained, and the other ${discarded.toLocaleString('en-US')} were counted and discarded. ${
                 stats.rowCount <= PREVIEW_MAX
-                  ? `Raise preview_limit to ${stats.rowCount.toLocaleString('en-US')} to return every one inline, or set CANVAS_PROVIDER_TYPE=duckdb to keep the download.`
-                  : 'Set CANVAS_PROVIDER_TYPE=duckdb to keep the download, or use eurostat_query_dataset with dimension filters to fetch a slice small enough to return whole.'
+                  ? `Raise preview_limit to ${stats.rowCount.toLocaleString('en-US')} to return every one inline.`
+                  : 'Use eurostat_query_dataset with dimension filters to fetch a slice small enough to return whole.'
               }`,
         );
       } else {
@@ -612,7 +667,7 @@ export const createEurostatDownloadDataset = (clampLimits: boolean) =>
         },
         bytesRead: stats.bytesRead,
         compressed: stats.compressed,
-        budgetExceeded: stats.budgetExceeded,
+        budgetExceeded: stats.budgetExceeded !== false,
         observations: preview,
         ...staged,
       };
@@ -730,20 +785,29 @@ type MappedReason =
  * bare string.
  *
  * `request.dimensions` is the dataset's dimension list, when known, and
- * `request.filtered` the dimensions the request already filtered — together they let
- * a too-large refusal name the dimensions still open to filter. `request.endpoint` is
- * the endpoint the failed read went to: each `upstream_fault` hint names it, and on the
- * structure read a fault with no HTTP status is a structure the order cannot be read from.
- * `data` is the failure's own detail the caller acts on, for the error data.
+ * `request.filters` the normalized filters the request sent — together they let a
+ * refusal to serve name the dimensions still open to filter, and let an unknown time key
+ * be answered with the period range its values span. `request.periodSet` says whether
+ * since_period or until_period was set. `request.endpoint` is the endpoint the failed
+ * read went to: each `upstream_fault` hint names it, and on the structure read a fault
+ * with no HTTP status is a structure the order cannot be read from. `data` is the
+ * failure's own detail the caller acts on, for the error data, and `literals` the values
+ * the hint quotes for the caller to send back.
  */
 function mapBulkFailure(
   err: unknown,
   datasetCode: string,
-  request: { dimensions: string[] | undefined; endpoint: OutageEndpoint; filtered: string[] },
+  request: {
+    dimensions: string[] | undefined;
+    endpoint: OutageEndpoint;
+    filters: Record<string, string[]>;
+    periodSet: boolean;
+  },
 ):
   | {
       data?: Record<string, unknown>;
       hint: string;
+      literals?: string[];
       message: string;
       reason: MappedReason;
       retryable?: true;
@@ -754,12 +818,14 @@ function mapBulkFailure(
   const message = (err as Error).message;
   // A DS-* collection refuses an unfiltered download as too large, so no hint offers one there.
   const offerUnfiltered = !isComextDataset(datasetCode);
+  const narrowing = () =>
+    narrowingAdvice(datasetCode, request.dimensions, Object.keys(request.filters));
   switch (reason) {
     case 'extraction_too_big':
       return {
         reason,
         message,
-        hint: `Eurostat will not serve this extraction of "${datasetCode}" whole, and retrying repeats the refusal. ${narrowingAdvice(datasetCode, request.dimensions, request.filtered)}`,
+        hint: `Eurostat will not serve this extraction of "${datasetCode}" whole, and retrying repeats the refusal. ${narrowing()}`,
       };
     case 'not_found':
       return {
@@ -770,10 +836,16 @@ function mapBulkFailure(
     case 'invalid_dimension':
       // The key builder names every filter key the structure lacks, and the key order.
       if (Array.isArray(data?.unknownDimensions)) {
+        const advice = unknownKeysAdvice(
+          data.unknownDimensions,
+          request.filters,
+          request.periodSet,
+        );
         return {
           reason,
           message,
-          hint: RENAME_FILTER_KEYS_HINT,
+          hint: advice.hint,
+          ...(advice.literals.length > 0 && { literals: advice.literals }),
           data: {
             unknownDimensions: data.unknownDimensions,
             dimensionOrder: data.dimensionOrder,
@@ -802,10 +874,11 @@ function mapBulkFailure(
         hint: `Eurostat could not read the period range for "${datasetCode}". Write since_period/until_period as ${PERIOD_FORMS}, for example "2020", "2020-01" or "2020-Q1".`,
       };
     case 'async_queued':
+      // A served repeat can still outlast the call's time budget, so the hint promises no fit.
       return {
         reason,
         message,
-        hint: `Eurostat queued this extraction rather than serving it. Add dimension filters or a since_period/until_period range to make the request cheap enough for "${datasetCode}" to stream inline.`,
+        hint: `Eurostat is preparing this extraction of "${datasetCode}" and serves the identical download once it is ready: repeat the call in a few minutes, or narrow it. ${narrowing()}`,
       };
     case 'retry_deadline_exceeded':
       return {
@@ -814,10 +887,19 @@ function mapBulkFailure(
         data: { deadlineMs: data?.deadlineMs, elapsedMs: data?.elapsedMs },
         hint:
           request.endpoint === 'structure'
-            ? `Eurostat's SDMX structure endpoint did not answer for "${datasetCode}" within the request deadline, every attempt included, so the dimension order a filtered download needs could not be read. Retry in a few minutes, or read the same filters through the Statistics API with eurostat_query_dataset.`
-            : `The download of "${datasetCode}" did not finish within the server's bulk allowance, every attempt and the streamed body included. Narrow it with dimension filters or a shorter since_period/until_period range, or read a slice small enough to return with eurostat_query_dataset.`,
+            ? `Eurostat's SDMX structure endpoint did not answer for "${datasetCode}" within its deadline, every attempt included, so the dimension order a filtered download needs could not be read. Retry in a few minutes, or read the same filters through the Statistics API with eurostat_query_dataset.`
+            : `The download of "${datasetCode}" read no row within this call's time budget, every attempt, backoff and the streamed body included. Retry in a few minutes, or narrow it with dimension filters or a shorter since_period/until_period range, or read a slice small enough to return with eurostat_query_dataset.`,
       };
     case 'upstream_fault':
+      // A body that broke off after it began streaming: retried by the caller, not resent here.
+      if (data?.retryable === true && typeof data.bytesRead === 'number') {
+        return {
+          reason,
+          message,
+          retryable: true,
+          hint: `Eurostat's SDMX data endpoint broke off the body of "${datasetCode}" before it ended — an upstream failure, not a fault in the request. Retry in a few minutes, or narrow the request with dimension filters so less has to stream.`,
+        };
+      }
       // The services mark an endpoint that was down, not one that answered badly.
       if (data?.retryable === true) {
         const answer = outageAnswer(data.status);
@@ -858,4 +940,42 @@ function mapBulkFailure(
     default:
       return;
   }
+}
+
+/**
+ * The hint for filter keys that name no dimension of the dataset, each quoted as sent. A
+ * time key (`time` or `time_period`, in any case) cannot be renamed to a listed dimension:
+ * the bulk endpoint selects periods only by since_period/until_period. So it is removed,
+ * and with no period input set the hint names the range spanning its values when every
+ * one is a period literal, as `literals` the caller sends back; with one set, removing it
+ * is the whole fix. Any other key keeps the rename advice, in the same hint.
+ */
+function unknownKeysAdvice(
+  unknown: string[],
+  filters: Record<string, string[]>,
+  periodSet: boolean,
+): { hint: string; literals: string[] } {
+  const timeKeys = unknown.filter((key) => TIME_DIMENSION_KEYS.has(key.toLowerCase()));
+  if (timeKeys.length === 0) return { hint: RENAME_FILTER_KEYS_HINT, literals: [] };
+  const quoted = (keys: string[]) => keys.map((key) => `"${key}"`).join(', ');
+  const others = unknown.filter((key) => !timeKeys.includes(key));
+  const rename =
+    others.length === 0
+      ? ''
+      : ` Rename ${quoted(others)} ${others.length === 1 ? 'to' : 'each to'} one of the dimensions the error lists.`;
+  const remove = `Remove ${quoted(timeKeys)} from filters`;
+  if (periodSet) {
+    return {
+      hint: `${remove}: since_period/until_period already select the periods.${rename}`,
+      literals: [],
+    };
+  }
+  const span = periodSpan(timeKeys.flatMap((key) => filters[key] ?? []));
+  const range = span
+    ? ` and set since_period "${span.since}" and until_period "${span.until}", the range spanning the periods ${timeKeys.length === 1 ? 'it names' : 'they name'}`
+    : ' and select the periods with since_period/until_period';
+  return {
+    hint: `${remove}${range}: the bulk download selects periods by range, not by filter.${rename}`,
+    literals: span ? [span.since, span.until] : [],
+  };
 }

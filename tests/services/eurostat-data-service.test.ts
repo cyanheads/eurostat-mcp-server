@@ -397,14 +397,6 @@ describe('EurostatDataService — checkResponseErrors', () => {
     svc = new EurostatDataService(mockConfig, mockStorage);
   });
 
-  it('throws async_response on warning status 413', () => {
-    const data: JsonStatResponse = { warning: { status: 413, label: 'Too large' } };
-    expect(() =>
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (svc as any).checkResponseErrors(data, 'https://example.com'),
-    ).toThrow();
-  });
-
   /** The error `checkResponseErrors` throws for `data`; fails the test when it throws nothing. */
   const thrownFor = (data: JsonStatResponse): McpError => {
     try {
@@ -416,9 +408,51 @@ describe('EurostatDataService — checkResponseErrors', () => {
     return expect.unreachable('expected checkResponseErrors to throw');
   };
 
-  it('async_response error carries reason in data', () => {
-    const data: JsonStatResponse = { warning: { status: 413, label: 'Too large' } };
-    expect(thrownFor(data).data).toMatchObject({ reason: 'async_response' });
+  /**
+   * Eurostat sends both refusals as status 413 with id 413; only the label tells them
+   * apart. Labels verbatim from live HTTP-413 replies (2026-11-15).
+   */
+  describe('a 413 refusal, split on its label (#106)', () => {
+    const ASYNC =
+      'ASYNCHRONOUS_RESPONSE. Your request will be treated asynchronously. Please try again later.';
+    const TOO_BIG =
+      'EXTRACTION_TOO_BIG: The requested extraction is too big, estimated 5821200 rows, max authorised is 5000000, please change your filters to reduce the extraction size';
+    const channels: Array<[string, (label: string) => JsonStatResponse]> = [
+      ['an HTTP-413 error array', (label) => ({ error: [{ status: 413, id: 413, label }] })],
+      ['an HTTP-200 warning', (label) => ({ warning: { status: 413, label } })],
+    ];
+
+    for (const [channel, reply] of channels) {
+      it(`${channel} labelled ASYNCHRONOUS_RESPONSE is a retryable async_response`, () => {
+        const err = thrownFor(reply(ASYNC));
+        expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+        expect(err.message).toBe(
+          'Eurostat is preparing the extraction for this query in the background and has not served it yet (ASYNCHRONOUS_RESPONSE. Your request will be treated asynchronously. Please try again later.).',
+        );
+        expect(err.data).toEqual({
+          reason: 'async_response',
+          url: 'https://example.com',
+          retryable: true,
+        });
+      });
+
+      it.each([
+        ['EXTRACTION_TOO_BIG', TOO_BIG],
+        ['a label this server does not know', 'Too large'],
+        ['a label naming ASYNCHRONOUS_RESPONSE only after its start', 'NOT ASYNCHRONOUS_RESPONSE'],
+      ])(`${channel} labelled %s is a non-retryable extraction_too_big`, (_name, label) => {
+        const err = thrownFor(reply(label));
+        expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+        expect(err.message).toBe(
+          `Eurostat refused the query as too large to serve (${label}). Add dimension filters or a narrower period range to reduce the result size, then retry.`,
+        );
+        expect(err.data).toEqual({
+          reason: 'extraction_too_big',
+          url: 'https://example.com',
+          retryable: false,
+        });
+      });
+    }
   });
 
   it('throws not_found on error id 100 (dataset not found)', () => {
@@ -442,22 +476,6 @@ describe('EurostatDataService — checkResponseErrors', () => {
     } catch (err) {
       expect((err as McpError).data).toMatchObject({ reason: 'no_results' });
       expect((err as Error).message).not.toContain('Dataset not found');
-    }
-  });
-
-  it('classifies an error-array status 413 as non-retryable async_response (#44)', () => {
-    const data: JsonStatResponse = {
-      error: [{ status: 413, id: 413, label: 'ASYNCHRONOUS_RESPONSE' }],
-    };
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (svc as any).checkResponseErrors(data, 'https://example.com');
-      throw new Error('Expected checkResponseErrors to throw');
-    } catch (err) {
-      expect((err as McpError).data).toMatchObject({
-        reason: 'async_response',
-        retryable: false,
-      });
     }
   });
 
@@ -905,16 +923,36 @@ describe('EurostatDataService — dataset-scoped SDMX metadata (#44)', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it('reports an empty default geo level as no_results, not a missing dataset (#38)', async () => {
+  it('reports an empty explicit geo level as no_results, not a missing dataset (#38)', async () => {
     fetchMock.mockImplementation(async (input: string | URL) =>
       sdmxMetadataResponse(input, SDMX_CONSTRAINT_WITHOUT_COUNTRIES_XML),
     );
     await expect(
-      svc().getDimensionValues('tgs00010', 'geo', undefined, createMockContext()),
+      svc().getDimensionValues('tgs00010', 'geo', 'country', createMockContext()),
     ).rejects.toMatchObject({
       data: { reason: 'no_results', geoLevel: 'country' },
       message: expect.not.stringContaining('Dataset not found'),
     });
+  });
+
+  it('returns an empty country default with every level listed beside it, leaving no_results to the caller (#112)', async () => {
+    fetchMock.mockImplementation(async (input: string | URL) =>
+      sdmxMetadataResponse(input, SDMX_CONSTRAINT_WITHOUT_COUNTRIES_XML),
+    );
+    const result = await svc().getDimensionValues(
+      'tgs00010',
+      'geo',
+      undefined,
+      createMockContext(),
+    );
+    expect(result).toMatchObject({ geoLevel: 'country', values: [], totalCount: 0 });
+    expect(result.listedValues.map(({ code, level }) => [code, level])).toEqual([
+      ['EU27_2020', 'aggregate'],
+      ['EA20', 'aggregate'],
+      ['DE1', 'nuts1'],
+      ['DE11', 'nuts2'],
+      ['DE111', 'nuts3'],
+    ]);
   });
 
   describe('the levels a geo_level miss names (#87)', () => {
@@ -941,7 +979,7 @@ describe('EurostatDataService — dataset-scoped SDMX metadata (#44)', () => {
       {
         dataset: 'tgs00010',
         fixture: 'tgs00010',
-        level: undefined,
+        level: 'country',
         failed: 'country',
         offered: ['nuts2'],
       },
@@ -971,6 +1009,25 @@ describe('EurostatDataService — dataset-scoped SDMX metadata (#44)', () => {
         expect(fetchMock).toHaveBeenCalledTimes(2);
       },
     );
+
+    it('returns tgs00010 with geo_level omitted as an empty country page beside its 351 nuts2 codes (#112)', async () => {
+      serveCaptured('tgs00010');
+      const result = await svc().getDimensionValues(
+        'tgs00010',
+        'geo',
+        undefined,
+        createMockContext(),
+      );
+      expect(result).toMatchObject({
+        dimensionCode: 'geo',
+        geoLevel: 'country',
+        values: [],
+        totalCount: 0,
+      });
+      expect(result.listedValues).toHaveLength(351);
+      expect(new Set(result.listedValues.map(({ level }) => level))).toEqual(new Set(['nuts2']));
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
 
     it('reads the levels from the constraint, in GEO_LEVEL_VALUES order', async () => {
       fetchMock.mockImplementation(async (input: string | URL) =>
@@ -1002,13 +1059,20 @@ describe('EurostatDataService — dataset-scoped SDMX metadata (#44)', () => {
             )
           : xmlResponse(SDMX_CONSTRAINT_XML),
       );
+      const service = svc();
       await expect(
-        svc().getDimensionValues('x', 'geo', undefined, createMockContext()),
+        service.getDimensionValues('x', 'geo', 'country', createMockContext()),
       ).rejects.toMatchObject({
         data: { reason: 'no_results', geoLevel: 'country', availableGeoLevels: [] },
         message:
           'Dataset "x" has no "geo" values at the "country" level. None of its "geo" codes carries a NUTS level.',
       });
+      // With geo_level omitted the empty page comes back, every code listed with a null level.
+      const omitted = await service.getDimensionValues('x', 'geo', undefined, createMockContext());
+      expect(omitted).toMatchObject({ geoLevel: 'country', values: [], totalCount: 0 });
+      expect(omitted.listedValues.map(({ code, level }) => [code, level])).toEqual(
+        ['EU27_2020', 'EA20', 'DE', 'FR', 'DE1', 'DE11', 'DE111'].map((code) => [code, null]),
+      );
     });
   });
 
@@ -2219,19 +2283,85 @@ describe('EurostatDataService — fetchJson error classification', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('normalizes a live HTTP 413 error array before retry and makes one attempt (#44)', async () => {
-    fetchMock.mockResolvedValue(
-      errorResponse(
-        413,
-        '{ "error": [{"status": 413,"id": 413,"label": "ASYNCHRONOUS_RESPONSE"}]}',
-      ),
-    );
-    await expect(query('nama_10_gdp', {})).rejects.toMatchObject({
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      data: { reason: 'async_response', retryable: false },
-      message: expect.not.stringContaining('failed after 4 attempts'),
+  /**
+   * Eurostat's 413 refusals on the live path, sent once each: the server never resends
+   * one itself, though it declares the asynchronous one retryable to the caller, so the
+   * error reaches the caller as classified, with no retry count added. Bodies verbatim
+   * from live HTTP-413 replies (2026-11-15). The clock is faked so a resend shows as
+   * extra requests rather than a slow test.
+   */
+  describe('a 413 refusal, on one request (#106)', () => {
+    const ASYNCHRONOUS_RESPONSE =
+      '{ "error": [{"status": 413,"id": 413,"label": "ASYNCHRONOUS_RESPONSE. Your request will be treated asynchronously. Please try again later."}]}';
+    const URL_SENT =
+      'https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/sts_inpr_m?format=JSON&lang=EN&nace_r2=C1052&lastTimePeriod=1';
+    const PREPARING =
+      'Eurostat is preparing the extraction for this query in the background and has not served it yet (ASYNCHRONOUS_RESPONSE. Your request will be treated asynchronously. Please try again later.).';
+
+    beforeEach(() => {
+      vi.useFakeTimers();
     });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    const refusal = async (): Promise<McpError> => {
+      const outcome = query('sts_inpr_m', { nace_r2: ['C1052'] }).then(
+        () => expect.unreachable('expected the query to fail'),
+        (error: unknown) => error as McpError,
+      );
+      await vi.advanceTimersByTimeAsync(60_000);
+      return outcome;
+    };
+
+    it('answers a live HTTP-413 ASYNCHRONOUS_RESPONSE as a retryable async_response', async () => {
+      fetchMock.mockImplementation(async () => errorResponse(413, ASYNCHRONOUS_RESPONSE));
+      const err = await refusal();
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.message).toBe(PREPARING);
+      expect(err.data).toEqual({ reason: 'async_response', url: URL_SENT, retryable: true });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('answers the HTTP-200 warning form the same way', async () => {
+      fetchMock.mockImplementation(async () =>
+        okResponse({
+          warning: {
+            status: 413,
+            label:
+              'ASYNCHRONOUS_RESPONSE. Your request will be treated asynchronously. Please try again later.',
+          },
+        }),
+      );
+      const err = await refusal();
+      expect(err.message).toBe(PREPARING);
+      expect(err.data).toEqual({ reason: 'async_response', url: URL_SENT, retryable: true });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops at the refusal on a retry: a 503, then ASYNCHRONOUS_RESPONSE, is two requests', async () => {
+      fetchMock
+        .mockImplementationOnce(
+          async () =>
+            new Response('Service Unavailable', { status: 503, statusText: 'Service Unavailable' }),
+        )
+        .mockImplementation(async () => errorResponse(413, ASYNCHRONOUS_RESPONSE));
+      const err = await refusal();
+      expect(err.message).toBe(PREPARING);
+      expect(err.data).toEqual({ reason: 'async_response', url: URL_SENT, retryable: true });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('answers a live HTTP-413 EXTRACTION_TOO_BIG as a non-retryable extraction_too_big', async () => {
+      fetchMock.mockImplementation(async () => errorResponse(413, EXTRACTION_TOO_BIG));
+      const err = await refusal();
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.message).toBe(
+        'Eurostat refused the query as too large to serve (EXTRACTION_TOO_BIG: The requested extraction is too big, estimated 5821200 rows, max authorised is 5000000, please change your filters to reduce the extraction size). Add dimension filters or a narrower period range to reduce the result size, then retry.',
+      );
+      expect(err.data).toEqual({ reason: 'extraction_too_big', url: URL_SENT, retryable: false });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('rethrows the raw HTTP error when a truncated error body is not valid JSON', async () => {

@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<env:Envelope xmlns:env="http://schemas.xmlsoap.org/soap/envelope/"><env:Header/><env:Body><ns0:syncResponse xmlns:ns0="http://estat.ec.europa.eu/disschain/soap/extraction"><processingTime>350</processingTime><queued><id>f9044d49-7f83-4500-b8f7-284db98ffc6e</id><status>SUBMITTED</status></queued></ns0:syncResponse></env:Body></env:Envelope>

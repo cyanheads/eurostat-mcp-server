@@ -14,7 +14,12 @@ import {
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { fetchWithTimeout, withExtra, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import {
+  defaultIsTransient,
+  fetchWithTimeout,
+  withExtra,
+  withRetry,
+} from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import {
   CONF_STATUS_COLUMN,
@@ -79,6 +84,24 @@ const PERIOD_PARAM_LABEL = /'(since|until)TimePeriod'/;
 const TIME_SELECTION_CONFLICT_LABEL =
   /'(?:TIME|TIME_PERIOD|\w+TimePeriod)' parameter.*cannot be set at the same time/;
 
+/**
+ * How the label of Eurostat's asynchronous refusal starts. Its status and id (413, 413)
+ * are those of `EXTRACTION_TOO_BIG`, so the label is the only mark of it.
+ */
+const ASYNCHRONOUS_RESPONSE_LABEL = 'ASYNCHRONOUS_RESPONSE';
+
+/**
+ * `withRetry`'s transient check for a Statistics API request: the framework default,
+ * except for `async_response`. That refusal is a `ServiceUnavailable` the caller may
+ * repeat, but a resend seconds later meets it again — Eurostat serves the identical
+ * query only once it has prepared the extraction, minutes later — so it ends the
+ * request as answered.
+ */
+function isTransientStatisticsFailure(error: unknown): boolean {
+  if (error instanceof McpError && error.data?.reason === 'async_response') return false;
+  return defaultIsTransient(error);
+}
+
 /** Quote an upstream label as a sentence: one closing period, whether or not Eurostat sent one. */
 function asSentence(label: string): string {
   const trimmed = label.trim();
@@ -110,10 +133,10 @@ export const TIME_DIMENSION_KEYS: ReadonlySet<string> = new Set(['time', 'time_p
 type SdmxStructureResource = 'contentconstraint' | 'dataflow' | 'datastructure';
 
 /**
- * How long parsed dataset metadata is reused. Eurostat publishes data at 11:00 and
- * 23:00 Brussels time, so an hour bounds how stale a constraint's period list or
- * `lastUpdated` can get while sparing repeat calls the structure download — 23 MB
- * for `DS-045409`.
+ * How long a dataset's parsed metadata and its dimension order are reused, each from
+ * its own read. Eurostat publishes data at 11:00 and 23:00 Brussels time, so an hour
+ * bounds how stale a constraint's period list or `lastUpdated` can get while sparing
+ * repeat calls the dataflow download — 23 MB for `DS-045409`.
  */
 const METADATA_CACHE_TTL_MS = 60 * 60 * 1000;
 
@@ -139,11 +162,35 @@ function estimateMetadataBytes({ valuesByDimension }: SdmxDatasetMetadata): numb
   return bytes;
 }
 
-interface MetadataCacheEntry {
+/** {@link estimateMetadataBytes}'s measure for a dimension order. */
+function estimateOrderBytes(order: readonly string[]): number {
+  return order.reduce((bytes, dimension) => bytes + 2 * dimension.length + 100, 256);
+}
+
+/** The cache key of a dataset: Eurostat matches codes in any case, so it is lowercased. */
+function metadataKey(datasetCode: string): string {
+  return `${dataHostFor(datasetCode)} ${datasetCode.toLowerCase()}`;
+}
+
+/** The dataflow and constraint load, shared by every caller of the dataset. */
+interface MetadataPart {
   /** {@link estimateMetadataBytes} of the settled parse; absent while the load is in flight. */
   bytes?: number;
   expiresAt: number;
-  metadata: Promise<SdmxDatasetMetadata>;
+  load: Promise<SdmxDatasetMetadata>;
+}
+
+/** A settled, non-empty dimension order read from the structure definition. */
+interface OrderPart {
+  bytes: number;
+  expiresAt: number;
+  value: readonly string[];
+}
+
+/** One dataset's cached reads. An entry holds at least one part. */
+interface MetadataCacheEntry {
+  metadata?: MetadataPart;
+  order?: OrderPart;
 }
 
 /** Freeze a parsed structure all the way down, so no caller can edit a cached entry. */
@@ -328,12 +375,13 @@ function parseSdmx<T>(datasetCode: string, parse: () => T): T {
 
 export class EurostatDataService {
   /**
-   * Parsed metadata per dataset, keyed by host and lowercased code — Eurostat matches
-   * codes in any case, so `ds-045409` and `DS-045409` share one entry. The value is the
-   * in-flight or settled parse, so concurrent first calls share one download. Entries
-   * are deep-frozen, expire after {@link METADATA_CACHE_TTL_MS}, are bounded in total
-   * by {@link METADATA_CACHE_MAX_BYTES}, and a failed load is dropped rather than
-   * cached. Map order is recency order: a hit is re-inserted.
+   * Each dataset's cached reads, keyed by {@link metadataKey}, so `ds-045409` and
+   * `DS-045409` share one entry. Its `metadata` part is the in-flight or settled parse,
+   * so concurrent first calls share one download; its `order` part is a settled
+   * dimension order. Parts are frozen, each expires {@link METADATA_CACHE_TTL_MS} after
+   * its own read, entries are bounded in total by {@link METADATA_CACHE_MAX_BYTES}, and
+   * a failed read is dropped rather than cached. Map order is recency order: a hit on
+   * either part re-inserts the entry.
    */
   private readonly metadataCache = new Map<string, MetadataCacheEntry>();
 
@@ -440,50 +488,69 @@ export class EurostatDataService {
    */
   getSdmxMetadata(datasetCode: string, ctx: Context): Promise<SdmxDatasetMetadata> {
     return awaitShared(ctx.signal, () => {
-      const key = `${dataHostFor(datasetCode)} ${datasetCode.toLowerCase()}`;
-      const now = Date.now();
-      const hit = this.metadataCache.get(key);
-      this.metadataCache.delete(key);
-      if (hit && hit.expiresAt > now) {
-        this.metadataCache.set(key, hit);
-        return hit.metadata;
-      }
+      const key = metadataKey(datasetCode);
+      const entry = this.liveEntry(key);
+      if (entry?.metadata) return entry.metadata.load;
 
-      const entry: MetadataCacheEntry = {
-        expiresAt: now + METADATA_CACHE_TTL_MS,
-        metadata: this.loadSdmxMetadata(datasetCode, ctx).then(deepFreeze),
+      const part: MetadataPart = {
+        expiresAt: Date.now() + METADATA_CACHE_TTL_MS,
+        load: this.loadSdmxMetadata(datasetCode, ctx).then(deepFreeze),
       };
-      this.metadataCache.set(key, entry);
-      entry.metadata.then(
+      if (entry) entry.metadata = part;
+      else this.metadataCache.set(key, { metadata: part });
+      part.load.then(
         (metadata) => {
-          entry.bytes = estimateMetadataBytes(metadata);
-          if (entry.bytes > METADATA_CACHE_MAX_BYTES) {
-            if (this.metadataCache.get(key) === entry) this.metadataCache.delete(key);
-          } else {
-            this.evictToBudget();
-          }
+          part.bytes = estimateMetadataBytes(metadata);
+          if (part.bytes > METADATA_CACHE_MAX_BYTES) this.dropPart(key, part);
+          else this.evictToBudget();
         },
-        () => {
-          if (this.metadataCache.get(key) === entry) this.metadataCache.delete(key);
-        },
+        () => this.dropPart(key, part),
       );
-      return entry.metadata;
+      return part.load;
     });
   }
 
   /**
-   * Drop settled entries, least recently used first, until the estimated total fits
-   * {@link METADATA_CACHE_MAX_BYTES}. A load still in flight has no size yet and is
-   * kept, so concurrent callers of it still share one download.
+   * `key`'s entry, its expired parts dropped and the entry moved to the most recent
+   * position, or `undefined` when it holds no live part.
+   */
+  private liveEntry(key: string): MetadataCacheEntry | undefined {
+    const entry = this.metadataCache.get(key);
+    if (!entry) return;
+    this.metadataCache.delete(key);
+    const now = Date.now();
+    if (entry.metadata && entry.metadata.expiresAt <= now) delete entry.metadata;
+    if (entry.order && entry.order.expiresAt <= now) delete entry.order;
+    if (!entry.metadata && !entry.order) return;
+    this.metadataCache.set(key, entry);
+    return entry;
+  }
+
+  /** Drop `part` from `key`'s entry if the entry still holds it, and the entry once it holds none. */
+  private dropPart(key: string, part: MetadataPart | OrderPart): void {
+    const entry = this.metadataCache.get(key);
+    if (entry?.metadata === part) delete entry.metadata;
+    else if (entry?.order === part) delete entry.order;
+    else return;
+    if (!entry.metadata && !entry.order) this.metadataCache.delete(key);
+  }
+
+  /**
+   * Drop entries, least recently used first, until the estimated total of their parts
+   * fits {@link METADATA_CACHE_MAX_BYTES}. An entry whose metadata load is still in
+   * flight has no size yet and is kept, so concurrent callers of it still share one
+   * download.
    */
   private evictToBudget(): void {
+    const sizeOf = ({ metadata, order }: MetadataCacheEntry) =>
+      (metadata?.bytes ?? 0) + (order?.bytes ?? 0);
     let total = 0;
-    for (const { bytes } of this.metadataCache.values()) total += bytes ?? 0;
-    for (const [key, { bytes }] of this.metadataCache) {
+    for (const entry of this.metadataCache.values()) total += sizeOf(entry);
+    for (const [key, entry] of this.metadataCache) {
       if (total <= METADATA_CACHE_MAX_BYTES) break;
-      if (bytes === undefined) continue;
+      if (entry.metadata && entry.metadata.bytes === undefined) continue;
       this.metadataCache.delete(key);
-      total -= bytes;
+      total -= sizeOf(entry);
     }
   }
 
@@ -514,7 +581,8 @@ export class EurostatDataService {
   /**
    * One Statistics API request, retried on transient failures. A 5xx or an unreachable
    * host that outlasts the retries fails as a retryable `upstream_fault`; a call the
-   * caller cancelled keeps its cancellation.
+   * caller cancelled keeps its cancellation. Eurostat's asynchronous refusal is never
+   * resent ({@link isTransientStatisticsFailure}).
    *
    * A request that outlasts the deadline fails as `retry_deadline_exceeded`, named for
    * the dataset and carrying {@link StatisticsDeadlineData}: whether the last request had
@@ -533,9 +601,9 @@ export class EurostatDataService {
           response = await fetchWithTimeout(url.toString(), requestTimeoutMs, fetchCtx, {
             signal: attempt.signal,
             // 400 (invalid dimension / conflicting params), 404 (unknown dataset) and 413
-            // (extraction too large) are modeled outcomes reclassified below into the
-            // declared error contract, not service failures — log them at debug. The
-            // thrown McpError is unchanged.
+            // (an extraction Eurostat will not serve now) are modeled outcomes reclassified
+            // below into the declared error contract, not service failures — log them at
+            // debug. The thrown McpError is unchanged.
             expectedStatuses: [400, 404, 413],
           });
         } catch (err) {
@@ -599,6 +667,7 @@ export class EurostatDataService {
         baseDelayMs: 1000,
         signal: ctx.signal,
         deadlineMs: requestTimeoutMs,
+        isTransient: isTransientStatisticsFailure,
       },
     ).catch((error: unknown) => {
       if (ctx.signal.aborted) throw error;
@@ -633,24 +702,28 @@ export class EurostatDataService {
     const firstError = Array.isArray(data.error) ? data.error[0] : undefined;
 
     /**
-     * Query too large to serve. Eurostat answers with a warning object on HTTP 200
-     * (the asynchronous response) or an error-array item on HTTP 413 — its label
-     * `EXTRACTION_TOO_BIG` with the estimated row count, or `ASYNCHRONOUS_RESPONSE`.
-     * Both are classified before withRetry sees them and are non-retryable: the same
-     * query re-run just re-triggers the refusal, so the caller has to narrow it. The
-     * dimensions to narrow by are the dataset's own, which the tool names; this
-     * message cannot, since a refusal carries no dimension list.
+     * A refusal to serve the query now. Eurostat sends two, both with status 413 and id
+     * 413 — an error-array item on HTTP 413, or a warning object on HTTP 200 — and only
+     * the label tells them apart. `ASYNCHRONOUS_RESPONSE` means Eurostat is preparing
+     * the extraction in the background and serves the identical query minutes later,
+     * so it is `async_response`, retryable by the caller (never by {@link fetchJson}'s
+     * loop). Any other label — `EXTRACTION_TOO_BIG` with its estimated row count, or one
+     * this server does not know — is `extraction_too_big`: the same query re-run
+     * re-triggers it, so the caller has to narrow it. The dimensions to narrow by are
+     * the dataset's own, which the tool names; this message cannot, since a refusal
+     * carries no dimension list.
      */
-    if (data.warning?.status === 413) {
+    const refusal = [data.warning, firstError].find((reply) => reply?.status === 413);
+    if (refusal?.label.startsWith(ASYNCHRONOUS_RESPONSE_LABEL)) {
       throw serviceUnavailable(
-        'Eurostat returned an asynchronous response — the query matched too many observations. Add dimension filters or a narrower period range to reduce the result size, then retry.',
-        { reason: 'async_response', url, retryable: false },
+        `Eurostat is preparing the extraction for this query in the background and has not served it yet (${refusal.label}).`,
+        { reason: 'async_response', url, retryable: true },
       );
     }
-    if (firstError?.status === 413) {
+    if (refusal) {
       throw serviceUnavailable(
-        `Eurostat refused the query as too large to serve (${firstError.label}). Add dimension filters or a narrower period range to reduce the result size, then retry.`,
-        { reason: 'async_response', url, retryable: false },
+        `Eurostat refused the query as too large to serve (${refusal.label}). Add dimension filters or a narrower period range to reduce the result size, then retry.`,
+        { reason: 'extraction_too_big', url, retryable: false },
       );
     }
 
@@ -1032,15 +1105,24 @@ export class EurostatDataService {
    * and JSON-stat `id` arrays: the header's comma-joined key field is exactly this
    * order.
    *
-   * `deadlineMs` bounds the read across every attempt and backoff, in place of
-   * `EUROSTAT_REQUEST_TIMEOUT_MS`, for a caller that only wants the order if it comes
-   * quickly.
+   * The order is cached in the dataset's {@link metadataCache} entry for
+   * {@link METADATA_CACHE_TTL_MS}, and a hit sends nothing. A miss is this caller's own
+   * read, never shared with a concurrent caller: its signal and `deadlineMs` reach only
+   * its own request. `deadlineMs` bounds that read across every attempt and backoff, in
+   * place of `EUROSTAT_REQUEST_TIMEOUT_MS`, for a caller that only wants the order if it
+   * comes quickly. Only a read that settles with dimensions is cached; one that fails,
+   * times out or is cancelled leaves the cache as it was. The array returned is the
+   * caller's own.
    */
   async getDimensionOrder(
     datasetCode: string,
     ctx: Context,
     deadlineMs?: number,
   ): Promise<string[]> {
+    const key = metadataKey(datasetCode);
+    const cached = this.liveEntry(key)?.order;
+    if (cached) return [...cached.value];
+
     const xml = await this.fetchSdmxXml('datastructure', datasetCode, ctx, ctx.signal, deadlineMs);
     const order = parseSdmx(datasetCode, () => parseSdmxDimensionOrder(xml));
     if (order.length === 0) {
@@ -1050,7 +1132,29 @@ export class EurostatDataService {
         { reason: 'upstream_fault', datasetCode },
       );
     }
+    const value = Object.freeze([...order]);
+    const part: OrderPart = {
+      bytes: estimateOrderBytes(value),
+      expiresAt: Date.now() + METADATA_CACHE_TTL_MS,
+      value,
+    };
+    const entry = this.liveEntry(key);
+    if (entry) entry.order = part;
+    else this.metadataCache.set(key, { order: part });
+    this.evictToBudget();
     return order;
+  }
+
+  /**
+   * Drop the dataset's cached dimension order, so the next {@link getDimensionOrder}
+   * reads the structure definition again — for a caller whose request Eurostat refused
+   * as built from a stale order. The dataset's cached metadata stays; a dataset with no
+   * cached order is left as it is.
+   */
+  forgetDimensionOrder(datasetCode: string): void {
+    const key = metadataKey(datasetCode);
+    const order = this.metadataCache.get(key)?.order;
+    if (order) this.dropPart(key, order);
   }
 
   /**
@@ -1100,23 +1204,17 @@ export class EurostatDataService {
     const filteredValues = effectiveGeoLevel
       ? values.filter(({ code }) => metadata.geoLevelsByCode[code] === effectiveGeoLevel)
       : [...values];
-    if (effectiveGeoLevel && filteredValues.length === 0) {
+    /**
+     * Only an explicit level that lists nothing fails here. An empty `country` default
+     * comes back as an empty page beside every level, which a caller can still stage;
+     * one with nothing to stage fails it with {@link geoLevelMiss}.
+     */
+    if (geoLevel && filteredValues.length === 0) {
       // Read from the constrained `values`: the dataset's codelist can hold codes it has no data for.
-      const listed = new Set(values.map(({ code }) => metadata.geoLevelsByCode[code]));
-      const availableGeoLevels = GEO_LEVEL_VALUES.filter((level) => listed.has(level));
-      throw notFound(
-        `Dataset "${datasetCode}" has no "geo" values at the "${effectiveGeoLevel}" level. ${
-          availableGeoLevels.length > 0
-            ? `It lists "geo" values at: ${availableGeoLevels.join(', ')}.`
-            : 'None of its "geo" codes carries a NUTS level.'
-        }`,
-        {
-          reason: 'no_results',
-          datasetCode,
-          dimension,
-          geoLevel: effectiveGeoLevel,
-          availableGeoLevels,
-        },
+      throw geoLevelMiss(
+        datasetCode,
+        geoLevel,
+        values.map(({ code }) => metadata.geoLevelsByCode[code]),
       );
     }
 
@@ -1406,6 +1504,30 @@ export function observationRowSchema(dimensionsUsed: string[], valueText = false
     { name: CONF_STATUS_COLUMN, type: 'VARCHAR', nullable: true },
     { name: CONF_STATUS_LABEL_COLUMN, type: 'VARCHAR', nullable: true },
   ];
+}
+
+/**
+ * The `no_results` of a `geo` level that lists no value of `datasetCode`. Its message
+ * and `availableGeoLevels` name the levels the dataset does list, in `GEO_LEVEL_VALUES`
+ * order, from the level of each `geo` code it lists. `getDimensionValues` throws it for
+ * an explicit level; for the omitted `country` default it returns an empty page, and a
+ * caller with nothing to stage fails it from that result's `listedValues`.
+ */
+export function geoLevelMiss(
+  datasetCode: string,
+  level: GeoLevel,
+  listedLevels: readonly (GeoLevel | null | undefined)[],
+): McpError {
+  const listed = new Set(listedLevels);
+  const availableGeoLevels = GEO_LEVEL_VALUES.filter((l) => listed.has(l));
+  return notFound(
+    `Dataset "${datasetCode}" has no "geo" values at the "${level}" level. ${
+      availableGeoLevels.length > 0
+        ? `It lists "geo" values at: ${availableGeoLevels.join(', ')}.`
+        : 'None of its "geo" codes carries a NUTS level.'
+    }`,
+    { reason: 'no_results', datasetCode, dimension: 'geo', geoLevel: level, availableGeoLevels },
+  );
 }
 
 // --- Init/accessor pattern ---

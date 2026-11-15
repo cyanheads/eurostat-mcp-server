@@ -27,6 +27,7 @@ vi.mock('@cyanheads/mcp-ts-core/utils', async (importOriginal) => ({
 }));
 
 import { fetchWithTimeout } from '@cyanheads/mcp-ts-core/utils';
+import * as serverConfig from '@/config/server-config.js';
 import {
   buildKeyPath,
   bulkRowSchema,
@@ -74,6 +75,14 @@ const FAULT_UNKNOWN =
 /** Arrives on HTTP 200 in place of data — parsed as TSV it would look like a header of XML. */
 const QUEUE_ENVELOPE =
   '<?xml version="1.0" encoding="UTF-8" ?>\n<env:Envelope xmlns:env="http://schemas.xmlsoap.org/soap/envelope/"><env:Header/><env:Body><ns0:syncResponse xmlns:ns0="http://estat.ec.europa.eu/disschain/soap/extraction"><processingTime>92</processingTime><queued><id>e3d39a1b-27eb-4ce4-936d-8f95b23bf74f</id><status>SUBMITTED</status></queued></ns0:syncResponse></env:Body></env:Envelope>';
+/**
+ * The ticket Eurostat answered a monthly `DS-045409` download with on HTTP 200, verbatim; the
+ * identical download was served on a repeat 2½ minutes later (#106).
+ */
+const QUEUE_TICKET = readFileSync(
+  new URL('../fixtures/ds-045409-queue-ticket.xml', import.meta.url),
+  'utf8',
+);
 
 /** Wrap explicit byte chunks in a Response, so chunk boundaries are part of the fixture. */
 function responseOf(chunks: Uint8Array[]): Response {
@@ -268,6 +277,59 @@ describe('buildKeyPath', () => {
   it('rejects "time" as a filter — it is not part of the positional key', () => {
     expect(() => buildKeyPath(order, { time: ['2024'] })).toThrow(McpError);
   });
+
+  describe('where the period goes, said only for a time key (#109)', () => {
+    const thrown = (filters: Record<string, string[]>): McpError => {
+      try {
+        buildKeyPath(order, filters);
+      } catch (err) {
+        return err as McpError;
+      }
+      throw new Error('expected a validation error');
+    };
+    const TIME_SENTENCE = 'The time dimension is filtered with since_period/until_period instead.';
+
+    for (const key of ['time', 'time_period', 'TIME', 'Time_Period', 'TIME_PERIOD']) {
+      it(`closes the message with the period inputs for "${key}"`, () => {
+        const err = thrown({ [key]: ['2024'], geo: ['DE'] });
+        expect(err.message).toBe(
+          `Filter names "${key}", which is not a dimension of this dataset. Filterable dimensions, in key order: freq, unit, na_item, geo. ${TIME_SENTENCE}`,
+        );
+        expect(err.data).toEqual({
+          reason: 'invalid_dimension',
+          unknownDimensions: [key],
+          dimensionOrder: order,
+        });
+      });
+    }
+
+    it('leaves the period inputs out when no unknown key is a time key', () => {
+      const err = thrown({ country: ['DE'], nation: ['FR'] });
+      expect(err.message).toBe(
+        'Filter names "country", "nation", which are not dimensions of this dataset. Filterable dimensions, in key order: freq, unit, na_item, geo.',
+      );
+      expect(err.data).toEqual({
+        reason: 'invalid_dimension',
+        unknownDimensions: ['country', 'nation'],
+        dimensionOrder: order,
+      });
+    });
+
+    it('says it once beside another unknown key', () => {
+      const err = thrown({ time: ['2019', '2024'], country: ['DE'] });
+      expect(err.message).toBe(
+        `Filter names "time", "country", which are not dimensions of this dataset. Filterable dimensions, in key order: freq, unit, na_item, geo. ${TIME_SENTENCE}`,
+      );
+      expect((err.data as { unknownDimensions: string[] }).unknownDimensions).toEqual([
+        'time',
+        'country',
+      ]);
+    });
+
+    it('does not read a key that merely contains "time" as a time key', () => {
+      expect(thrown({ worktime: ['FT'] }).message).not.toContain(TIME_SENTENCE);
+    });
+  });
 });
 
 describe('classifyXmlBody', () => {
@@ -350,13 +412,20 @@ describe('classifyXmlBody', () => {
     }
   });
 
-  it('maps the SUBMITTED queue envelope to async_queued and marks it non-retryable', () => {
+  it('maps the SUBMITTED queue envelope to async_queued, retryable by the caller (#106)', () => {
     try {
       classifyXmlBody(QUEUE_ENVELOPE, 'migr_asyrescra');
       expect.unreachable('expected a throw');
     } catch (err) {
       expect((err as McpError).code).toBe(JsonRpcErrorCode.ServiceUnavailable);
-      expect((err as McpError).data).toMatchObject({ reason: 'async_queued', retryable: false });
+      expect((err as McpError).data).toEqual({
+        reason: 'async_queued',
+        datasetCode: 'migr_asyrescra',
+        retryable: true,
+      });
+      expect((err as Error).message).toBe(
+        'Eurostat is preparing the extraction of "migr_asyrescra" in the background and has not served it yet: the SDMX endpoint answered with a "SUBMITTED" queue ticket instead of data.',
+      );
     }
   });
 
@@ -672,7 +741,7 @@ describe('EurostatBulkService — streaming', () => {
       );
       const dl = await fresh.startDownload('x', [], {}, undefined, undefined, createMockContext());
       expect((await collectRows(dl.rows())).map((row) => row.geo)).toEqual(['AT']);
-      expect(dl.stats.budgetExceeded).toBe(true);
+      expect(dl.stats.budgetExceeded).toBe('bytes');
     });
 
     it.each([false, true])(
@@ -690,7 +759,7 @@ describe('EurostatBulkService — streaming', () => {
         );
         expect((await collectRows(dl.rows())).map((row) => row.geo)).toEqual(['DE', 'FR']);
         expect(dl.stats).toMatchObject({
-          budgetExceeded: true,
+          budgetExceeded: 'bytes',
           bytesRead: 40,
           rowCount: 2,
           compressed: gzip,
@@ -724,15 +793,20 @@ describe('EurostatBulkService — streaming', () => {
           );
           return collectRows(dl.rows());
         };
-        await expect(run()).rejects.toMatchObject({
+        const failure = await run().then(
+          () => undefined,
+          (err: unknown) => err as { data?: Record<string, unknown> },
+        );
+        expect(failure).toMatchObject({
           data: {
             reason: 'byte_budget_exceeded',
             maxBytes: budget,
             bytesRead: budget,
             rowCount: 0,
-            recovery: { hint: expect.stringContaining('filters') },
           },
         });
+        // The download tool's contract entry supplies the recovery hint, not the service.
+        expect(failure?.data).not.toHaveProperty('recovery');
       },
     );
 
@@ -762,7 +836,7 @@ describe('EurostatBulkService — streaming', () => {
         expect(rows).toHaveLength(1);
         expect(rows[0]).toMatchObject({ geo: '日本', obs_value: 42, time: '2024' });
         expect(JSON.stringify(rows)).not.toContain('�');
-        expect(dl.stats).toMatchObject({ bytesRead: budget, budgetExceeded: true, rowCount: 1 });
+        expect(dl.stats).toMatchObject({ bytesRead: budget, budgetExceeded: 'bytes', rowCount: 1 });
       },
     );
 
@@ -779,7 +853,7 @@ describe('EurostatBulkService — streaming', () => {
       const rows: BulkRow[] = [];
       for await (const row of dl.rows()) rows.push(row);
 
-      expect(dl.stats.budgetExceeded).toBe(true);
+      expect(dl.stats.budgetExceeded).toBe('bytes');
       expect(rows.map((r) => r.geo)).toEqual(['AT', 'BE', 'CZ']);
       expect(delivered()).toBeLessThan(1 + ROW_CHUNKS.length);
     });
@@ -798,7 +872,7 @@ describe('EurostatBulkService — streaming', () => {
       const rows: BulkRow[] = [];
       for await (const row of dl.rows()) rows.push(row);
 
-      expect(dl.stats.budgetExceeded).toBe(true);
+      expect(dl.stats.budgetExceeded).toBe('bytes');
       // Every emitted row is whole: no null dimension, no null period.
       for (const row of rows) {
         expect(row.geo).toBeTruthy();
@@ -826,6 +900,27 @@ describe('EurostatBulkService — streaming', () => {
     it('detects the queue envelope arriving as HTTP 200 instead of parsing it as TSV', async () => {
       mockBody([utf8(QUEUE_ENVELOPE)]);
       await expect(drain(svc)).rejects.toMatchObject({ data: { reason: 'async_queued' } });
+    });
+
+    it('fails on the one request a captured queue ticket answered, as sent (#106)', async () => {
+      mockBody([utf8(QUEUE_TICKET)]);
+      const err = await svc
+        .startDownload('DS-045409', [], {}, undefined, undefined, createMockContext())
+        .then(
+          () => expect.unreachable('expected a throw'),
+          (error: unknown) => error as McpError,
+        );
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      // Exactly the classification: no retry count or wrapping an exhausted retry adds.
+      expect(err.message).toBe(
+        'Eurostat is preparing the extraction of "DS-045409" in the background and has not served it yet: the SDMX endpoint answered with a "SUBMITTED" queue ticket instead of data.',
+      );
+      expect(err.data).toEqual({
+        reason: 'async_queued',
+        datasetCode: 'DS-045409',
+        retryable: true,
+      });
+      expect(fetchWithTimeout).toHaveBeenCalledTimes(1);
     });
 
     it('still classifies the queue envelope when a chunk ends at the XML declaration', async () => {
@@ -1488,7 +1583,7 @@ describe('EurostatBulkService — unflagged ":" cells (#90, #93)', () => {
       const { rows, stats } = await cutAfterFirstLine(`${FR_LINE}\n${DE_LINE}`, italy, 40);
       expect(rows.some((row) => row.geo === 'IT')).toBe(false);
       expect(stats).toMatchObject({
-        budgetExceeded: true,
+        budgetExceeded: 'bytes',
         rowCount: 42,
         missingCount: 16,
         absentCellCount: 16,
@@ -1502,7 +1597,7 @@ describe('EurostatBulkService — unflagged ":" cells (#90, #93)', () => {
       // have opened the span in 1975.
       const { stats } = await cutAfterFirstLine(DE_LINE, FR_LINE);
       expect(stats).toMatchObject({
-        budgetExceeded: true,
+        budgetExceeded: 'bytes',
         rowCount: 21,
         missingCount: 16,
         absentCellCount: 0,
@@ -1518,7 +1613,7 @@ describe('EurostatBulkService — unflagged ":" cells (#90, #93)', () => {
       const { rows, stats } = await cutAfterFirstLine(FR_LINE, DE_LINE, kept);
       expect(rows.every((row) => row.geo === 'FR')).toBe(true);
       expect(stats).toMatchObject({
-        budgetExceeded: true,
+        budgetExceeded: 'bytes',
         rowCount: 21,
         missingCount: 0,
         absentCellCount: 0,
@@ -1622,7 +1717,7 @@ describe('EurostatBulkService — filter values with no observation (#96)', () =
       );
       const rows = await collectRows(dl.rows());
       expect(rows.map((row) => row.geo)).toEqual(['DE11', 'DE11', 'DE11', 'DE11', 'DE11']);
-      expect(dl.stats.budgetExceeded).toBe(true);
+      expect(dl.stats.budgetExceeded).toBe('bytes');
       expect(dl.stats.emptyValues).toBeUndefined();
     });
   });
@@ -1729,6 +1824,25 @@ describe('EurostatBulkService — an unavailable SDMX data endpoint (#71)', () =
     expect(fetchWithTimeout).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * The ticket is retryable by the caller, and the retry loop's predicate reads `retryable`
+   * through the framework default: only the outage check in front of it keeps a ticket the
+   * loop sees, one inside a non-2xx answer, from being resent (#106).
+   */
+  it('keeps a queue ticket on a 5xx as async_queued, on one attempt, though it is retryable', async () => {
+    vi.mocked(fetchWithTimeout).mockRejectedValue(httpFailure(503, QUEUE_TICKET));
+    const err = (await settle(start())) as McpError;
+    expect(err.message).toBe(
+      'Eurostat is preparing the extraction of "nama_10_gdp" in the background and has not served it yet: the SDMX endpoint answered with a "SUBMITTED" queue ticket instead of data.',
+    );
+    expect(err.data).toEqual({
+      reason: 'async_queued',
+      datasetCode: 'nama_10_gdp',
+      retryable: true,
+    });
+    expect(fetchWithTimeout).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps an unmodeled fault on a 4xx as a non-retryable-flagged upstream_fault, on one attempt (characterization)', async () => {
     vi.mocked(fetchWithTimeout).mockRejectedValue(httpFailure(400, FAULT_UNKNOWN));
     const err = (await settle(start())) as McpError;
@@ -1759,32 +1873,44 @@ describe('EurostatBulkService — an unavailable SDMX data endpoint (#71)', () =
   });
 });
 
-describe('EurostatBulkService — operation deadline through body ownership (#72)', () => {
+/**
+ * `EUROSTAT_BULK_TIMEOUT_MS` is one time budget per call (#108): every attempt, every backoff,
+ * the body and whatever pulls it, counted from the call's start. Each test runs on fake timers
+ * with the budget the only timer armed, and checks the call is still open 1 ms before the
+ * budget's end and settled at it, so the outcome is the budget's.
+ */
+describe('EurostatBulkService — the time budget (#72, #108)', () => {
+  const BUDGET_MS = 55_000;
+
   beforeEach(async () => {
     vi.useFakeTimers();
     const actual = await vi.importActual<typeof import('@cyanheads/mcp-ts-core/utils')>(
       '@cyanheads/mcp-ts-core/utils',
     );
     vi.mocked(fetchWithTimeout).mockImplementation(actual.fetchWithTimeout);
+    vi.spyOn(serverConfig, 'getServerConfig').mockReturnValue({
+      ...serverConfig.getServerConfig(),
+      bulkTimeoutMs: BUDGET_MS,
+    });
   });
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
-  it('retains the remaining 120-second allowance after headers, with no stream retry', async () => {
-    const requests: Request[] = [];
-    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+  /**
+   * A fetch whose body sends `chunks`, then stalls until the request is aborted, erroring
+   * with the abort's reason as a real body does. `requests` records each request.
+   */
+  function stallingFetch(chunks: string[], requests: Request[] = []) {
+    return vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const request = new Request(url, init);
       requests.push(request);
-      if (requests.length === 1) {
-        await new Promise<void>((resolve) => setTimeout(resolve, 20_000));
-        return new Response('Unavailable', { status: 503 });
-      }
       return new Response(
-        new ReadableStream({
+        new ReadableStream<Uint8Array>({
           start(controller) {
-            controller.enqueue(utf8('geo\\TIME_PERIOD\t2024 \nDE\t42 \n'));
+            for (const chunk of chunks) controller.enqueue(utf8(chunk));
             request.signal.addEventListener(
               'abort',
               () => controller.error(request.signal.reason),
@@ -1794,27 +1920,346 @@ describe('EurostatBulkService — operation deadline through body ownership (#72
         }),
       );
     });
-    vi.stubGlobal('fetch', fetchMock);
-    const svc = new EurostatBulkService(mockConfig, mockStorage);
-    let settled = false;
-    const outcome = svc
-      .startDownload('x', [], {}, undefined, undefined, createMockContext())
-      .then(async (download) => collectRows(download.rows()))
-      .catch((error: unknown) => error)
-      .then((value) => {
-        settled = true;
-        return value;
+  }
+
+  /** Start a download and drain it, tracking when the call settles. */
+  function track(
+    startedAt?: number,
+    request: { filters?: Record<string, string[]>; order?: string[] } = {},
+  ) {
+    const state: { rows: BulkRow[]; settled: boolean; stats?: BulkStats } = {
+      rows: [],
+      settled: false,
+    };
+    const outcome = new EurostatBulkService(mockConfig, mockStorage)
+      .startDownload(
+        'x',
+        request.order ?? [],
+        request.filters ?? {},
+        undefined,
+        undefined,
+        createMockContext(),
+        startedAt,
+      )
+      .then(async (download) => {
+        state.stats = download.stats;
+        for await (const row of download.rows()) state.rows.push(row);
+        return download.stats;
+      })
+      .catch((error: unknown) => error as McpError)
+      .finally(() => {
+        state.settled = true;
       });
-    await vi.advanceTimersByTimeAsync(30_001);
-    expect(settled).toBe(false);
-    await vi.advanceTimersByTimeAsync(90_000);
+    return { outcome, state };
+  }
+
+  const HEADER = 'freq,geo\\TIME_PERIOD\t2023 \t2024 \n';
+
+  it('keeps the rows that streamed before the budget ran out, as a prefix', async () => {
+    const requests: Request[] = [];
+    const chunks = [HEADER, 'A,AT\t1.0 \t2.0 \n', 'A,DE\t: \t4.0 \n', 'A,FR\t5.0 '];
+    vi.stubGlobal('fetch', stallingFetch(chunks, requests));
+    const { outcome, state } = track(undefined, {
+      order: ['freq', 'geo'],
+      filters: { geo: ['AT', 'DE', 'IT'] },
+    });
+
+    await vi.advanceTimersByTimeAsync(BUDGET_MS - 1);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(state.settled).toBe(true);
+
+    expect(await outcome).toBe(state.stats);
+    // The FR line was cut mid-line, so it is dropped rather than parsed.
+    expect(state.rows.map((row) => [row.geo, row.time, row.obs_value])).toEqual([
+      ['AT', '2023', 1],
+      ['AT', '2024', 2],
+      ['DE', '2023', null],
+      ['DE', '2024', 4],
+    ]);
+    expect(state.stats).toEqual({
+      absentCellCount: 1,
+      budgetExceeded: 'time',
+      bytesRead: utf8(chunks.join('')).length,
+      compressed: false,
+      missingCount: 1,
+      periodsSeen: ['2023', '2024'],
+      rowCount: 4,
+    });
+    // IT has no line in the prefix, but the unread body could hold one: emptyValues stays unset.
+    expect(state.stats?.emptyValues).toBeUndefined();
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.signal.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([
+    ['a header cut short', ['freq,geo\\TIME_PER']],
+    ['a header and no complete row', [HEADER, 'A,AT\t1.0']],
+  ])('fails as retry_deadline_exceeded when the budget runs out on %s', async (_label, chunks) => {
+    vi.stubGlobal('fetch', stallingFetch(chunks));
+    const { outcome, state } = track();
+
+    await vi.advanceTimersByTimeAsync(BUDGET_MS - 1);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    const error = (await outcome) as McpError;
+    expect(error).toBeInstanceOf(McpError);
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'retry_deadline_exceeded', deadlineMs: BUDGET_MS, elapsedMs: BUDGET_MS },
+    });
+    expect(error.message).toContain('"x"');
+    expect(state.rows).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('fails a request that never answers at the budget, on one attempt (characterization)', async () => {
+    const fetchMock = vi.fn(
+      (_url: string | URL | Request, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+            once: true,
+          });
+        }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const { outcome, state } = track();
+
+    await vi.advanceTimersByTimeAsync(BUDGET_MS - 1);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
     expect(await outcome).toMatchObject({
       code: JsonRpcErrorCode.Timeout,
-      data: { reason: 'retry_deadline_exceeded', deadlineMs: 120_000 },
+      data: { reason: 'retry_deadline_exceeded', deadlineMs: BUDGET_MS, elapsedMs: BUDGET_MS },
     });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('counts the budget from the call’s start, so time spent before the request comes out of it', async () => {
+    vi.stubGlobal('fetch', stallingFetch([HEADER, 'A,AT\t1.0 \t2.0 \n']));
+    // A structure read already took 20 s of this call.
+    const { outcome, state } = track(Date.now() - 20_000);
+
+    await vi.advanceTimersByTimeAsync(BUDGET_MS - 20_000 - 1);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(await outcome).toMatchObject({ budgetExceeded: 'time', rowCount: 2 });
+  });
+
+  it('reports the budget and the time since the call’s start when the request never answers', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        (_url: string | URL | Request, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+              once: true,
+            });
+          }),
+      ),
+    );
+    const { outcome, state } = track(Date.now() - 20_000);
+
+    await vi.advanceTimersByTimeAsync(BUDGET_MS - 20_000 - 1);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    // The retry clock ran for 35 s; the caller is told about the whole call's 55 s.
+    expect(await outcome).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'retry_deadline_exceeded', deadlineMs: BUDGET_MS, elapsedMs: BUDGET_MS },
+    });
+  });
+
+  it('sends nothing once the budget is spent', async () => {
+    const fetchMock = stallingFetch([HEADER, 'A,AT\t1.0 \t2.0 \n']);
+    vi.stubGlobal('fetch', fetchMock);
+    const { outcome } = track(Date.now() - BUDGET_MS);
+
+    expect(await outcome).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'retry_deadline_exceeded', deadlineMs: BUDGET_MS, elapsedMs: BUDGET_MS },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('spends one budget across a failed attempt, its backoff, and the next attempt’s body', async () => {
+    const requests: Request[] = [];
+    const stalling = stallingFetch([HEADER, 'A,AT\t1.0 \t2.0 \n'], requests);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        if (requests.length > 0) return stalling(url, init);
+        requests.push(new Request(url, init));
+        await new Promise<void>((resolve) => setTimeout(resolve, 20_000));
+        return new Response('Unavailable', { status: 503 });
+      }),
+    );
+    const { outcome, state } = track();
+
+    await vi.advanceTimersByTimeAsync(BUDGET_MS - 1);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(await outcome).toMatchObject({ budgetExceeded: 'time', rowCount: 2 });
+    // The 503 was retried once; the stream that followed was never retried.
     expect(requests).toHaveLength(2);
     expect(requests[1]?.signal.aborted).toBe(true);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('cuts a gzip body while a slow consumer, not the wire, sets the pace', async () => {
+    /**
+     * 711 KB on the wire, 1.8 MB decoded: far past what the decompressor reads ahead of its
+     * consumer (about 200 KB of wire on Node), so the wire is still open when the budget ends.
+     * The values are spread so the body does not compress to almost nothing.
+     */
+    const LINES = 120_000;
+    const plain = utf8(
+      `geo\\TIME_PERIOD\t2024 \n${Array.from({ length: LINES }, (_, i) => `G${i + 1}\t${((i + 1) * 2654435761) % 1000003} \n`).join('')}`,
+    );
+    const wire = gzipSync(plain);
+    const requests: Request[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        const request = new Request(url, init);
+        requests.push(request);
+        let at = 0;
+        // Pulled, so the wire is read only as fast as the rows are taken.
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              request.signal.addEventListener(
+                'abort',
+                () => controller.error(request.signal.reason),
+                { once: true },
+              );
+            },
+            pull(controller) {
+              if (at >= wire.length) return controller.close();
+              controller.enqueue(wire.subarray(at, at + 16_384));
+              at += 16_384;
+            },
+          }),
+        );
+      }),
+    );
+    const startedAt = Date.now();
+    const download = await new EurostatBulkService(mockConfig, mockStorage).startDownload(
+      'x',
+      [],
+      {},
+      undefined,
+      undefined,
+      createMockContext(),
+    );
+    const rows: BulkRow[] = [];
+    // Staging costs 85 ms per 100 rows, so all 120,000 would take 102 s.
+    for await (const row of download.rows()) {
+      rows.push(row);
+      if (rows.length % 100 === 0) await vi.advanceTimersByTimeAsync(85);
+    }
+
+    expect(download.stats).toMatchObject({ budgetExceeded: 'time', compressed: true });
+    /**
+     * Rows the decompressor had already decoded still arrive after the cut, at this test's
+     * slow staging rate, so the read ends some seconds past the budget, and well short of
+     * the 102 s the whole body takes.
+     */
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(BUDGET_MS);
+    expect(Date.now() - startedAt).toBeLessThan(90_000);
+    expect(rows.length).toBe(download.stats.rowCount);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.length).toBeLessThan(LINES);
+    // A prefix in body order, nothing skipped and nothing cut: row i is line i, whole.
+    expect(rows.map((row) => row.geo)).toEqual(
+      Array.from({ length: rows.length }, (_, i) => `G${i + 1}`),
+    );
+    expect(rows.at(-1)?.obs_value).toBe((rows.length * 2654435761) % 1000003);
+    expect(download.stats.bytesRead).toBeLessThan(plain.length);
+    expect(requests[0]?.signal.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('cuts a body the runtime already holds whole, which an abort no longer errors', async () => {
+    // Bun keeps serving a response body that has fully arrived after its request is aborted.
+    const lines = Array.from({ length: 50 }, (_, i) => `A,G${i + 1}\t${i + 1}.0 \t: \n`);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                for (const chunk of [HEADER, ...lines]) controller.enqueue(utf8(chunk));
+                controller.close();
+              },
+            }),
+          ),
+      ),
+    );
+    const download = await new EurostatBulkService(mockConfig, mockStorage).startDownload(
+      'x',
+      [],
+      {},
+      undefined,
+      undefined,
+      createMockContext(),
+    );
+    const rows: BulkRow[] = [];
+    // Staging takes 2 s a line (two rows), so the budget runs out during line 28.
+    for await (const row of download.rows()) {
+      rows.push(row);
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+
+    expect(download.stats).toMatchObject({ budgetExceeded: 'time', rowCount: 56 });
+    expect(rows.at(-1)).toMatchObject({ geo: 'G28', time: '2024' });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([
+    ['before the header', ['freq,geo\\TIME_PER'], 0],
+    ['after a row', [HEADER, 'A,AT\t1.0 \t2.0 \n'], 2],
+  ])('names the dataset when the body breaks off %s', async (_label, chunks, rowsBefore) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                for (const chunk of chunks) controller.enqueue(utf8(chunk));
+              },
+              pull(controller) {
+                controller.error(new TypeError('terminated'));
+              },
+            }),
+          ),
+      ),
+    );
+    const { outcome, state } = track();
+    const error = (await outcome) as McpError;
+
+    expect(error).toBeInstanceOf(McpError);
+    // A transport failure mid-body is an outage: a later call can succeed.
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: {
+        reason: 'upstream_fault',
+        datasetCode: 'x',
+        bytesRead: utf8(chunks.join('')).length,
+        retryable: true,
+      },
+    });
+    expect(error.message).toContain('broke off the body of "x"');
+    expect(state.rows).toHaveLength(rowsBefore);
   });
 
   it('cancels a streaming body as the caller outcome and never retries', async () => {
@@ -1851,6 +2296,66 @@ describe('EurostatBulkService — operation deadline through body ownership (#72
     controller.abort();
     expect(await outcome).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
     expect(requests).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('keeps a cancellation landing at the budget’s end a cancellation, never a prefix', async () => {
+    vi.stubGlobal('fetch', stallingFetch([HEADER, 'A,AT\t1.0 \t2.0 \n']));
+    const controller = new AbortController();
+    // Armed before the download's own timer, so it fires first at the same instant.
+    setTimeout(() => controller.abort(), BUDGET_MS);
+    const download = await new EurostatBulkService(mockConfig, mockStorage).startDownload(
+      'x',
+      [],
+      {},
+      undefined,
+      undefined,
+      createMockContext({ signal: controller.signal }),
+    );
+    const outcome = collectRows(download.rows()).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(BUDGET_MS);
+
+    expect(await outcome).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+    expect(download.stats).toMatchObject({ budgetExceeded: false, rowCount: 2 });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('never reads the budget as spent for a cancelled call whose body is already held whole', async () => {
+    // An abort cannot error a body held whole: only the clock check between chunks sees it.
+    const lines = Array.from({ length: 50 }, (_, i) => `A,G${i + 1}\t${i + 1}.0 \t: \n`);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                for (const chunk of [HEADER, ...lines]) controller.enqueue(utf8(chunk));
+                controller.close();
+              },
+            }),
+          ),
+      ),
+    );
+    const controller = new AbortController();
+    const download = await new EurostatBulkService(mockConfig, mockStorage).startDownload(
+      'x',
+      [],
+      {},
+      undefined,
+      undefined,
+      createMockContext({ signal: controller.signal }),
+    );
+    let rowsRead = 0;
+    for await (const _row of download.rows()) {
+      rowsRead += 1;
+      if (rowsRead === 2) {
+        await vi.advanceTimersByTimeAsync(BUDGET_MS);
+        controller.abort();
+      }
+    }
+
+    expect(download.stats.budgetExceeded).toBe(false);
     expect(vi.getTimerCount()).toBe(0);
   });
 });

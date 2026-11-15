@@ -224,7 +224,7 @@ describe('eurostat_query_dataset on DS-* codes (#46)', () => {
     });
     expect(errorData(result)).toMatchObject({
       code: JsonRpcErrorCode.ServiceUnavailable,
-      data: { reason: 'async_response' },
+      data: { reason: 'extraction_too_big', retryable: false },
     });
     expect(errorData(result).message).toContain('estimated 10305182 rows');
     expect(hintOf(result)).toContain('Filter on freq, partner, product');
@@ -246,7 +246,7 @@ describe('eurostat_query_dataset on DS-* codes (#46)', () => {
       filters: { unit: ['PER'] },
       geo_level: 'country',
     });
-    expect(errorData(result).data).toMatchObject({ reason: 'async_response' });
+    expect(errorData(result).data).toMatchObject({ reason: 'extraction_too_big' });
     expect(hintOf(result)).toContain('Filter on freq, citizen, sex, age');
     expect(hintOf(result)).not.toContain('geo');
   });

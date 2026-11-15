@@ -9,13 +9,20 @@
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as serverConfig from '@/config/server-config.js';
 import { EurostatDataService } from '@/services/eurostat-data/eurostat-data-service.js';
-import { SDMX_CONSTRAINT_XML, SDMX_DATAFLOW_XML } from '../fixtures/eurostat-sdmx-metadata.js';
+import {
+  EARN_SES_ANNUAL_DIMENSIONS,
+  SDMX_CONSTRAINT_XML,
+  SDMX_DATAFLOW_XML,
+  sdmxDataStructureXml,
+} from '../fixtures/eurostat-sdmx-metadata.js';
 import {
   COMEXT_HOST,
   comextFixture,
   constraintWithProducts,
   json,
+  MAIN_HOST,
   type RoutedRequest,
   routeOf,
   xml,
@@ -59,14 +66,44 @@ function hostsResponse(
       return xml(SDMX_DATAFLOW_XML.replaceAll('EARN_SES_ANNUAL', request.code.toUpperCase()));
     }
     if (request.route === 'contentconstraint') return xml(SDMX_CONSTRAINT_XML);
+    if (request.route === 'datastructure') return xml(sdmxDataStructureXml());
   }
   throw new Error(`Unexpected request: ${request.url.href}`);
 }
 
 let fetchMock: ReturnType<typeof vi.fn>;
 const requests = (): RoutedRequest[] => fetchMock.mock.calls.map(([input]) => routeOf(input));
-const dataflowReads = (code: string) =>
-  requests().filter((r) => r.route === 'dataflow' && r.code.toLowerCase() === code.toLowerCase());
+const readsOf = (route: RoutedRequest['route'], code: string) =>
+  requests().filter((r) => r.route === route && r.code.toLowerCase() === code.toLowerCase());
+const dataflowReads = (code: string) => readsOf('dataflow', code);
+const structureReads = (code: string) => readsOf('datastructure', code);
+
+/**
+ * Hold every request until `release()`, rejecting early when the request's own signal
+ * aborts — as a real fetch does — so a test can cancel one caller while a read is still
+ * in flight.
+ */
+function gateFetch(): { release: () => void; started: Promise<void> } {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  fetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+    markStarted();
+    const signal = init?.signal;
+    await new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) reject(signal.reason);
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+      void gate.then(resolve);
+    });
+    return hostsResponse(input);
+  });
+  return { release, started };
+}
 
 beforeEach(() => {
   fetchMock = vi.fn(async (input: unknown) => hostsResponse(input));
@@ -246,15 +283,25 @@ describe('EurostatDataService — per-dataset metadata cache (#46)', () => {
         `<c:KeyValue id="unit">${units}</c:KeyValue>`,
       );
     };
-    const shares: Record<string, number> = { big_a: 0.4, big_b: 0.4, big_c: 0.4, huge: 1.2 };
+    const shares: Record<string, number> = {
+      big_a: 0.4,
+      big_b: 0.4,
+      big_c: 0.4,
+      huge: 1.2,
+      near_a: 0.45,
+      near_b: 0.45,
+    };
+
+    /** Each sized dataset's constraint at its share of the budget; every other read as usual. */
+    const budgetRoutes = async (input: unknown) => {
+      const request = routeOf(input);
+      const share = shares[request.code];
+      if (share !== undefined && request.route === 'contentconstraint') return xml(sized(share));
+      return hostsResponse(input);
+    };
 
     beforeEach(() => {
-      fetchMock.mockImplementation(async (input: unknown) => {
-        const request = routeOf(input);
-        const share = shares[request.code];
-        if (share !== undefined && request.route === 'contentconstraint') return xml(sized(share));
-        return hostsResponse(input);
-      });
+      fetchMock.mockImplementation(budgetRoutes);
     });
 
     it('evicts the least recently used dataset once the held values pass the budget', async () => {
@@ -268,6 +315,34 @@ describe('EurostatDataService — per-dataset metadata cache (#46)', () => {
       await svc.getDatasetInfo('big_c', ctx());
       expect(dataflowReads('big_a')).toHaveLength(1);
       expect(dataflowReads('big_c')).toHaveLength(1);
+      await svc.getDatasetInfo('big_b', ctx());
+      expect(dataflowReads('big_b')).toHaveLength(2);
+    });
+
+    it("evicts a dataset's dimension order with its entry (#105)", async () => {
+      const svc = service();
+      await svc.getDimensionOrder('big_a', ctx());
+      await svc.getDatasetInfo('big_a', ctx());
+      await svc.getDimensionOrder('big_a', ctx());
+      expect(structureReads('big_a')).toHaveLength(1);
+      await svc.getDatasetInfo('big_b', ctx());
+      await svc.getDatasetInfo('big_c', ctx());
+      await expect(svc.getDimensionOrder('big_a', ctx())).resolves.toEqual(
+        EARN_SES_ANNUAL_DIMENSIONS,
+      );
+      expect(structureReads('big_a')).toHaveLength(2);
+    });
+
+    it("counts a hit on a dataset's cached order as a use of its entry (#105)", async () => {
+      const svc = service();
+      await svc.getDimensionOrder('big_a', ctx());
+      await svc.getDatasetInfo('big_a', ctx());
+      await svc.getDatasetInfo('big_b', ctx());
+      // The order hit makes big_a the most recently used, so big_c's load evicts big_b.
+      await svc.getDimensionOrder('big_a', ctx());
+      await svc.getDatasetInfo('big_c', ctx());
+      await svc.getDatasetInfo('big_a', ctx());
+      expect(dataflowReads('big_a')).toHaveLength(1);
       await svc.getDatasetInfo('big_b', ctx());
       expect(dataflowReads('big_b')).toHaveLength(2);
     });
@@ -287,6 +362,25 @@ describe('EurostatDataService — per-dataset metadata cache (#46)', () => {
       // Declining the oversized entry evicts nothing else.
       await svc.getDatasetInfo('set_small', ctx());
       expect(dataflowReads('set_small')).toHaveLength(1);
+    });
+
+    it("charges a cached dimension order's bytes to the budget (#105)", async () => {
+      // near_a and near_b leave about 5 MB of the budget; this order's 3M-character id takes 6 MB.
+      const wide = xml(sdmxDataStructureXml([{ id: 'W'.repeat(3_000_000), position: 1 }]));
+      fetchMock.mockImplementation(async (input: unknown) => {
+        const request = routeOf(input);
+        if (request.code === 'wide' && request.route === 'datastructure') return wide.clone();
+        return budgetRoutes(input);
+      });
+      const svc = service();
+      await svc.getDatasetInfo('near_a', ctx());
+      await svc.getDatasetInfo('near_b', ctx());
+      await svc.getDimensionOrder('wide', ctx());
+      // The order took the total past the budget, so the least recently used entry went.
+      await svc.getDatasetInfo('near_a', ctx());
+      expect(dataflowReads('near_a')).toHaveLength(2);
+      await svc.getDimensionOrder('wide', ctx());
+      expect(structureReads('wide')).toHaveLength(1);
     });
   });
 
@@ -332,33 +426,6 @@ describe('EurostatDataService — per-dataset metadata cache (#46)', () => {
 });
 
 describe('EurostatDataService — caller cancellation around the shared metadata load', () => {
-  /**
-   * Hold every structure request until `release()`, rejecting early when the request's
-   * own signal aborts — as a real fetch does — so a test can cancel one caller while
-   * the shared download is still in flight.
-   */
-  function gateFetch(): { release: () => void; started: Promise<void> } {
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    let markStarted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      markStarted = resolve;
-    });
-    fetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
-      markStarted();
-      const signal = init?.signal;
-      await new Promise<void>((resolve, reject) => {
-        if (signal?.aborted) reject(signal.reason);
-        signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
-        void gate.then(resolve);
-      });
-      return hostsResponse(input);
-    });
-    return { release, started };
-  }
-
   it('fails only the caller that cancelled, never a concurrent caller of the same dataset', async () => {
     const svc = service();
     const { release, started } = gateFetch();
@@ -401,6 +468,230 @@ describe('EurostatDataService — caller cancellation around the shared metadata
       svc.getDatasetInfo('DS-045409', createMockContext({ signal: cancelled.signal })),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('EurostatDataService — the cached dimension order (#105)', () => {
+  const ORDER = ['freq', 'reporter', 'partner', 'product', 'flow', 'indicators'];
+
+  it('reads the structure definition once for repeat reads of one dataset, in any spelling', async () => {
+    const svc = service();
+    await expect(svc.getDimensionOrder('DS-045409', ctx())).resolves.toEqual(ORDER);
+    await expect(svc.getDimensionOrder('ds-045409', ctx())).resolves.toEqual(ORDER);
+    await expect(svc.getDimensionOrder('Ds-045409', ctx(), 5_000)).resolves.toEqual(ORDER);
+    expect(structureReads('DS-045409')).toHaveLength(1);
+    expect(requests()).toHaveLength(1);
+  });
+
+  it('keys the order by host as well as code, so another host reads its own', async () => {
+    const svc = service();
+    await svc.getDimensionOrder('DS-045409', ctx());
+    const config = serverConfig.getServerConfig();
+    const spy = vi
+      .spyOn(serverConfig, 'getServerConfig')
+      .mockReturnValue({ ...config, comextBaseUrl: MAIN_HOST });
+    try {
+      // The stub answers a DS-* code on the main host with fault 100, so a read sent there fails.
+      await expect(svc.getDimensionOrder('DS-045409', ctx())).rejects.toMatchObject({
+        data: { reason: 'not_found' },
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(structureReads('DS-045409').map(({ host }) => host)).toEqual(['comext', 'main']);
+  });
+
+  it('reads it again once the hour has passed', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const svc = service();
+    await svc.getDimensionOrder('DS-045409', ctx());
+    vi.setSystemTime(Date.now() + 59 * 60_000);
+    await svc.getDimensionOrder('DS-045409', ctx());
+    expect(structureReads('DS-045409')).toHaveLength(1);
+    vi.setSystemTime(Date.now() + 2 * 60_000);
+    await expect(svc.getDimensionOrder('DS-045409', ctx())).resolves.toEqual(ORDER);
+    expect(structureReads('DS-045409')).toHaveLength(2);
+  });
+
+  it('keeps the order and the metadata in one entry, each answered without re-reading the other', async () => {
+    const svc = service();
+    await svc.getDimensionOrder('DS-045409', ctx());
+    await svc.getDatasetInfo('DS-045409', ctx());
+    await svc.getDimensionOrder('ds-045409', ctx());
+    await svc.getDatasetInfo('ds-045409', ctx());
+    expect(structureReads('DS-045409')).toHaveLength(1);
+    expect(dataflowReads('DS-045409')).toHaveLength(1);
+  });
+
+  it('times each part from its own read: metadata that expires leaves a later order live', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const svc = service();
+    await svc.getDatasetInfo('DS-045409', ctx());
+    vi.setSystemTime(Date.now() + 40 * 60_000);
+    await svc.getDimensionOrder('DS-045409', ctx());
+    vi.setSystemTime(Date.now() + 30 * 60_000);
+    await svc.getDatasetInfo('DS-045409', ctx());
+    await svc.getDimensionOrder('DS-045409', ctx());
+    expect(dataflowReads('DS-045409')).toHaveLength(2);
+    expect(structureReads('DS-045409')).toHaveLength(1);
+  });
+
+  it("hands every caller its own copy, so editing one leaves the cache's order as read", async () => {
+    const svc = service();
+    const first = await svc.getDimensionOrder('DS-045409', ctx());
+    first.pop();
+    first.push('edited');
+    const second = await svc.getDimensionOrder('DS-045409', ctx());
+    expect(second).toEqual(ORDER);
+    second.length = 0;
+    await expect(svc.getDimensionOrder('DS-045409', ctx())).resolves.toEqual(ORDER);
+    expect(structureReads('DS-045409')).toHaveLength(1);
+  });
+
+  describe('a read that fails caches nothing', () => {
+    const unavailable = () => new Response('Service Unavailable', { status: 503 });
+    const hang = (_input: unknown, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+
+    /** Answer the first `count` requests with `reply`, then as the hosts do. */
+    const failFirst = (count: number, reply: typeof hang) => {
+      let left = count;
+      fetchMock.mockImplementation(async (input: unknown, init?: RequestInit) =>
+        left-- > 0 ? reply(input, init) : hostsResponse(input),
+      );
+    };
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    it.each([
+      {
+        name: 'not_found (HTTP 404)',
+        attempts: 1,
+        reply: async () => xml(comextFixture('ds-999999-dataflow.xml'), 404),
+        expected: { code: JsonRpcErrorCode.NotFound, data: { reason: 'not_found' } },
+      },
+      {
+        name: 'a structure listing no key dimension',
+        attempts: 1,
+        reply: async () => xml(sdmxDataStructureXml([])),
+        expected: {
+          code: JsonRpcErrorCode.ServiceUnavailable,
+          data: { reason: 'upstream_fault' },
+        },
+      },
+      {
+        name: 'an outage that outlasts the retries',
+        attempts: 4,
+        reply: async () => unavailable(),
+        expected: { data: { reason: 'upstream_fault', retryable: true, status: 503 } },
+      },
+      // A 4xx the fetch layer surfaces as its own error, unmapped: still never cached.
+      {
+        name: 'a refused read (HTTP 403)',
+        attempts: 1,
+        reply: async () => new Response('Forbidden', { status: 403 }),
+        expected: { code: JsonRpcErrorCode.Forbidden, data: { status: 403 } },
+      },
+      {
+        name: 'an unprocessable read (HTTP 422)',
+        attempts: 1,
+        reply: async () => new Response('Unprocessable', { status: 422 }),
+        expected: { code: JsonRpcErrorCode.ValidationError, data: { status: 422 } },
+      },
+      {
+        name: 'a rate limit that outlasts the retries (HTTP 429)',
+        attempts: 4,
+        reply: async () => new Response('Too Many Requests', { status: 429 }),
+        expected: { code: JsonRpcErrorCode.RateLimited, data: { status: 429, retryAttempts: 4 } },
+      },
+      {
+        name: 'a read past its caller’s 5 s deadline',
+        attempts: 1,
+        deadlineMs: 5_000,
+        reply: hang,
+        expected: {
+          code: JsonRpcErrorCode.Timeout,
+          data: { reason: 'retry_deadline_exceeded', deadlineMs: 5_000 },
+        },
+      },
+    ])('$name', async ({ attempts, reply, deadlineMs, expected }) => {
+      failFirst(attempts, reply);
+      const svc = service();
+      const failed = svc.getDimensionOrder('DS-045409', ctx(), deadlineMs).catch((e) => e);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(await failed).toMatchObject(expected);
+      await expect(svc.getDimensionOrder('DS-045409', ctx())).resolves.toEqual(ORDER);
+      expect(structureReads('DS-045409')).toHaveLength(attempts + 1);
+    });
+
+    it('a cancelled read', async () => {
+      failFirst(1, hang);
+      const svc = service();
+      const controller = new AbortController();
+      const failed = svc
+        .getDimensionOrder('DS-045409', createMockContext({ signal: controller.signal }))
+        .catch((e) => e);
+      await vi.advanceTimersByTimeAsync(1_000);
+      controller.abort();
+      expect(await failed).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+      await expect(svc.getDimensionOrder('DS-045409', ctx())).resolves.toEqual(ORDER);
+      expect(structureReads('DS-045409')).toHaveLength(2);
+    });
+  });
+
+  it("fails only a cancelled caller's own read, never a concurrent caller's", async () => {
+    const svc = service();
+    const { release, started } = gateFetch();
+    const cancelled = new AbortController();
+    const first = svc.getDimensionOrder(
+      'DS-045409',
+      createMockContext({ signal: cancelled.signal }),
+    );
+    const second = svc.getDimensionOrder('DS-045409', ctx());
+    await started;
+    cancelled.abort();
+    await expect(first).rejects.toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+    release();
+    await expect(second).resolves.toEqual(ORDER);
+    // Nothing in flight is shared: each caller sent its own read.
+    expect(structureReads('DS-045409')).toHaveLength(2);
+    await svc.getDimensionOrder('DS-045409', ctx());
+    expect(structureReads('DS-045409')).toHaveLength(2);
+  });
+
+  describe('forgetDimensionOrder', () => {
+    it('drops the cached order under any spelling, so the next read goes upstream', async () => {
+      const svc = service();
+      await svc.getDimensionOrder('DS-045409', ctx());
+      svc.forgetDimensionOrder('ds-045409');
+      await expect(svc.getDimensionOrder('DS-045409', ctx())).resolves.toEqual(ORDER);
+      expect(structureReads('DS-045409')).toHaveLength(2);
+      await svc.getDimensionOrder('DS-045409', ctx());
+      expect(structureReads('DS-045409')).toHaveLength(2);
+    });
+
+    it("leaves the dataset's metadata cached", async () => {
+      const svc = service();
+      await svc.getDatasetInfo('DS-045409', ctx());
+      await svc.getDimensionOrder('DS-045409', ctx());
+      svc.forgetDimensionOrder('DS-045409');
+      await svc.getDatasetInfo('DS-045409', ctx());
+      expect(dataflowReads('DS-045409')).toHaveLength(1);
+    });
+
+    it('does nothing for a dataset with no cached order', async () => {
+      const svc = service();
+      expect(() => svc.forgetDimensionOrder('DS-045409')).not.toThrow();
+      await svc.getDatasetInfo('DS-045409', ctx());
+      svc.forgetDimensionOrder('DS-045409');
+      await svc.getDatasetInfo('DS-045409', ctx());
+      expect(dataflowReads('DS-045409')).toHaveLength(1);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
   });
 });
 
@@ -487,7 +778,7 @@ describe('EurostatDataService — PRODCOM text values (#46)', () => {
 });
 
 describe('EurostatDataService — too-large refusals (#46)', () => {
-  it('carries Eurostat EXTRACTION_TOO_BIG label and row estimate in the non-retryable async_response', async () => {
+  it('carries Eurostat EXTRACTION_TOO_BIG label and row estimate in the non-retryable extraction_too_big (#106)', async () => {
     fetchMock.mockImplementation(async () =>
       json(comextFixture('ds-045409-extraction-too-big.json'), 413),
     );
@@ -506,7 +797,7 @@ describe('EurostatDataService — too-large refusals (#46)', () => {
       .catch((error: unknown) => error as McpError);
     expect(failure).toMatchObject({
       code: JsonRpcErrorCode.ServiceUnavailable,
-      data: { reason: 'async_response', retryable: false },
+      data: { reason: 'extraction_too_big', retryable: false },
     });
     expect((failure as McpError).message).toContain('EXTRACTION_TOO_BIG');
     expect((failure as McpError).message).toContain('estimated 10305182 rows');

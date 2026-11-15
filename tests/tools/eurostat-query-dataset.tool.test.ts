@@ -16,7 +16,10 @@ import * as serverConfig from '@/config/server-config.js';
 import { eurostatQueryDataset } from '@/mcp-server/tools/definitions/eurostat-query-dataset.tool.js';
 import { hoistDimensions } from '@/mcp-server/tools/hoist-dimensions.js';
 import { setCanvas } from '@/services/canvas-accessor.js';
-import { sdmxDataStructureXml } from '../fixtures/eurostat-sdmx-metadata.js';
+import {
+  EARN_SES_ANNUAL_DIMENSIONS,
+  sdmxDataStructureXml,
+} from '../fixtures/eurostat-sdmx-metadata.js';
 import { withRealCanvas } from '../helpers/real-canvas.js';
 
 // Only the accessor is replaced — the tool also imports the real row builder and column
@@ -334,6 +337,7 @@ describe('eurostatQueryDataset', () => {
     await expect(eurostatQueryDataset.handler(input, ctx)).rejects.toMatchObject({
       data: {
         reason: 'async_response',
+        retryable: true,
         recovery: { hint: expect.stringContaining('nama_10_gdp') },
       },
     });
@@ -3177,18 +3181,23 @@ describe('eurostatQueryDataset — what Eurostat keeps of a period range (#84, #
     const since = eurostatQueryDataset.input.shape.since_period.description ?? '';
     const until = eurostatQueryDataset.input.shape.until_period.description ?? '';
 
-    it('state the wholly-inside rule', () => {
-      expect(since).toContain('Eurostat keeps only periods wholly inside the range');
-      expect(until).toContain('falls inside a period');
+    it('state the wholly-inside rule on since_period, and name it from until_period', () => {
+      expect(since).toContain(
+        'Eurostat keeps only periods wholly inside the range, per frequency: a bound that falls inside a period excludes it',
+      );
+      expect(until).toContain('under the wholly-inside rule of since_period');
     });
 
-    it('state how a one-day range is sent', () => {
-      expect(since).toMatch(/same day is sent as that one date/);
+    it('state what a one-day range selects', () => {
+      expect(since).toContain(
+        'A one-day range (both bounds on the same day) selects that day alone.',
+      );
     });
 
-    it('claim no mapping and offer no range that holds nothing as a working example', () => {
+    it('claim no mapping, name no request parameter, and offer no range that holds nothing as a working example', () => {
       for (const description of [since, until]) {
         expect(description).not.toMatch(/mapped onto/);
+        expect(description).not.toMatch(/is sent as/);
         expect(description).not.toMatch(/"2020-06" to "2020"/);
         expect(description).not.toMatch(/works on annual data/);
       }
@@ -3453,7 +3462,7 @@ describe('eurostatQueryDataset — geo_level behind a bare NO_RESULTS (#85)', ()
       expect(structureReads()).toBe(1);
     });
 
-    it('holds a too-large refusal to the same deadline, keeping the refusal', async () => {
+    it('holds an asynchronous refusal to the same deadline, keeping the refusal', async () => {
       serve({ warning: { status: 413, label: 'ASYNCHRONOUS_RESPONSE' } }, hang);
       let settled = false;
       const pending = runToolContract(eurostatQueryDataset, {
@@ -3467,9 +3476,11 @@ describe('eurostatQueryDataset — geo_level behind a bare NO_RESULTS (#85)', ()
       await vi.advanceTimersByTimeAsync(1);
       expect(settled).toBe(true);
       const result = await pending;
-      expect(errorOf(result)).toMatchObject({ data: { reason: 'async_response' } });
+      expect(errorOf(result)).toMatchObject({
+        data: { reason: 'async_response', retryable: true },
+      });
       expect(hintOf(result)).toBe(
-        'Query matched too many observations for "nama_10_gdp". Add dimension filters — eurostat_get_dataset_info lists the dimensions of "nama_10_gdp" — or a narrower since_period/until_period range.',
+        'Eurostat is preparing this extraction of "nama_10_gdp" and serves the identical query once it is ready: repeat the call in a few minutes, or narrow it. Add dimension filters — eurostat_get_dataset_info lists the dimensions of "nama_10_gdp" — or a narrower since_period/until_period range.',
       );
       expect(structureReads()).toBe(1);
     });
@@ -3640,7 +3651,7 @@ describe('eurostatQueryDataset — a query that outlasts the Statistics API dead
       since_period: '2020',
     });
     expect(hintOf(result)).toBe(
-      `${REPEAT} The bulk endpoint serves the same slice: call eurostat_download_dataset with dataset_code "nama_10_gdp", the same filters, filters.geo set to the codes eurostat_get_dimension_values lists for dimension "geo" at geo_level "nuts2" and since_period "2020". Filter on freq — the dimensions of "nama_10_gdp" this request left unfiltered — or narrow since_period/until_period.`,
+      `${REPEAT} The bulk endpoint serves the same slice: call eurostat_download_dataset with dataset_code "nama_10_gdp", the same filters, filters.geo set to the codes eurostat_get_dimension_values lists for dimension "geo" at geo_level "nuts2" and since_period "2020". Filter on freq — the dimension of "nama_10_gdp" this request left unfiltered — or narrow since_period/until_period.`,
     );
   });
 
@@ -4719,5 +4730,148 @@ describe('eurostatQueryDataset — naming the dimensions and codes a filter miss
       'DE',
       'FR',
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Eurostat's two HTTP-413 refusals (#106) — the real service with fetch stubbed, bodies
+// verbatim from live replies (2026-11-15). Eurostat sends both as status 413 with id 413;
+// only the label tells them apart.
+// ---------------------------------------------------------------------------
+
+describe("eurostatQueryDataset — Eurostat's 413 refusals (#106)", () => {
+  const ASYNCHRONOUS_RESPONSE = {
+    error: [
+      {
+        status: 413,
+        id: 413,
+        label:
+          'ASYNCHRONOUS_RESPONSE. Your request will be treated asynchronously. Please try again later.',
+      },
+    ],
+  };
+  const EXTRACTION_TOO_BIG = {
+    error: [
+      {
+        status: 413,
+        id: 413,
+        label:
+          'EXTRACTION_TOO_BIG: The requested extraction is too big, estimated 5821200 rows, max authorised is 5000000, please change your filters to reduce the extraction size',
+      },
+    ],
+  };
+  const STS_INPR_M = ['freq', 'indic_bt', 'nace_r2', 's_adj', 'unit', 'geo'];
+
+  let fetchMock: ReturnType<typeof vi.fn>;
+  const isStructure = (input: unknown) =>
+    new URL(String(input)).pathname.includes('/sdmx/2.1/datastructure/');
+  const serve = (refusal: object, dimensions: string[]) =>
+    fetchMock.mockImplementation(async (input: unknown) =>
+      isStructure(input)
+        ? new Response(sdmxDataStructureXml(dimensions.map((id, i) => ({ id, position: i + 1 }))))
+        : jsonReply(refusal, 413),
+    );
+  const reads = () => ({
+    statistics: fetchMock.mock.calls.filter(([input]) => !isStructure(input)).length,
+    structure: fetchMock.mock.calls.filter(([input]) => isStructure(input)).length,
+  });
+  const errorOf = (result: { structuredContent?: unknown }) =>
+    (
+      result.structuredContent as {
+        error: { code: number; message: string; data: Record<string, unknown> };
+      }
+    ).error;
+
+  beforeEach(() => {
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(getEurostatDataService).mockReturnValue(
+      new EurostatDataService({} as never, {} as never),
+    );
+    setCanvas(undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('answers ASYNCHRONOUS_RESPONSE as a retryable async_response that offers the repeat beside narrowing', async () => {
+    serve(ASYNCHRONOUS_RESPONSE, STS_INPR_M);
+    const result = await runToolContract(eurostatQueryDataset, {
+      dataset_code: 'sts_inpr_m',
+      filters: { nace_r2: ['C1052'] },
+    });
+    const message =
+      'Eurostat is preparing the extraction for this query in the background and has not served it yet (ASYNCHRONOUS_RESPONSE. Your request will be treated asynchronously. Please try again later.).';
+    const hint =
+      'Eurostat is preparing this extraction of "sts_inpr_m" and serves the identical query once it is ready: repeat the call in a few minutes, or narrow it. Filter on freq, indic_bt, s_adj, unit, geo — the dimensions of "sts_inpr_m" this request left unfiltered — or narrow since_period/until_period.';
+    expect(result.isError).toBe(true);
+    expect(errorOf(result)).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message,
+      data: { reason: 'async_response', retryable: true, recovery: { hint } },
+    });
+    const text = contentText(result as never);
+    expect(text).toContain(`Error: ${message}`);
+    expect(text).toContain(`Recovery: ${hint}`);
+    expect(text).toContain('(reason async_response · retryable)');
+    // The repeat is the caller's: the server sent the refused request once.
+    expect(reads()).toEqual({ statistics: 1, structure: 1 });
+  });
+
+  it('keeps EXTRACTION_TOO_BIG as a non-retryable extraction_too_big that only narrows', async () => {
+    serve(EXTRACTION_TOO_BIG, EARN_SES_ANNUAL_DIMENSIONS);
+    const result = await runToolContract(eurostatQueryDataset, {
+      dataset_code: 'earn_ses_annual',
+      last_n_periods: 1,
+    });
+    const message = `Eurostat refused the query as too large to serve (${EXTRACTION_TOO_BIG.error[0]?.label}). Add dimension filters or a narrower period range to reduce the result size, then retry.`;
+    const hint =
+      'Query matched too many observations for "earn_ses_annual". Filter on freq, nace_r2, isco08, worktime, age, sex, indic_se, geo — the dimensions of "earn_ses_annual" this request left unfiltered — or narrow since_period/until_period.';
+    expect(errorOf(result)).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message,
+      data: { reason: 'extraction_too_big', retryable: false, recovery: { hint } },
+    });
+    const text = contentText(result as never);
+    expect(text).toContain(`Error: ${message}`);
+    expect(text).toContain(`Recovery: ${hint}`);
+    expect(text).toContain('(reason extraction_too_big · not retryable)');
+    expect(reads()).toEqual({ statistics: 1, structure: 1 });
+  });
+
+  it('keeps the generic narrowing advice beside the repeat when the structure cannot be read', async () => {
+    fetchMock.mockImplementation(async (input: unknown) =>
+      isStructure(input)
+        ? new Response('<fault/>', { status: 404 })
+        : jsonReply(ASYNCHRONOUS_RESPONSE, 413),
+    );
+    const result = await runToolContract(eurostatQueryDataset, {
+      dataset_code: 'sts_inpr_m',
+      filters: { nace_r2: ['C1052'] },
+    });
+    expect(errorOf(result).data).toMatchObject({
+      reason: 'async_response',
+      retryable: true,
+      recovery: {
+        hint: 'Eurostat is preparing this extraction of "sts_inpr_m" and serves the identical query once it is ready: repeat the call in a few minutes, or narrow it. Add dimension filters — eurostat_get_dataset_info lists the dimensions of "sts_inpr_m" — or a narrower since_period/until_period range.',
+      },
+    });
+  });
+
+  it('declares async_response retryable and extraction_too_big not', () => {
+    expect(eurostatQueryDataset.errors).toContainEqual(
+      expect.objectContaining({
+        reason: 'async_response',
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        retryable: true,
+      }),
+    );
+    expect(eurostatQueryDataset.errors).toContainEqual(
+      expect.objectContaining({
+        reason: 'extraction_too_big',
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        retryable: false,
+      }),
+    );
   });
 });

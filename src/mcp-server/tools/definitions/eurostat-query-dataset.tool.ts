@@ -48,8 +48,8 @@ import { outageAnswer } from '@/services/eurostat-outage.js';
 import {
   cutNotice,
   cutSelector,
-  normalizePeriod,
   PERIOD_FORMS,
+  periodSpan,
   resolvePeriods,
 } from '@/services/eurostat-periods.js';
 
@@ -67,38 +67,38 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
   tool('eurostat_query_dataset', {
     title: 'Query Eurostat Dataset',
     description:
-      'Fetch statistical data from a Eurostat dataset with dimension filters. Returns a deterministic inline prefix of decoded observations with dimension codes and labels, numeric values, an OBS_FLAG status (e.g., "p" = provisional, "e" = estimated) and a separate CONF_STATUS confidentiality marker (e.g., "C" = confidential, which is usually why a value is null). preview_limit controls only that prefix; filters and period controls reduce the matched result itself. Call eurostat_get_dataset_info first to discover valid dimension codes and values. Apply filters to keep the result set manageable — large unfiltered queries may trigger an async response error. Use filters.geo for specific country/region codes, or geo_level for NUTS hierarchy filtering (mutually exclusive). Use last_n_periods for the N most recent dataset time positions without knowing the end date; a notice names selected periods with no populated cells for the slice. Set stage=true to stage the whole match at any size on a canvas-enabled deployment; matches above 5,000 observations stage automatically. Call eurostat_dataframe_describe first, then eurostat_dataframe_query. When the target is a whole dataset rather than a slice, eurostat_download_dataset reads the SDMX bulk endpoint instead and is the cheaper route.',
+      'Fetch a filtered slice of a Eurostat dataset as decoded observations: dimension codes and labels, numeric value, OBS_FLAG status and CONF_STATUS confidentiality marker. Returns a deterministic inline prefix (preview_limit) beside totals over the whole match; filters and period inputs shrink the match itself. Read dimension codes with eurostat_get_dataset_info and their values with eurostat_get_dimension_values first. Filter large slices: Eurostat refuses an oversized query (extraction_too_big) or prepares a large one in the background (async_response). On a deployment with a dataframe canvas, a match above 5,000 observations, or any match with stage=true, is staged as a SQL table (tableName). For a whole dataset, eurostat_download_dataset is the cheaper route.',
     annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
     input: z.object({
       dataset_code: z
         .string()
         .min(1)
         .describe(
-          'Dataset code (e.g., "nama_10_gdp"). Required. A DS-* code — Comext detailed trade or PRODCOM, in any case — is served by the Comext host: filter freq on its trade flows, which mix annual and monthly series, and note that product, reporter and partner carry aggregates (TOTAL, EU27_2020) that double-count when summed with their members.',
+          'Dataset code (e.g., "nama_10_gdp"). DS-* codes (Comext trade and PRODCOM, in any case) work too; their trade flows mix annual and monthly series, so filter freq.',
         ),
       filters: z
         .record(z.string(), z.array(z.string()))
         .default({})
         .describe(
-          'Dimension filters as a map of dimension code → array of valid values. Example: {"unit": ["CP_MEUR"], "na_item": ["B1GQ"], "geo": ["DE", "FR"]}. An empty array is treated as no filter for that dimension and is dropped from the request, and so is a blank or whitespace-only value ([""] is no filter, ["", "DE"] is ["DE"]). No Eurostat code contains "+" or ".": a value holding "+" is split into separate values, read as OR (["DE+FR"] is ["DE", "FR"]), and a value holding "." stays one value that matches nothing. Dimension codes match in any case ("GEO" is geo). Keys are dimensions only: one naming a request control (lang, format, geoLevel, sinceTimePeriod, untilTimePeriod, lastTimePeriod, in any case) is rejected as invalid_dimension — use the lang, geo_level, since_period, until_period and last_n_periods inputs. Do not include "geo" here if using geo_level, nor "time"/"time_period" if using since_period, until_period or last_n_periods. A value that matches nothing contributes no rows rather than an error; the response names it in unmatchedValues, or in the no_results error when nothing matched at all. A valid value with no cell in the selected periods contributes no rows either; the response names it in emptyValues. eurostat_get_dimension_values lists the valid values.',
+          'Map of dimension code → values to keep, e.g. {"unit": ["CP_MEUR"], "geo": ["DE", "FR"]}; eurostat_get_dimension_values lists the values. Keys match in any case and must be dimensions: one naming a request control (lang, format, geoLevel, sinceTimePeriod, untilTimePeriod, lastTimePeriod) is rejected as invalid_dimension. An empty array or a blank value is no filter. A value holding "+" is split into separate values (OR); one holding "." matches nothing, since no Eurostat code contains it. Leave out "geo" when geo_level is set, and "time"/"time_period" when a period input is. A value that matches nothing is named in unmatchedValues, and a valid one with no cell in the selected periods in emptyValues; neither is an error.',
         ),
       geo_level: z
         .enum(GEO_LEVEL_VALUES)
         .optional()
         .describe(
-          'Filter by NUTS hierarchy level. Mutually exclusive with a "geo" key in filters. Options: "aggregate" (EU/EA totals), "country" (member and candidate states), "nuts1" (major regions), "nuts2" (basic regions), "nuts3" (small regions). How many codes a level holds varies by dataset; a code of the level with no cell in the match is named in emptyValues.',
+          'NUTS level to keep, mutually exclusive with filters.geo: "aggregate" (EU/EA totals), "country" (member and candidate states), "nuts1", "nuts2" or "nuts3". A code of the level with no cell in the match is named in emptyValues.',
         ),
       since_period: z
         .string()
         .optional()
         .describe(
-          `Start of the time range, inclusive. Accepted forms: ${PERIOD_FORMS} (e.g., "2020", "2023-Q1", "2024-01"). Extra leading zeros after the letter are dropped ("2020-Q01" is sent as "2020-Q1"), a day of the year is sent as three digits ("2026-D1" as "2026-D001"), and YYYY-A1 is sent as YYYY. Any form works on any dataset, read as a span of days, but Eurostat keeps only periods wholly inside the range, per frequency: "2022-06" on annual data excludes 2022, which starts before the bound, and a notice names that period when the response shows its frequency. A range whose first and last day are the same day is sent as that one date. A malformed or non-existent period (e.g., "2020-13") is rejected as invalid_period. Mutually exclusive with last_n_periods.`,
+          `Start of the range, inclusive: ${PERIOD_FORMS}, e.g. "2020", "2023-Q1", "2024-01". Any form works on any dataset, but Eurostat keeps only periods wholly inside the range, per frequency: a bound that falls inside a period excludes it, and a notice names that period when the response shows its frequency. A one-day range (both bounds on the same day) selects that day alone. A malformed or non-existent period, or a since_period after until_period, fails as invalid_period.`,
         ),
       until_period: z
         .string()
         .optional()
         .describe(
-          'End of the time range, inclusive (e.g., "2024"), in the same forms as since_period. Omit for data through the latest available period. A bound that falls inside a period excludes it here too: "2023-06" on annual data excludes 2023, which ends after the bound. The range must hold at least one day: a since_period that starts after until_period ends is rejected as invalid_period, and bounds of different frequencies are compared by day. Mutually exclusive with last_n_periods.',
+          'End of the range, inclusive (e.g., "2024"), in the forms and under the wholly-inside rule of since_period. Omit for data through the latest period.',
         ),
       last_n_periods: z
         .number()
@@ -106,7 +106,7 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
         .min(1)
         .optional()
         .describe(
-          "Return only the N most recent dataset time positions. Selected periods without populated cells for this slice are disclosed in a notice on successful queries, which advises a larger N only when every such period follows the slice's latest period with a cell. N counts back from the dataset's latest period, not from the latest period published for this slice, so a slice that lags can come back empty — increase N, or replace last_n_periods with a since_period/until_period range ending at a period the slice has published (until_period alone selects every period up to it). Mutually exclusive with since_period and until_period.",
+          "Select the N most recent time positions of the dataset. N counts back from the dataset's latest period, not this slice's, so a slice that lags can come back short or empty; a notice names each selected period with no cell. Mutually exclusive with since_period and until_period.",
         ),
       preview_limit: (clampLimits
         ? z.number().multipleOf(1).min(1)
@@ -114,32 +114,23 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
       )
         .default(25)
         .describe(
-          `How many matched observations to return inline, from the deterministic start of the JSON-stat cell order. Default 25; ${clampLimits ? 'positive integers above 500 are clamped to 500 with a notice' : 'maximum 500; larger values are rejected'}. This changes only the inline prefix: it does not reduce obsCount, missingObsCount, timeRange, the upstream response, or staged rows. Use filters or period controls to reduce the match itself.`,
+          `Observations returned inline, from the start of the dataset's cell order. Default 25; ${clampLimits ? 'positive integers above 500 are clamped to 500 with a notice' : 'maximum 500; larger values are rejected'}. Shortens only the inline prefix: the counts, timeRange and staged rows still cover the whole match.`,
         ),
       stage: z
         .boolean()
         .default(false)
         .describe(
-          'Stage every matched observation on a dataframe canvas, regardless of preview length or match size. Default false preserves automatic staging only above 5,000 observations. Ignored with an unavailable-staging notice on deployments without a canvas.',
+          'Stage the whole match as a SQL table whatever its size; by default only a match above 5,000 observations is staged. Without a dataframe canvas, a notice says nothing was staged.',
         ),
-      lang: z
-        .enum(['EN', 'FR', 'DE'])
-        .default('EN')
-        .describe(
-          'Language for labels in the response. Default is "EN". Options: "EN", "FR", "DE".',
-        ),
+      lang: z.enum(['EN', 'FR', 'DE']).default('EN').describe('Language of the labels.'),
       canvas_id: CanvasIdSchema.optional().describe(
-        'Reuse an existing dataframe canvas, so a result staged by this call lands beside earlier ones and can be joined against them. Pass the canvasId a previous eurostat_query_dataset or eurostat_download_dataset response returned; omit to start a fresh canvas. Used only when staging: stage=true or a match above 5,000 observations, on a canvas-enabled deployment.',
+        'A canvasId from an earlier staging response, to stage this result beside its tables for joins; omit for a fresh canvas. Used only when this call stages.',
       ),
     }),
     output: z.object({
       datasetCode: z.string().describe('Dataset code as provided.'),
       datasetLabel: z.string().describe('Human-readable dataset title.'),
-      dimensionsUsed: z
-        .array(z.string())
-        .describe(
-          'Ordered list of dimension codes present in the response (e.g., ["freq", "unit", "na_item", "geo", "time"]).',
-        ),
+      dimensionsUsed: z.array(z.string()).describe('Dimension codes in the response, in order.'),
       observations: z
         .array(
           z
@@ -151,117 +142,100 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
                 .object({})
                 .passthrough()
                 .describe(
-                  'Map of dimension code → {code, label}. One entry per dimension in dimensionsUsed, keyed by dimension code (e.g., {"geo": {"code": "DE", "label": "Germany"}, "time": {"code": "2023", "label": "2023"}}).',
+                  'Dimension code → {code, label}, one entry per dimensionsUsed code (e.g., {"geo": {"code": "DE", "label": "Germany"}}).',
                 ),
               value: z
                 .number()
                 .nullable()
                 .describe(
-                  'Numeric observation value, or null when Eurostat reports none — unavailable in the source data, withheld (confStatus says so), or published as text (valueText holds it).',
+                  'Numeric value, or null when unavailable, withheld (confStatus says so) or published as text (valueText).',
                 ),
               valueText: z
                 .string()
                 .optional()
                 .describe(
-                  'A value Eurostat published as text rather than a number, verbatim — PRODCOM (DS-*) flag and unit indicators such as QNTUNIT publish a unit like "KG" — with value null. PRODCOM\'s ":C" is decoded to confStatus "C" instead. Omitted for numeric and missing values.',
+                  'A value published as text, verbatim (a PRODCOM unit such as "KG"), with value null; PRODCOM\'s ":C" becomes confStatus "C" instead. Omitted otherwise.',
                 ),
               status: z
                 .object({
                   code: z.string().describe('OBS_FLAG code (e.g., "p", "e", "d").'),
-                  label: z
-                    .string()
-                    .describe(
-                      'Status description (e.g., "provisional", "estimated", "definition differs").',
-                    ),
+                  label: z.string().describe('Flag label (e.g., "provisional", "estimated").'),
                 })
                 .optional()
                 .describe(
-                  'Eurostat OBS_FLAG for this observation. Omitted for unflagged observations, and never carries a confidentiality code — that arrives in confStatus.',
+                  'OBS_FLAG marker. Omitted when unflagged; confidentiality arrives in confStatus.',
                 ),
               confStatus: z
                 .object({
                   code: z.string().describe('CONF_STATUS code: "C", "N", or "P".'),
-                  label: z
-                    .string()
-                    .describe(
-                      'Confidentiality description (e.g., "confidential", "not for publication").',
-                    ),
+                  label: z.string().describe('Confidentiality label (e.g., "confidential").'),
                 })
                 .optional()
                 .describe(
-                  'Eurostat CONF_STATUS for this observation — a different codelist from status. Present when Eurostat restricts the cell, which is usually why value is null. Omitted otherwise.',
+                  'CONF_STATUS marker, a separate codelist from status: present when Eurostat restricts the cell, usually why value is null.',
                 ),
             })
-            .describe(
-              'A single decoded observation with dimension values, numeric value, and the optional OBS_FLAG and CONF_STATUS markers.',
-            ),
+            .describe('One decoded observation.'),
         )
         .describe(
-          'The first preview_limit decoded observations in deterministic JSON-stat cell order — the leading combinations of the dataset dimensions, neither a sample nor necessarily the most recent periods. This prefix is independent of the 5,000-observation staging threshold. When tableName is set, the table holds every matched row; otherwise use filters or a period range to reduce the match itself.',
+          "The first preview_limit observations in the dataset's cell order: the leading dimension combinations, not a sample and not necessarily the latest periods. tableName, when set, holds every matched row.",
         ),
-      obsCount: z.number().describe('Total number of observations matched (before any cap).'),
+      obsCount: z.number().describe('Observations matched, over the whole match.'),
       truncated: z
         .boolean()
         .describe(
-          'True only when the match exceeded the 5,000-observation staging threshold. Independent of preview_limit: observations can be a shorter prefix while truncated is false. When tableName is set, call eurostat_dataframe_describe first and then eurostat_dataframe_query; when it is absent, use filters or period controls to reduce the match.',
+          'True only when the match exceeds 5,000 observations, the automatic staging threshold. Independent of preview_limit: observations can be a shorter prefix while this is false.',
         ),
       canvasId: z
         .string()
         .optional()
         .describe(
-          'Dataframe canvas holding the staged result. Pass to eurostat_dataframe_describe, eurostat_dataframe_query, or a later eurostat_query_dataset call. Omitted when nothing was staged.',
+          'Canvas holding the staged table; pass it as canvas_id to the dataframe tools or a later staging call. Omitted when nothing was staged.',
         ),
       tableName: z
         .string()
         .optional()
         .describe(
-          'Canvas table holding every matched observation in flat form — one code column per dimension plus a "_label" companion, then obs_value, obs_flag, obs_flag_label, conf_status, conf_status_label. A DS-* table also carries obs_value_text, the valueText of each row. Call eurostat_dataframe_describe with canvasId first to confirm the table and columns, then eurostat_dataframe_query. Omitted when nothing was staged: stage was false with at most 5,000 observations, or this deployment runs without a dataframe canvas.',
+          'Canvas table holding every matched observation, with flat dimension, label and obs_* columns. Call eurostat_dataframe_describe with canvasId for its columns first, then eurostat_dataframe_query. Omitted when nothing was staged.',
         ),
       stagedRowCount: z
         .number()
         .optional()
-        .describe(
-          'Rows written to the canvas table. Matches obsCount. Omitted alongside tableName when nothing was staged.',
-        ),
+        .describe('Rows staged; equals obsCount. Omitted with tableName.'),
       timeRange: z
         .object({
           start: z
             .string()
             .optional()
             .describe(
-              'Earliest period matched. Omitted when the match carries no time dimension and Eurostat reports no overall period.',
+              'Earliest period matched; omitted when neither the match nor Eurostat reports one.',
             ),
-          end: z
-            .string()
-            .optional()
-            .describe(
-              'Most recent period matched. Omitted when the match carries no time dimension and Eurostat reports no overall period.',
-            ),
+          end: z.string().optional().describe('Latest period matched, omitted the same way.'),
         })
         .describe(
-          'Time coverage of everything matched — the same set obsCount counts, so it can reach periods absent from observations when truncated is true. Each bound is omitted when neither the match nor Eurostat report it — an omitted bound is unknown, not empty.',
+          'Period coverage of the whole match (what obsCount counts), so it can reach past the inline observations. An omitted bound is unknown, not empty.',
         ),
       missingObsCount: z
         .number()
         .describe(
-          'Number of matched observations carrying no numeric value, counted across everything matched rather than only the returned rows. Covers both unavailable and withheld cells — a slice can be wholly confidential, so this equalling obsCount does not mean the data is absent. A missing observation is a cell Eurostat publishes without a number (with a flag, a confidentiality marker, or text); a period of a frequency the series carries in which it has no cell at all is an absent cell, counted in absentCellCount instead.',
+          'Matched observations with no numeric value, over the whole match: cells published without a number, carrying a flag, a confidentiality marker or text. A wholly confidential slice makes this equal obsCount without the data being absent. A period with no cell at all counts in absentCellCount instead.',
         ),
       absentCellCount: z
         .number()
         .describe(
-          "Periods the matched series lack: for each series (one combination of the non-time dimensions) with at least one cell in the match, the periods of a frequency it carries in which Eurostat publishes no cell for it, with no value and no flag. Only periods from that frequency's first to its latest period with a cell in any series count; a period before or after that span, which no series has a cell in, is named in the notice instead. Absent cells are not observations, so obsCount, missingObsCount, observations and staged rows leave them out. A series lacks no period of a frequency it does not carry: an annual series beside a monthly one lacks no months. 0 when every series has a cell in every period of those spans.",
+          "Periods the matched series lack: for each series (one combination of the non-time dimensions) with a cell in the match, the periods of a frequency it carries where Eurostat publishes no cell for it. Only periods from that frequency's first to its latest period with a cell in any series count; one before or after that span is named in the notice instead. A series lacks no period of a frequency it does not carry (an annual series lacks no months). Absent cells are not observations: obsCount, missingObsCount, observations and staged rows leave them out.",
         ),
       unmatchedValues: z
         .record(z.string(), z.array(z.string()))
         .optional()
         .describe(
-          'Filter values that matched nothing in the dataset, keyed by dimension code and spelled as sent (matching ignores case). The observations cover only the values that did match. Omitted when every filter value matched.',
+          'Filter values that matched nothing in the dataset, by dimension, as sent; the observations cover only the rest. Omitted when every value matched.',
         ),
       emptyValues: z
         .record(z.string(), z.array(z.string()))
         .optional()
         .describe(
-          'Values the query selects that the dataset has but this match carries no cell for, with no value and no flag in the selected periods, so they contribute no rows. Keyed by dimension code: filter values spelled as sent (matching ignores case), and under geo_level every "geo" code of that level with no cell. Never a value unmatchedValues holds, a time value, or a value of a dimension that neither filters nor geo_level selects. Such a value can carry data in other periods or beside other filter values. Omitted when every selected value has a cell.',
+          'Selected values the dataset has but this match carries no cell for, by dimension: filter values as sent, and under geo_level each "geo" code of that level with no cell. Never a time value or one in unmatchedValues. Such a value can have data in other periods or beside other filter values. Omitted when every selected value has a cell.',
         ),
     }),
     enrichment: {
@@ -270,19 +244,19 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
           filters: z
             .record(z.string(), z.array(z.string()))
             .describe(
-              'Dimension filters actually sent to Eurostat. Blank values, and dimensions left with no value (empty arrays included), are dropped and do not appear here.',
+              'Filters sent to Eurostat: "+" values split, blank values and empty dimensions dropped.',
             ),
-          geoLevel: z.string().optional().describe('NUTS geo level filter applied, if any.'),
-          sincePeriod: z.string().optional().describe('Start of time range applied, if any.'),
-          untilPeriod: z.string().optional().describe('End of time range applied, if any.'),
-          lastNPeriods: z.number().optional().describe('Last N periods filter applied, if any.'),
+          geoLevel: z.string().optional().describe('geo_level applied, if any.'),
+          sincePeriod: z.string().optional().describe('since_period applied, if any.'),
+          untilPeriod: z.string().optional().describe('until_period applied, if any.'),
+          lastNPeriods: z.number().optional().describe('last_n_periods applied, if any.'),
         })
-        .describe('Effective query parameters applied to the Eurostat API.'),
+        .describe('The query as sent.'),
       notice: z
         .string()
         .optional()
         .describe(
-          "Composed guidance for a period a bound falls inside, which Eurostat excludes, unmatched filter values, values with no cell (emptyValues), selected last_n_periods positions with no populated cells, periods no series has a cell in before or after a frequency's span with cells, absent cells (periods a series lacks inside that span, with how many series lack any), inline previews, staging and unavailable explicit staging. Period gaps list up to the newest 24 periods and values with no cell up to 24, each with an omitted count; staged matches give the describe-then-query sequence. Omitted when none of these disclosures applies.",
+          "Disclosures, when any apply: a period a bound excludes, unmatchedValues, emptyValues (up to 24 named), last_n_periods positions with no cell (the newest 24 named), periods before or after a frequency's span and absent cells (see absentCellCount), the inline preview, and staging, with the eurostat_dataframe_describe then eurostat_dataframe_query sequence.",
         ),
     },
 
@@ -309,27 +283,35 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
       {
         reason: 'not_found',
         code: JsonRpcErrorCode.NotFound,
-        when: 'The dataset code does not exist (HTTP 404 carrying Eurostat error id 100).',
+        when: 'The dataset code does not exist.',
         recovery:
           'Use eurostat_search_datasets or eurostat_browse_themes to find a valid dataset code.',
       },
       {
         reason: 'no_results',
         code: JsonRpcErrorCode.NotFound,
-        when: 'The query matched no observation cells — including Eurostat HTTP-200 error id 100. The dataset is valid, but no cell carries a value or a status flag for that filter combination and period range. When Eurostat returns the empty table, the error names the filter values that matched nothing (data.unmatchedValues) and, when the values of the dataset are read within 5 s, the codes and labels of each such dimension holding at most 25, or the total and a value search for each value sent otherwise (data.validValues), the selected periods that carry no value (data.matchedPeriods, the newest 24, with data.matchedPeriodCount counting all of them), and, for a range that selected no period, whether it misses the coverage, holds no whole period, or holds no published one. When error id 100 answers a query that set geo_level, the error names geo_level as the likely cause, and lists the dataset\'s dimensions when it has no "geo" dimension.',
+        when: "No cell of a valid dataset carries a value or flag for the filters and period range. The error names what it can: the filter values that matched nothing (data.unmatchedValues) with, when the dataset's values can be read, the codes of each such dimension holding at most 25 or a value search (data.validValues); the selected periods with no value (data.matchedPeriods, the newest 24; data.matchedPeriodCount counts all); whether a range misses the coverage, holds no whole period or no published one; and geo_level when it likely selects no code.",
         recovery:
           'Replace an unmatched value with a code the error lists, or verify dimension values with eurostat_get_dimension_values, and keep the period range inside the dataset coverage, holding a whole period; an unmatched value, an out-of-coverage range and a range inside one period all return no data rather than an error. When the error names geo_level, drop it instead, and filter the "geo" codes the query then returns, or the dimension that holds geography.',
       },
       {
         reason: 'invalid_period',
         code: JsonRpcErrorCode.ValidationError,
-        when: 'since_period or until_period is not a period literal, or names a month, quarter, semester, trimester, week or day that does not exist, or since_period starts after until_period ends. Checked before any request; a period Eurostat itself rejects maps here too.',
+        when: 'A period bound is not an accepted form or names a period that does not exist, or since_period starts after until_period ends (bounds of different frequencies compare by day). Checked before any request.',
         recovery: `Write since_period/until_period as ${PERIOD_FORMS}, for example "2020", "2020-01" or "2020-Q1", with since_period starting no later than until_period ends.`,
       },
       {
         reason: 'async_response',
         code: JsonRpcErrorCode.ServiceUnavailable,
-        when: "Eurostat returned an async warning or an HTTP-413 error array — the query matched too many observations, including an EXTRACTION_TOO_BIG refusal past Eurostat's 5,000,000-row limit.",
+        when: 'Eurostat is preparing this extraction in the background and serves the identical query minutes later. The server sends the request once and does not repeat it.',
+        retryable: true,
+        recovery:
+          'Repeat the identical call in a few minutes, once Eurostat has prepared the extraction, or filter on the dimensions this query left unfiltered or narrow the period range.',
+      },
+      {
+        reason: 'extraction_too_big',
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        when: 'Eurostat refused the query as too large to serve (its extraction limit is 5,000,000 rows); the same query is refused again.',
         retryable: false,
         recovery:
           'Filter on the dataset dimensions this query left unfiltered, or narrow the period range, then retry.',
@@ -337,33 +319,33 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
       {
         reason: 'invalid_dimension',
         code: JsonRpcErrorCode.ValidationError,
-        when: `${UNKNOWN_FILTER_KEY_WHEN} (HTTP 400, Eurostat error id 150), or only the one key Eurostat names when the dataset's structure cannot be read. A filter key that names a request control (lang, format, geoLevel, sinceTimePeriod, untilTimePeriod, lastTimePeriod, in any case) rather than a dimension fails here too, rejected before any request and naming the input that sets it.`,
+        when: `${UNKNOWN_FILTER_KEY_WHEN}, or only the key Eurostat names when the structure cannot be read. A request-control key (see filters) fails here before any request, naming the input that sets it.`,
         recovery: `${RENAME_FILTER_KEYS_HINT} When it lists none, eurostat_get_dataset_info lists them. Set a request control through its own input (lang, geo_level, since_period, until_period, last_n_periods), not filters.`,
       },
       {
         reason: 'conflicting_params',
         code: JsonRpcErrorCode.ValidationError,
-        when: 'Mutually exclusive parameters were combined: "geo" filter + geo_level, since_period/until_period + last_n_periods, or a "time"/"time_period" filter + since_period, until_period or last_n_periods. Checked before any request; Eurostat\'s own refusal of two time selections maps here too.',
+        when: 'Mutually exclusive inputs were combined: filters.geo with geo_level, since_period/until_period with last_n_periods, or a "time"/"time_period" filter with a period input.',
         recovery:
           'Keep one of each pair: filters.geo or geo_level; since_period/until_period or last_n_periods; filters.time or a period input.',
       },
       {
         reason: 'canvas_not_found',
         code: JsonRpcErrorCode.NotFound,
-        when: 'A canvas_id was supplied for staging but is unknown or its lifetime has elapsed.',
+        when: 'canvas_id is unknown or has expired.',
         recovery: 'Omit canvas_id so the response starts a fresh canvas and returns its canvasId.',
       },
       {
         reason: 'upstream_fault',
         code: JsonRpcErrorCode.ServiceUnavailable,
-        when: 'The Statistics API answered HTTP 5xx or could not be reached on every attempt of the retry loop. The error is marked retryable, except for HTTP 501, which is marked not retryable.',
+        when: 'The Statistics API failed or could not be reached on every attempt; retryable says whether a later call can succeed.',
         recovery:
           "The failure is on Eurostat's side, not in the request: when the error is marked retryable, call again in a few minutes.",
       },
       {
         reason: 'retry_deadline_exceeded',
         code: JsonRpcErrorCode.Timeout,
-        when: "The Statistics API did not complete the query within the server's request deadline (30 s by default), every attempt and backoff included: Eurostat can take longer than that to prepare an uncached extraction, or to send a large answer.",
+        when: "The Statistics API did not finish within the server's request deadline (30 s by default), every attempt included: an uncached extraction or a large answer can take longer.",
         recovery:
           'Repeat the call in a minute or two when Eurostat had not started answering, read the same slice with eurostat_download_dataset on a deployment with a dataframe canvas, or filter the dimensions the query left open.',
       },
@@ -461,15 +443,24 @@ export const createEurostatQueryDataset = (clampLimits: boolean) =>
         if (reason === 'invalid_period') {
           throw ctx.fail('invalid_period', (err as Error).message);
         }
-        if (reason === 'async_response') {
+        if (reason === 'async_response' || reason === 'extraction_too_big') {
           const dimensions = await dimensionsToNarrow(input.dataset_code, [], ctx);
           const filtered = [
             ...Object.keys(normalizeFilters(input.filters)),
             ...(input.geo_level ? ['geo'] : []),
           ];
-          throw ctx.fail('async_response', (err as Error).message, {
+          const advice = narrowingAdvice(input.dataset_code, dimensions, filtered);
+          // A served repeat can still outlast the request deadline, so the hint promises no fit.
+          if (reason === 'async_response') {
+            throw ctx.fail('async_response', (err as Error).message, {
+              recovery: {
+                hint: `Eurostat is preparing this extraction of "${input.dataset_code}" and serves the identical query once it is ready: repeat the call in a few minutes, or narrow it. ${advice}`,
+              },
+            });
+          }
+          throw ctx.fail('extraction_too_big', (err as Error).message, {
             recovery: {
-              hint: `Query matched too many observations for "${input.dataset_code}". ${narrowingAdvice(input.dataset_code, dimensions, filtered)}`,
+              hint: `Query matched too many observations for "${input.dataset_code}". ${advice}`,
             },
           });
         }
@@ -1004,20 +995,4 @@ function deadlineAdvice(
   }
   sentences.push(narrowingAdvice(code, dimensions, [...keys, ...(input.geo_level ? ['geo'] : [])]));
   return { hint: sentences.join(' '), literals };
-}
-
-/**
- * The range spanning a time filter's periods, as the bounds to send, or `undefined` when one
- * is not a period literal this server reads.
- */
-function periodSpan(values: string[]): { since: string; until: string } | undefined {
-  let first: { firstDay: number; period: string } | undefined;
-  let last: { lastDay: number; period: string } | undefined;
-  for (const value of values) {
-    const period = normalizePeriod(value.trim());
-    if ('problem' in period) return;
-    if (!first || period.firstDay < first.firstDay) first = period;
-    if (!last || period.lastDay > last.lastDay) last = period;
-  }
-  return first && last ? { since: first.period, until: last.period } : undefined;
 }

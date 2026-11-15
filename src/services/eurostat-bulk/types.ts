@@ -40,7 +40,7 @@ export interface TsvHeader {
  *
  * Nothing here is knowable before the stream is consumed — the body is chunked
  * with no `Content-Length` — so a consumer reads these only after the generator
- * has been exhausted (or has stopped on the byte budget).
+ * has been exhausted (or has stopped on a budget).
  */
 export interface BulkStats {
   /**
@@ -55,10 +55,11 @@ export interface BulkStats {
    */
   absentCellCount: number;
   /**
-   * True when the byte budget stopped the transfer before the body ended, so
-   * the rows are a prefix of the dataset rather than all of it.
+   * The budget that stopped the transfer before the body ended, so the rows are a prefix of
+   * the dataset rather than all of it: `bytes` for the decoded-byte budget, `time` for the
+   * call's time budget. `false` when the body ended on its own.
    */
-  budgetExceeded: boolean;
+  budgetExceeded: false | 'bytes' | 'time';
   /** Decoded TSV bytes accepted for parsing, never more than the configured byte budget. */
   bytesRead: number;
   /** Whether the response body arrived gzip-compressed. */
@@ -67,8 +68,8 @@ export interface BulkStats {
    * Filter values no emitted line carrying an observation holds, keyed by filter key, in the
    * spelling sent and each once (matching ignores case). Eurostat fails a request naming an
    * unknown code, so each is a value the dataset has with no observation in the range.
-   * Unset when every value has one, and on a transfer the byte budget cut short, whose
-   * unread lines could hold any of them.
+   * Unset when every value has one, and on a transfer a budget cut short, whose unread
+   * lines could hold any of them.
    */
   emptyValues?: Record<string, string[]>;
   /**

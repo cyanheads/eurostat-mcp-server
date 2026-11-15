@@ -64,7 +64,8 @@ describe('getServerConfig', () => {
       requestTimeoutMs: 30_000,
       metadataTimeoutMs: 120_000,
       tocCacheTtlMs: 43_200_000,
-      bulkTimeoutMs: 120_000,
+      // Under the 60 s an MCP SDK client waits by default (#108).
+      bulkTimeoutMs: 55_000,
       bulkMaxBytes: 52_428_800,
       dataframeDropEnabled: false,
       clampLimits: true,

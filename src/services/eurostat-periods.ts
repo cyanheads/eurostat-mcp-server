@@ -13,7 +13,7 @@ import type { OutsideSpan } from '@/services/eurostat-data/types.js';
  * `YYYY-A1`, the SDMX annual form, is read as well and sent as `YYYY`.
  */
 export const PERIOD_FORMS =
-  'YYYY, YYYY-MM, YYYY-MM-DD, YYYY-Qn (1–4), YYYY-Sn (1–2), YYYY-Tn (1–3), YYYY-Mnn (01–12), YYYY-Wnn (a week the year has, up to 53) or YYYY-Dnnn (a day the year has, up to 366)';
+  'YYYY, YYYY-MM, YYYY-MM-DD, YYYY-Qn (1–4), YYYY-Sn (1–2), YYYY-Tn (1–3), YYYY-Mnn (01–12), YYYY-Wnn (up to 53) or YYYY-Dnnn (up to 366)';
 
 /**
  * `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, the annual `YYYY-A1`, or a frequency letter (in
@@ -608,4 +608,20 @@ export function cutNotice(cuts: PeriodCut[], sent: PeriodRange): string {
       return `${named} ${both ? 'fall' : 'falls'} inside ${cut.frequency} period ${cut.period}, which Eurostat excludes: it keeps only periods wholly inside the range. ${cutSelector(cut)} ${both ? 'together include' : 'includes'} that period if this slice has it.`;
     })
     .join(' ');
+}
+
+/**
+ * The range spanning a time filter's periods, as the bounds to send, or `undefined` when one
+ * is not a period literal this server reads.
+ */
+export function periodSpan(values: string[]): { since: string; until: string } | undefined {
+  let first: { firstDay: number; period: string } | undefined;
+  let last: { lastDay: number; period: string } | undefined;
+  for (const value of values) {
+    const period = normalizePeriod(value.trim());
+    if ('problem' in period) return;
+    if (!first || period.firstDay < first.firstDay) first = period;
+    if (!last || period.lastDay > last.lastDay) last = period;
+  }
+  return first && last ? { since: first.period, until: last.period } : undefined;
 }

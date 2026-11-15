@@ -1,7 +1,8 @@
 /**
  * @fileoverview Eurostat Bulk Service — streaming client for the SDMX 2.1 TSV
  * dissemination endpoint. Builds the positional dimension key, sniffs gzip off
- * the stream, enforces a byte budget mid-transfer, classifies XML SOAP faults
+ * the stream, enforces a byte budget and the call's time budget mid-transfer, keeping
+ * the rows read when either ends it, classifies XML SOAP faults
  * and the asynchronous queue envelope, and expands the wide TSV layout into
  * one row per non-blank cell.
  * @module services/eurostat-bulk/eurostat-bulk-service
@@ -37,6 +38,7 @@ import {
   OBS_VALUE_COLUMN,
   OBS_VALUE_TEXT_COLUMN,
 } from '@/services/eurostat-codelists.js';
+import { TIME_DIMENSION_KEYS } from '@/services/eurostat-data/eurostat-data-service.js';
 import type { OutsideSpan } from '@/services/eurostat-data/types.js';
 import { normalizeFilters, unknownDimensionsMessage } from '@/services/eurostat-filters.js';
 import { dataHostFor, isComextDataset } from '@/services/eurostat-hosts.js';
@@ -60,8 +62,8 @@ import {
 /**
  * Decoded characters buffered before an XML body is classified.
  *
- * Both non-data shapes are small — the largest SOAP fault observed is under 400
- * bytes and the queue envelope under 350 — so this only has to hold one of them.
+ * Both non-data shapes are small — the largest SOAP fault and the largest queue
+ * envelope observed are each under 400 bytes — so this only has to hold one of them.
  * It deliberately does **not** bound the search for the TSV header's line break:
  * that line carries one field per period and runs to 166 KB on a daily series.
  */
@@ -99,13 +101,18 @@ const PERIOD_FAULT_CLAUSE = /allowed: TIME_PERIOD: [<>]=/;
  * instead of the dataset — parsed as TSV it yields a header row of XML, so it is
  * detected here rather than downstream.
  *
+ * The ticket means Eurostat is preparing the extraction in the background, and it
+ * serves the identical download minutes later, so `async_queued` is retryable by the
+ * caller, never by {@link EurostatBulkService.startDownload}'s retry loop, which
+ * resends only an outage: the repeat is the caller's, minutes later.
+ *
  * Always throws.
  */
 export function classifyXmlBody(xml: string, datasetCode: string): never {
   if (xml.includes('syncResponse') || xml.includes('<status>SUBMITTED</status>')) {
     throw serviceUnavailable(
-      `Eurostat queued this extraction instead of returning data: the SDMX endpoint answered with an asynchronous "SUBMITTED" ticket for "${datasetCode}". The queued result is not retrievable through this server. Narrow the request with dimension filters or a period range so Eurostat serves it synchronously.`,
-      { reason: 'async_queued', datasetCode, retryable: false },
+      `Eurostat is preparing the extraction of "${datasetCode}" in the background and has not served it yet: the SDMX endpoint answered with a "SUBMITTED" queue ticket instead of data.`,
+      { reason: 'async_queued', datasetCode, retryable: true },
     );
   }
 
@@ -273,7 +280,9 @@ export function parseHeader(line: string): TsvHeader {
  * A filter key names its dimension in any case (`GEO` places the same as `geo`),
  * as the Statistics API reads it; keys that differ only in case pool their values.
  * A blank value is unset rather than an empty member of the `+` list, and a value
- * holding `+` arrives here already split into its codes.
+ * holding `+` arrives here already split into its codes. A key naming no dimension
+ * fails the build, every such key named at once; the message adds where the period
+ * goes only when one of them is a time key, which the order never lists.
  *
  * Returns `undefined` when no filter applies. An all-wildcard key is accepted
  * by Eurostat, but omitting the segment asks the same question without staking
@@ -294,8 +303,9 @@ export function buildKeyPath(
     else byDimension.set(dim, [...(byDimension.get(dim) ?? []), ...values]);
   }
   if (unknown.length > 0) {
+    const timeKey = unknown.some((key) => TIME_DIMENSION_KEYS.has(key.toLowerCase()));
     throw validationError(
-      `${unknownDimensionsMessage(unknown, dimensionOrder)} The time dimension is filtered with since_period/until_period instead.`,
+      `${unknownDimensionsMessage(unknown, dimensionOrder)}${timeKey ? ' The time dimension is filtered with since_period/until_period instead.' : ''}`,
       { reason: 'invalid_dimension', unknownDimensions: unknown, dimensionOrder },
     );
   }
@@ -359,9 +369,16 @@ export class EurostatBulkService {
    * could not be reached, both of which fail before any of the body is read, so a
    * retry repeats a request rather than a transfer. One that outlasts the retries
    * fails as a retryable `upstream_fault`. A timeout, a fault in the request, and a
-   * failure once the body is streaming are surfaced on the first attempt: a bulk body
-   * streams for up to `EUROSTAT_BULK_TIMEOUT_MS`, so re-running the request then
-   * would cost the caller another full transfer.
+   * failure once the body is streaming are surfaced on the first attempt: re-running
+   * the request then would cost the caller another full transfer.
+   *
+   * One time budget, `EUROSTAT_BULK_TIMEOUT_MS` counted from `startedAt` (when the
+   * caller's call began), covers every attempt, every backoff, the body and whatever
+   * pulls it: the fetch's own timer is armed to the budget's end and stays armed until
+   * the body closes. Reached before the first row, the download fails as
+   * `retry_deadline_exceeded`; reached once rows have streamed, the row generator ends
+   * on them as it does on the byte budget ({@link expandRows}). A budget already spent
+   * sends nothing.
    */
   async startDownload(
     datasetCode: string,
@@ -370,9 +387,11 @@ export class EurostatBulkService {
     sinceP: string | undefined,
     untilP: string | undefined,
     ctx: Context,
+    startedAt = Date.now(),
   ): Promise<BulkDownload> {
     const { bulkTimeoutMs, bulkMaxBytes } = getServerConfig();
     const keyPath = buildKeyPath(dimensionOrder, filters);
+    const deadlineMs = remainingBudgetMs(datasetCode, startedAt);
     /**
      * Eurostat ignores a range of one day and answers with the whole series, and this
      * endpoint ignores `time`. So one day is asked for as that day and the next, and
@@ -388,34 +407,57 @@ export class EurostatBulkService {
       sinceP,
       untilP,
       maxBytes: bulkMaxBytes,
+      remainingMs: deadlineMs,
     });
 
-    const startedAt = Date.now();
-    const normalizeDeadline = (error: unknown): unknown => {
-      if (
-        !ctx.signal.aborted &&
-        Date.now() - startedAt >= bulkTimeoutMs &&
-        error instanceof McpError &&
-        error.code === JsonRpcErrorCode.Timeout
-      ) {
-        return timeout(
-          `The bulk download exceeded its ${bulkTimeoutMs}ms operation deadline.`,
-          {
-            reason: 'retry_deadline_exceeded',
-            deadlineMs: bulkTimeoutMs,
-            elapsedMs: Date.now() - startedAt,
-          },
-          { cause: error },
-        );
-      }
-      return error;
+    const stats: BulkStats = {
+      absentCellCount: 0,
+      bytesRead: 0,
+      budgetExceeded: false,
+      compressed: false,
+      rowCount: 0,
+      missingCount: 0,
+      periodsSeen: [],
+    };
+    /** The time budget's failure once it has run out, unless the caller cancelled. */
+    const budgetOver = (cause?: unknown): McpError | undefined => {
+      const elapsedMs = Date.now() - startedAt;
+      if (ctx.signal.aborted || elapsedMs < bulkTimeoutMs) return;
+      return timeBudgetFailure(datasetCode, bulkTimeoutMs, elapsedMs, cause);
+    };
+    /**
+     * The time budget as the failure it ends in, for a `Timeout` that lands once the budget
+     * has run: the fetch's own timer or the retry clock, both armed to the budget's end.
+     * `undefined` for any other failure, and for every failure of a call the caller
+     * cancelled, which keeps its own outcome whatever the attempt saw.
+     */
+    const budgetSpent = (error: unknown): McpError | undefined =>
+      error instanceof McpError && error.code === JsonRpcErrorCode.Timeout
+        ? budgetOver(error)
+        : undefined;
+    /**
+     * A failure once the body is streaming: the time budget's, or a transport failure that
+     * broke the body off, which names the dataset and endpoint rather than reaching the
+     * caller as a bare network error. The break-off is an outage, so a later call can
+     * succeed; `bytesRead` tells it from an endpoint that could not be reached at all.
+     */
+    const bodyFailure = (error: unknown): unknown => {
+      const spent = budgetSpent(error);
+      if (spent) return spent;
+      if (ctx.signal.aborted || !isUpstreamOutage(error)) return error;
+      return serviceUnavailable(
+        `Eurostat's SDMX data endpoint broke off the body of "${datasetCode}" after ${stats.bytesRead} decoded bytes, before it ended.`,
+        { reason: 'upstream_fault', datasetCode, bytesRead: stats.bytesRead, retryable: true },
+        { cause: error },
+      );
     };
     const response = await withRetry(
       async ({ signal, remainingMs }) => {
         try {
           return await fetchWithTimeout(
             url.toString(),
-            Math.min(bulkTimeoutMs, remainingMs),
+            // The retry clock's own remainder: the timer then fires at the budget's end.
+            remainingMs,
             fetchCtx,
             {
               signal,
@@ -435,20 +477,26 @@ export class EurostatBulkService {
         context: fetchCtx,
         baseDelayMs: 1000,
         signal: ctx.signal,
-        deadlineMs: bulkTimeoutMs,
-        // An outage, minus the 501 the fetch layer marks deterministic.
+        deadlineMs,
+        /**
+         * An outage, minus the 501 the fetch layer marks deterministic. A refusal the
+         * caller may repeat later — the retryable `async_queued` — is no outage, so the
+         * default predicate's reading of its `retryable` never resends it here.
+         */
         isTransient: (error) => isUpstreamOutage(error) && defaultIsTransient(error),
       },
     ).catch((error: unknown) => {
       // A download the caller cancelled is the caller's outcome, whatever the last attempt saw.
       if (ctx.signal.aborted) throw error;
       throw (
+        budgetSpent(error) ??
         upstreamOutage(
           error,
           "Eurostat's SDMX data endpoint",
           `the bulk download of dataset "${datasetCode}"`,
           { datasetCode },
-        ) ?? error
+        ) ??
+        error
       );
     });
 
@@ -458,16 +506,6 @@ export class EurostatBulkService {
         { reason: 'upstream_fault', datasetCode },
       );
     }
-
-    const stats: BulkStats = {
-      absentCellCount: 0,
-      bytesRead: 0,
-      budgetExceeded: false,
-      compressed: false,
-      rowCount: 0,
-      missingCount: 0,
-      periodsSeen: [],
-    };
 
     let decoded: AsyncGenerator<string> | undefined;
     try {
@@ -491,14 +529,40 @@ export class EurostatBulkService {
             header,
             stats,
             { filters: normalizeFilters(filters), onlyPeriod: oneDay?.date, valueText },
-            { datasetCode, maxBytes: bulkMaxBytes, normalizeDeadline },
+            { budgetOver, budgetSpent, bodyFailure, datasetCode, maxBytes: bulkMaxBytes },
           ),
       };
     } catch (error) {
       await decoded?.return(undefined);
-      throw normalizeDeadline(error);
+      throw bodyFailure(error);
     }
   }
+}
+
+/**
+ * Milliseconds left of a download call's time budget, `EUROSTAT_BULK_TIMEOUT_MS` counted
+ * from `startedAt`, when the call began. Throws `retry_deadline_exceeded` when none is left,
+ * so a request that would start on the deadline is never sent.
+ */
+export function remainingBudgetMs(datasetCode: string, startedAt: number): number {
+  const { bulkTimeoutMs } = getServerConfig();
+  const elapsedMs = Date.now() - startedAt;
+  if (elapsedMs >= bulkTimeoutMs) throw timeBudgetFailure(datasetCode, bulkTimeoutMs, elapsedMs);
+  return bulkTimeoutMs - elapsedMs;
+}
+
+/** The call's time budget ran out before the download yielded a row. */
+function timeBudgetFailure(
+  datasetCode: string,
+  budgetMs: number,
+  elapsedMs: number,
+  cause?: unknown,
+): McpError {
+  return timeout(
+    `The download of "${datasetCode}" ran out of its ${budgetMs}ms time budget before the first row arrived.`,
+    { reason: 'retry_deadline_exceeded', deadlineMs: budgetMs, elapsedMs },
+    cause === undefined ? undefined : { cause },
+  );
 }
 
 /**
@@ -611,13 +675,12 @@ async function* budgetedText(
       if (!value || value.length === 0) continue;
       const accepted = Math.min(value.length, maxBytes - stats.bytesRead);
       stats.bytesRead += accepted;
-      stats.budgetExceeded = accepted < value.length;
-      const text = decoder.decode(accepted === value.length ? value : value.subarray(0, accepted), {
-        stream: true,
-      });
+      const cut = accepted < value.length;
+      if (cut) stats.budgetExceeded = 'bytes';
+      const text = decoder.decode(cut ? value.subarray(0, accepted) : value, { stream: true });
       if (text) yield text;
       // A budget-cut UTF-8 sequence is an incomplete suffix, never a replacement character.
-      if (stats.budgetExceeded) return;
+      if (cut) return;
     }
     const tail = decoder.decode();
     if (tail) yield tail;
@@ -644,7 +707,7 @@ async function* budgetedText(
  * Its length is proportional to the dataset's period count — 166 KB and 13,852
  * fields on a daily series — so capping the search would parse a prefix of it as
  * the whole header, silently drop every period column past the cap, and read the
- * header's own tail as a data line. The byte budget is what bounds this loop.
+ * header's own tail as a data line. The byte and time budgets are what bound this loop.
  */
 async function readHeader(
   chunks: AsyncGenerator<string>,
@@ -671,7 +734,7 @@ async function readHeader(
 
   const newline = buf.indexOf('\n');
   if (newline === -1) {
-    if (stats.budgetExceeded) throw byteBudgetFailure(datasetCode, stats, maxBytes);
+    if (stats.budgetExceeded === 'bytes') throw byteBudgetFailure(datasetCode, stats, maxBytes);
     if (buf.trim() === '') {
       throw serviceUnavailable(
         `Eurostat SDMX endpoint returned an empty body for "${datasetCode}".`,
@@ -689,7 +752,10 @@ async function readHeader(
   };
 }
 
-/** A local transfer limit prevented the download from yielding a usable row. */
+/**
+ * A local transfer limit prevented the download from yielding a usable row. It carries no
+ * recovery hint: the download tool's `byte_budget_exceeded` contract entry supplies it.
+ */
 function byteBudgetFailure(datasetCode: string, stats: BulkStats, maxBytes: number): McpError {
   return validationError(
     `The ${maxBytes}-byte decoded TSV budget was exhausted before a complete row could be read for "${datasetCode}".`,
@@ -699,9 +765,6 @@ function byteBudgetFailure(datasetCode: string, stats: BulkStats, maxBytes: numb
       maxBytes,
       bytesRead: stats.bytesRead,
       rowCount: stats.rowCount,
-      recovery: {
-        hint: 'Add dimension filters or narrow since_period/until_period to reduce the transfer, or raise EUROSTAT_BULK_MAX_BYTES.',
-      },
     },
   );
 }
@@ -729,9 +792,12 @@ function stripCr(line: string): string {
  * span go to `outsideSpans` with their row count. A filter value no line with an
  * observation carries goes to `emptyValues`, unless the budget cut the transfer short.
  *
- * Only complete lines are parsed. When the byte budget cancels the transfer
- * mid-line the trailing fragment is dropped rather than parsed into a row with
- * silently truncated fields, so every count, span included, describes the lines emitted.
+ * Only complete lines are parsed. When a budget ends the transfer mid-line the trailing
+ * fragment is dropped rather than parsed into a row with silently truncated fields, so
+ * every count, span included, describes the lines emitted. The byte budget ends the text
+ * stream cleanly; the time budget errors the body read, and once a row has been emitted
+ * that error ends the rows the same way, with `budgetExceeded` `time`. Before the first
+ * row it is the download's failure (`retry_deadline_exceeded`), as is every other failure.
  *
  * `request.filters` holds the filters the key was built from, `request.valueText` adds
  * the `obs_value_text` column holding a cell's text value, and `request.onlyPeriod` keeps
@@ -748,9 +814,14 @@ async function* expandRows(
     valueText: boolean;
   },
   failure: {
+    /** The body failure, classified, as {@link EurostatBulkService.startDownload} reads it. */
+    bodyFailure: (error: unknown) => unknown;
+    /** The time budget's failure once it has run out, read between chunks. */
+    budgetOver: () => McpError | undefined;
+    /** The time budget's failure, when `error` is the budget running out. */
+    budgetSpent: (error: unknown) => McpError | undefined;
     datasetCode: string;
     maxBytes: number;
-    normalizeDeadline: (error: unknown) => unknown;
   },
 ): AsyncGenerator<BulkRow> {
   const { filters, onlyPeriod, valueText } = request;
@@ -901,20 +972,37 @@ async function* expandRows(
   };
 
   try {
-    yield* flush();
-    for await (const chunk of chunks) {
-      buf += chunk;
+    let timeUp: McpError | undefined;
+    try {
       yield* flush();
+      for await (const chunk of chunks) {
+        buf += chunk;
+        yield* flush();
+        /**
+         * The fetch's timer cuts a body still arriving. One the runtime already holds whole,
+         * a gzip body whose parsing rather than the wire sets the pace, can outlive that
+         * timer's abort, so the budget is also read here, between chunks.
+         */
+        timeUp = failure.budgetOver();
+        if (timeUp) break;
+      }
+      // The final line of a complete body has no trailing newline. A budget-cancelled
+      // body's trailing fragment is not a final line — it is a line cut in half.
+      if (!stats.budgetExceeded && !timeUp) yield* emit(buf);
+    } catch (error) {
+      // Only a body read throws here: the rows' consumer stops this generator by return.
+      timeUp = failure.budgetSpent(error);
+      if (!timeUp) throw failure.bodyFailure(error);
     }
-    // The final line of a complete body has no trailing newline. A budget-cancelled
-    // body's trailing fragment is not a final line — it is a line cut in half.
-    if (!stats.budgetExceeded) yield* emit(buf);
+    if (timeUp) {
+      if (stats.rowCount === 0) throw timeUp;
+      // Rows have streamed, so they stand as the prefix, the cut line in `buf` dropped.
+      stats.budgetExceeded = 'time';
+    }
 
     settle();
-    if (stats.budgetExceeded && stats.rowCount === 0)
+    if (stats.budgetExceeded === 'bytes' && stats.rowCount === 0)
       throw byteBudgetFailure(failure.datasetCode, stats, failure.maxBytes);
-  } catch (error) {
-    throw failure.normalizeDeadline(error);
   } finally {
     /**
      * Close the text stream on every exit. A consumer that stops early — a canvas

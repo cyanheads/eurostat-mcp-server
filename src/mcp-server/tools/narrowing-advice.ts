@@ -94,11 +94,12 @@ const HINT_READ_DEADLINE_MS = 5_000;
 
 /**
  * The dataset's key dimensions, for a recovery hint to name. `known` is the order the
- * request already read, if any; otherwise the structure definition is read now, a few
- * KB. The failure being explained carries no dimension list, and its hint is only more
- * specific with one, so a failed or late read returns `undefined` rather than replacing
- * that failure with a second error. A cancelled call is the exception: its abort is
- * rethrown so it reaches the caller as a cancellation.
+ * request already read, if any; otherwise the service's cached order, or, when it holds
+ * none, the structure definition read now, a few KB. The failure being explained
+ * carries no dimension list, and its hint is only more specific with one, so a failed
+ * or late read returns `undefined` rather than replacing that failure with a second
+ * error. A cancelled call is the exception: its abort is rethrown so it reaches the
+ * caller as a cancellation.
  */
 export async function dimensionsToNarrow(
   datasetCode: string,
@@ -247,6 +248,6 @@ export function narrowingAdvice(
   const done = new Set(filtered.map((dim) => dim.toLowerCase()));
   const open = dimensions.filter((dim) => dim !== 'time' && !done.has(dim.toLowerCase()));
   return open.length > 0
-    ? `Filter on ${open.join(', ')} — the dimensions of "${datasetCode}" this request left unfiltered — or narrow since_period/until_period.`
+    ? `Filter on ${open.join(', ')} — the ${open.length === 1 ? 'dimension' : 'dimensions'} of "${datasetCode}" this request left unfiltered — or narrow since_period/until_period.`
     : `Every dimension of "${datasetCode}" (${dimensions.join(', ')}) is already filtered: select fewer values per dimension, or a narrower since_period/until_period range.`;
 }

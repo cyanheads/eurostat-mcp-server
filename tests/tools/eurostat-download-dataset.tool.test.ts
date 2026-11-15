@@ -33,7 +33,7 @@ import {
   EurostatBulkService,
   getEurostatBulkService,
 } from '@/services/eurostat-bulk/eurostat-bulk-service.js';
-import type { BulkDownload, BulkRow } from '@/services/eurostat-bulk/types.js';
+import type { BulkDownload, BulkRow, BulkStats } from '@/services/eurostat-bulk/types.js';
 import {
   EurostatDataService,
   getEurostatDataService,
@@ -80,7 +80,11 @@ function makeRows(count: number): BulkRow[] {
  */
 function stubDownload(
   rows: BulkRow[],
-  overrides: { budgetExceeded?: boolean; bytesRead?: number; compressed?: boolean } = {},
+  overrides: {
+    budgetExceeded?: BulkStats['budgetExceeded'];
+    bytesRead?: number;
+    compressed?: boolean;
+  } = {},
 ): BulkDownload {
   const download: BulkDownload = {
     header: { dimensions: DIMENSIONS, periods: PERIODS },
@@ -137,7 +141,7 @@ describe('eurostatDownloadDataset — input schema', () => {
     const previousCanvas = withRealCanvas();
     setCanvas(undefined);
     try {
-      mockDownload(stubDownload(makeRows(200), { budgetExceeded: true }));
+      mockDownload(stubDownload(makeRows(200), { budgetExceeded: 'bytes' }));
       const result = await runToolContract(eurostatDownloadDataset, {
         dataset_code: 'nama_10_gdp',
         preview_limit: 1000,
@@ -350,8 +354,8 @@ describe('eurostatDownloadDataset — with a canvas', () => {
     expect(structured.notice).not.toContain('preview_limit');
   });
 
-  it('surfaces a budget-truncated download as a flag plus a notice naming the knob', async () => {
-    mockDownload(stubDownload(makeRows(5), { budgetExceeded: true, bytesRead: 52_428_912 }));
+  it('surfaces a budget-truncated download as a flag plus a notice naming the budget, not its variable', async () => {
+    mockDownload(stubDownload(makeRows(5), { budgetExceeded: 'bytes', bytesRead: 52_428_912 }));
     const ctx = createMockContext({ errors: eurostatDownloadDataset.errors, tenantId: 'default' });
 
     const result = await eurostatDownloadDataset.handler(parse({}), ctx);
@@ -359,11 +363,12 @@ describe('eurostatDownloadDataset — with a canvas', () => {
     expect(result.bytesRead).toBe(52_428_912);
     const notice = getEnrichment(ctx).notice as string;
     expect(notice).toContain('byte budget');
-    expect(notice).toContain('EUROSTAT_BULK_MAX_BYTES');
+    expect(notice).toContain('Add dimension filters or a since_period/until_period range');
+    expect(notice).not.toContain('EUROSTAT_');
   });
 
   it('composes staged guidance with byte-budget and inline-preview disclosure', async () => {
-    mockDownload(stubDownload(makeRows(5), { budgetExceeded: true, bytesRead: 52_428_912 }));
+    mockDownload(stubDownload(makeRows(5), { budgetExceeded: 'bytes', bytesRead: 52_428_912 }));
 
     const result = await runToolContract(eurostatDownloadDataset, {
       dataset_code: 'nama_10_gdp',
@@ -382,7 +387,7 @@ describe('eurostatDownloadDataset — with a canvas', () => {
     const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
     expect(text).not.toContain('**truncated:**');
     expect(text).toContain('**15 total**');
-    expect(text).toContain('EUROSTAT_BULK_MAX_BYTES');
+    expect(text).not.toContain('EUROSTAT_');
     expect(text).toMatch(
       /byte budget.*preview_limit=3 returns the first 3 of 15.*eurostat_dataframe_describe.*eurostat_dataframe_query/is,
     );
@@ -390,7 +395,7 @@ describe('eurostatDownloadDataset — with a canvas', () => {
 
   it('keeps the no-canvas sentence after the budget and preview sentences', async () => {
     setCanvas(undefined);
-    mockDownload(stubDownload(makeRows(5), { budgetExceeded: true, bytesRead: 52_428_912 }));
+    mockDownload(stubDownload(makeRows(5), { budgetExceeded: 'bytes', bytesRead: 52_428_912 }));
     const ctx = createMockContext({ errors: eurostatDownloadDataset.errors, tenantId: 'default' });
     await eurostatDownloadDataset.handler(parse({ preview_limit: 3 }), ctx);
     expect(getEnrichment(ctx).notice).toMatch(
@@ -444,7 +449,12 @@ describe('eurostatDownloadDataset — with a canvas', () => {
       parse({ filters: { geo: ['AT'] } }),
       createMockContext({ errors: eurostatDownloadDataset.errors, tenantId: 'default' }),
     );
-    expect(getDimensionOrder).toHaveBeenCalledWith('nama_10_gdp', expect.anything());
+    // The third argument, the read's deadline, is pinned by the time-budget tests (#108).
+    expect(getDimensionOrder).toHaveBeenCalledWith(
+      'nama_10_gdp',
+      expect.anything(),
+      expect.any(Number),
+    );
   });
 
   it('passes the resolved dimension order through to the service', async () => {
@@ -461,6 +471,8 @@ describe('eurostatDownloadDataset — with a canvas', () => {
       '2022',
       undefined,
       expect.anything(),
+      // When the call began, which the download's time budget counts from (#108).
+      expect.any(Number),
     );
   });
 
@@ -498,8 +510,8 @@ describe('eurostatDownloadDataset — without a canvas', () => {
     expect(result.canvasId).toBeUndefined();
     expect(result.stagedRowCount).toBeUndefined();
     const notice = getEnrichment(ctx).notice as string;
-    expect(notice).toContain('without a dataframe canvas');
-    expect(notice).toContain('CANVAS_PROVIDER_TYPE=duckdb');
+    expect(notice).toContain('This deployment runs without a dataframe canvas');
+    expect(notice).not.toContain('CANVAS_PROVIDER_TYPE');
   });
 
   it('still drains the download so the counters describe it, not the preview', async () => {
@@ -539,7 +551,7 @@ describe('eurostatDownloadDataset — without a canvas', () => {
     await eurostatDownloadDataset.handler(parse({ preview_limit: 4 }), ctx);
     const notice = getEnrichment(ctx).notice as string;
     expect(notice).toContain(
-      'only the 4 rows returned inline are retained, and the other 26 were counted and discarded. Raise preview_limit to 30 to return every one inline, or set CANVAS_PROVIDER_TYPE=duckdb to keep the download.',
+      'only the 4 rows returned inline are retained, and the other 26 were counted and discarded. Raise preview_limit to 30 to return every one inline.',
     );
     expect(notice).not.toContain('small enough to return whole');
   });
@@ -550,13 +562,13 @@ describe('eurostatDownloadDataset — without a canvas', () => {
     await eurostatDownloadDataset.handler(parse({}), ctx);
     const notice = getEnrichment(ctx).notice as string;
     expect(notice).toContain(
-      'only the 25 rows returned inline are retained, and the other 575 were counted and discarded. Set CANVAS_PROVIDER_TYPE=duckdb to keep the download, or use eurostat_query_dataset with dimension filters to fetch a slice small enough to return whole.',
+      'only the 25 rows returned inline are retained, and the other 575 were counted and discarded. Use eurostat_query_dataset with dimension filters to fetch a slice small enough to return whole.',
     );
     expect(notice).not.toContain('Raise preview_limit');
   });
 
   it('carries both the budget notice and the no-canvas notice when both apply', async () => {
-    mockDownload(stubDownload(makeRows(10), { budgetExceeded: true }));
+    mockDownload(stubDownload(makeRows(10), { budgetExceeded: 'bytes' }));
     const ctx = createMockContext({ errors: eurostatDownloadDataset.errors, tenantId: 'default' });
     await eurostatDownloadDataset.handler(parse({}), ctx);
     const notice = getEnrichment(ctx).notice as string;
@@ -565,7 +577,7 @@ describe('eurostatDownloadDataset — without a canvas', () => {
   });
 
   it('never advertises dataframe tools when the canvas is disabled', async () => {
-    mockDownload(stubDownload(makeRows(4), { budgetExceeded: true }));
+    mockDownload(stubDownload(makeRows(4), { budgetExceeded: 'bytes' }));
     const result = await runToolContract(eurostatDownloadDataset, {
       dataset_code: 'nama_10_gdp',
       preview_limit: 3,
@@ -624,16 +636,16 @@ describe('eurostatDownloadDataset — error contract', () => {
     });
   }
 
-  it('maps a download past its bulk deadline onto the declared Timeout with its timings and a narrowing hint', async () => {
+  it('maps a download past its time budget onto the declared Timeout with its timings and a narrowing hint', async () => {
     vi.mocked(getEurostatBulkService).mockReturnValue({
       startDownload: vi.fn().mockRejectedValue(
         new McpError(
           JsonRpcErrorCode.Timeout,
-          'The bulk download exceeded its 120000ms operation deadline.',
+          'The download of "nama_10_gdp" ran out of its 55000ms time budget before the first row arrived.',
           {
             reason: 'retry_deadline_exceeded',
-            deadlineMs: 120_000,
-            elapsedMs: 120_412,
+            deadlineMs: 55_000,
+            elapsedMs: 55_012,
           },
         ),
       ),
@@ -645,14 +657,17 @@ describe('eurostatDownloadDataset — error contract', () => {
         code: JsonRpcErrorCode.Timeout,
         data: {
           reason: 'retry_deadline_exceeded',
-          deadlineMs: 120_000,
-          elapsedMs: 120_412,
+          deadlineMs: 55_000,
+          elapsedMs: 55_012,
           recovery: { hint: expect.stringContaining('"nama_10_gdp"') },
         },
       },
     });
     const hint = (result.structuredContent as { error: { data: { recovery: { hint: string } } } })
       .error.data.recovery.hint;
+    expect(hint).toContain("read no row within this call's time budget");
+    // The budget can run out on an outage as well as on a heavy request: both routes.
+    expect(hint).toContain('Retry in a few minutes, or narrow it');
     expect(hint).toContain('since_period/until_period');
     const text = result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
     expect(text).toContain(`Recovery: ${hint}`);
@@ -683,7 +698,7 @@ describe('eurostatDownloadDataset — error contract', () => {
       .error.data.recovery.hint;
     expect(hint).toContain('SDMX structure endpoint');
     expect(hint).toContain('eurostat_query_dataset');
-    expect(hint).not.toContain('bulk allowance');
+    expect(hint).not.toContain('time budget');
   });
 
   it('counts a dimension whose values are all blank as unfiltered in the too-large hint (#61)', async () => {
@@ -822,7 +837,7 @@ describe('eurostatDownloadDataset — notice text when the preview holds every r
   });
 
   const BUDGET_TEXT =
-    'The byte budget stopped this transfer after 52,428,912 bytes, so these 6 rows are the start of "nama_10_gdp" and not all of it. Add dimension filters or a since_period/until_period range to fit the dataset inside the budget, or raise EUROSTAT_BULK_MAX_BYTES.';
+    'The byte budget stopped this transfer after 52,428,912 bytes, so these 6 rows are the start of "nama_10_gdp" and not all of it. Add dimension filters or a since_period/until_period range to fit the dataset inside the budget.';
 
   it('carries the staged sentence alone for a complete download', async () => {
     setCanvas(canvas);
@@ -836,7 +851,7 @@ describe('eurostatDownloadDataset — notice text when the preview holds every r
 
   it('puts the budget sentence ahead of the staged sentence', async () => {
     setCanvas(canvas);
-    mockDownload(stubDownload(makeRows(2), { budgetExceeded: true, bytesRead: 52_428_912 }));
+    mockDownload(stubDownload(makeRows(2), { budgetExceeded: 'bytes', bytesRead: 52_428_912 }));
     const ctx = createMockContext({ errors: eurostatDownloadDataset.errors, tenantId: 'default' });
     const result = await eurostatDownloadDataset.handler(parse({ preview_limit: 6 }), ctx);
     expect(getEnrichment(ctx).notice).toBe(
@@ -846,7 +861,7 @@ describe('eurostatDownloadDataset — notice text when the preview holds every r
 
   it('puts the budget sentence ahead of the no-canvas sentence', async () => {
     setCanvas(undefined);
-    mockDownload(stubDownload(makeRows(2), { budgetExceeded: true, bytesRead: 52_428_912 }));
+    mockDownload(stubDownload(makeRows(2), { budgetExceeded: 'bytes', bytesRead: 52_428_912 }));
     const ctx = createMockContext({ errors: eurostatDownloadDataset.errors, tenantId: 'default' });
     await eurostatDownloadDataset.handler(parse({ preview_limit: 6 }), ctx);
     expect(getEnrichment(ctx).notice).toBe(
@@ -1839,14 +1854,13 @@ describe('eurostatDownloadDataset — period inputs and SDMX faults (real bulk s
       expect(error.data.recovery.hint).toBe(MAIN_HOST_STRUCTURE_BODY_HINT);
     });
 
-    it('describes the 501 refusal in the upstream_fault contract', () => {
+    it('leaves the retry verdict to retryable in the upstream_fault contract, naming no HTTP status', () => {
       const when = eurostatDownloadDataset.errors?.find(
         ({ reason }) => reason === 'upstream_fault',
       )?.when;
-      expect(when).toContain('answered HTTP 501, which is not retried');
-      expect(when).toContain(
-        'could not be reached on every retry, which the error marks retryable',
-      );
+      expect(when).toContain('failed or was unreachable on every attempt');
+      expect(when).toContain('retryable says whether a later call can succeed');
+      expect(when).not.toMatch(/HTTP \d/);
     });
   });
 
@@ -1908,6 +1922,160 @@ describe('eurostatDownloadDataset — period inputs and SDMX faults (real bulk s
     expect(recovery).toContain(
       'except a DS-* Comext collection, which Eurostat serves only filtered',
     );
+  });
+
+  /**
+   * The data service caches the dimension order for an hour, so a structure change inside
+   * that hour would fail every filtered download with filter_arity until the entry expired.
+   * The refusal drops the cached order instead, and the next download reads it again (#105).
+   */
+  describe('a stale cached dimension order (#105)', () => {
+    let data: EurostatDataService;
+    const ARITY_FAULT = () =>
+      new Response(soapFault('140', 'INVALID_QUERY_NB_FILTERS: Incorrect number of filters'), {
+        status: 400,
+      });
+    const namaStructure = () =>
+      new Response(
+        sdmxDataStructureXml(DIMENSIONS.map((id, index) => ({ id, position: index + 1 }))),
+        { status: 200 },
+      );
+    const isStructureRead = (input: unknown) =>
+      new URL(String(input)).pathname.includes('/sdmx/2.1/datastructure/');
+    const kinds = () =>
+      fetchMock.mock.calls.map(([input]) => (isStructureRead(input) ? 'structure' : 'data'));
+    const filtered = {
+      dataset_code: 'nama_10_gdp',
+      filters: { unit: ['CP_MEUR'], na_item: ['B1GQ'], geo: ['DE', 'FR'] },
+      since_period: '2024',
+    };
+
+    beforeEach(() => {
+      data = new EurostatDataService({} as never, {} as never);
+      vi.mocked(getEurostatDataService).mockReturnValue(data);
+    });
+
+    it('reads the order once for two filtered downloads within the hour (characterization)', async () => {
+      fetchMock.mockImplementation(async (input: unknown) =>
+        isStructureRead(input) ? namaStructure() : new Response(NAMA_DE_FR_TSV, { status: 200 }),
+      );
+      for (let call = 0; call < 2; call++) {
+        const result = await runToolContract(eurostatDownloadDataset, filtered);
+        expect(result.isError).not.toBe(true);
+      }
+      expect(kinds()).toEqual(['structure', 'data', 'data']);
+    });
+
+    it('drops the order on filter_arity, so the repeat reads the structure again', async () => {
+      const forget = vi.spyOn(data, 'forgetDimensionOrder');
+      let dataReads = 0;
+      fetchMock.mockImplementation(async (input: unknown) => {
+        if (isStructureRead(input)) return namaStructure();
+        dataReads++;
+        return dataReads === 1 ? ARITY_FAULT() : new Response(NAMA_DE_FR_TSV, { status: 200 });
+      });
+
+      const refused = await runToolContract(eurostatDownloadDataset, filtered);
+      expect(refused.structuredContent).toMatchObject({
+        error: { data: { reason: 'filter_arity' } },
+      });
+      expect(forget).toHaveBeenCalledExactlyOnceWith('nama_10_gdp');
+
+      const repeat = await runToolContract(eurostatDownloadDataset, filtered);
+      expect(repeat.isError).not.toBe(true);
+      expect(repeat.structuredContent).toMatchObject({ rowCount: 4 });
+      expect(kinds()).toEqual(['structure', 'data', 'structure', 'data']);
+    });
+
+    it('leaves the cache alone on filter_arity for an unfiltered download, which read no order', async () => {
+      const forget = vi.spyOn(data, 'forgetDimensionOrder');
+      fetchMock.mockImplementation(async () => ARITY_FAULT());
+      const result = await runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'nama_10_gdp',
+      });
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'filter_arity' } },
+      });
+      expect(forget).not.toHaveBeenCalled();
+      expect(kinds()).toEqual(['data']);
+    });
+
+    it('drops the order when a filter names a dimension it lacks, so the repeat reads the structure again', async () => {
+      // The structure gained `extra` after the first read; a filter on it meets the cached order.
+      const GROWN = ['freq', 'unit', 'na_item', 'extra', 'geo'];
+      const GROWN_TSV =
+        'freq,unit,na_item,extra,geo\\TIME_PERIOD\t2024 \t2025 \n' +
+        'A,CP_MEUR,B1GQ,X,DE\t4386940.0 \t4529710.0 \n';
+      const forget = vi.spyOn(data, 'forgetDimensionOrder');
+      let structureReads = 0;
+      fetchMock.mockImplementation(async (input: unknown) => {
+        if (!isStructureRead(input)) {
+          return new Response(structureReads === 1 ? NAMA_DE_FR_TSV : GROWN_TSV, { status: 200 });
+        }
+        structureReads++;
+        const order = structureReads === 1 ? DIMENSIONS : GROWN;
+        return new Response(
+          sdmxDataStructureXml(order.map((id, index) => ({ id, position: index + 1 }))),
+          { status: 200 },
+        );
+      });
+
+      const first = await runToolContract(eurostatDownloadDataset, filtered);
+      expect(first.isError).not.toBe(true);
+      const grown = { ...filtered, filters: { ...filtered.filters, extra: ['X'] } };
+      const refused = await runToolContract(eurostatDownloadDataset, grown);
+      expect(refused.structuredContent).toMatchObject({
+        error: { data: { reason: 'invalid_dimension', unknownDimensions: ['extra'] } },
+      });
+      expect(forget).toHaveBeenCalledExactlyOnceWith('nama_10_gdp');
+
+      const repeat = await runToolContract(eurostatDownloadDataset, grown);
+      expect(repeat.isError).not.toBe(true);
+      expect(repeat.structuredContent).toMatchObject({ dimensionsUsed: GROWN, rowCount: 2 });
+      expect(kinds()).toEqual(['structure', 'data', 'structure', 'data']);
+    });
+
+    it('drops the order when Eurostat rejects a filter value, which a reordered structure also causes', async () => {
+      const forget = vi.spyOn(data, 'forgetDimensionOrder');
+      let dataReads = 0;
+      fetchMock.mockImplementation(async (input: unknown) => {
+        if (isStructureRead(input)) return namaStructure();
+        dataReads++;
+        return dataReads === 2
+          ? new Response(soapFault('150', 'No results found.'), { status: 400 })
+          : new Response(NAMA_DE_FR_TSV, { status: 200 });
+      });
+
+      await runToolContract(eurostatDownloadDataset, filtered);
+      const refused = await runToolContract(eurostatDownloadDataset, filtered);
+      expect(refused.structuredContent).toMatchObject({
+        error: { data: { reason: 'invalid_dimension' } },
+      });
+      expect(forget).toHaveBeenCalledExactlyOnceWith('nama_10_gdp');
+      await runToolContract(eurostatDownloadDataset, filtered);
+      expect(kinds()).toEqual(['structure', 'data', 'data', 'structure', 'data']);
+    });
+
+    it('keeps the order when Eurostat rejects only the period range', async () => {
+      const forget = vi.spyOn(data, 'forgetDimensionOrder');
+      let dataReads = 0;
+      fetchMock.mockImplementation(async (input: unknown) => {
+        if (isStructureRead(input)) return namaStructure();
+        dataReads++;
+        return dataReads === 2
+          ? new Response(soapFault('150', "No results found. allowed: TIME_PERIOD: >= '1975'"), {
+              status: 400,
+            })
+          : new Response(NAMA_DE_FR_TSV, { status: 200 });
+      });
+
+      await runToolContract(eurostatDownloadDataset, filtered);
+      const refused = await runToolContract(eurostatDownloadDataset, filtered);
+      expect(refused.structuredContent).toMatchObject({
+        error: { data: { reason: 'invalid_dimension' } },
+      });
+      expect(forget).not.toHaveBeenCalled();
+    });
   });
 
   describe('the structure read behind an extraction_too_big (#85)', () => {
@@ -2129,8 +2297,9 @@ describe('eurostatDownloadDataset — filters the positional key cannot carry (#
       const error = failureOf(result);
       const order = ['freq', 'statinfo', 'unit', 'rskpovth', 'sex', 'age', 'geo'];
       expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      // No time key among them, so the message says nothing about the period inputs (#109).
       expect(error.message).toBe(
-        'Filter names "indic_il", "incgrp", which are not dimensions of this dataset. Filterable dimensions, in key order: freq, statinfo, unit, rskpovth, sex, age, geo. The time dimension is filtered with since_period/until_period instead.',
+        'Filter names "indic_il", "incgrp", which are not dimensions of this dataset. Filterable dimensions, in key order: freq, statinfo, unit, rskpovth, sex, age, geo.',
       );
       expect(error.data).toMatchObject({
         reason: 'invalid_dimension',
@@ -2149,6 +2318,217 @@ describe('eurostatDownloadDataset — filters the positional key cannot carry (#
       expect(text).not.toContain("inside the dataset's coverage");
       expect(paths()).toEqual([expect.stringContaining('/sdmx/2.1/datastructure/ESTAT/ilc_li02')]);
     });
+  });
+
+  describe('a time filter key (#109)', () => {
+    const TIME_SENTENCE = 'The time dimension is filtered with since_period/until_period instead.';
+    const BY_RANGE = 'the bulk download selects periods by range, not by filter.';
+    const refused = async (input: Record<string, unknown>) => {
+      serve(namaStructure(), 'no data request expected');
+      const result = await runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'nama_10_gdp',
+        ...input,
+      });
+      // Refused by the key builder: the structure read is the only request.
+      expect(paths()).toEqual([
+        expect.stringContaining('/sdmx/2.1/datastructure/ESTAT/nama_10_gdp'),
+      ]);
+      const error = failureOf(result);
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data.reason).toBe('invalid_dimension');
+      expect(error.data.dimensionOrder).toEqual(DIMENSIONS);
+      return { error, text: textOf(result) };
+    };
+
+    for (const key of ['time', 'time_period', 'TIME', 'Time_Period', 'TIME_PERIOD']) {
+      it(`tells "${key}" to move to since_period/until_period, not to be renamed`, async () => {
+        const { error, text } = await refused({ filters: { [key]: ['2024'], geo: ['DE'] } });
+        expect(error.message).toBe(
+          `Filter names "${key}", which is not a dimension of this dataset. Filterable dimensions, in key order: freq, unit, na_item, geo. ${TIME_SENTENCE}`,
+        );
+        expect(error.data.unknownDimensions).toEqual([key]);
+        const hint = `Remove "${key}" from filters and set since_period "2024" and until_period "2024", the range spanning the periods it names: ${BY_RANGE}`;
+        expect(error.data.recovery.hint).toBe(hint);
+        // The bounds render as code spans, so they read back without escapes.
+        expect(text).toContain('set since_period "`2024`" and until_period "`2024`"');
+        expect(text).not.toContain('Rename');
+      });
+    }
+
+    it('quotes the range spanning several periods as the bounds to send', async () => {
+      const { error, text } = await refused({ filters: { time: ['2024', '2019'] } });
+      expect(error.data.recovery.hint).toBe(
+        `Remove "time" from filters and set since_period "2019" and until_period "2024", the range spanning the periods it names: ${BY_RANGE}`,
+      );
+      expect(text).toContain(
+        'Recovery: Remove "time" from filters and set since_period "`2019`" and until_period "`2024`"',
+      );
+    });
+
+    it('quotes no bound when a value is not a period literal', async () => {
+      const { error, text } = await refused({ filters: { time: ['2024-Q1', 'latest'] } });
+      expect(error.data.recovery.hint).toBe(
+        `Remove "time" from filters and select the periods with since_period/until_period: ${BY_RANGE}`,
+      );
+      expect(text).not.toContain('`');
+    });
+
+    for (const period of [{ since_period: '2020' }, { until_period: '2023' }]) {
+      it(`says only to remove the key when ${Object.keys(period)[0]} is already set`, async () => {
+        const { error, text } = await refused({ filters: { time: ['2024'] }, ...period });
+        expect(error.data.recovery.hint).toBe(
+          'Remove "time" from filters: since_period/until_period already select the periods.',
+        );
+        expect(text).toContain(
+          'Recovery: Remove "time" from filters: since_period/until_period already select the periods.',
+        );
+      });
+    }
+
+    it('answers a time key beside another unknown key in one error whose hint covers both', async () => {
+      const { error, text } = await refused({
+        filters: { time: ['2019', '2024'], country: ['DE'] },
+      });
+      expect(error.message).toBe(
+        `Filter names "time", "country", which are not dimensions of this dataset. Filterable dimensions, in key order: freq, unit, na_item, geo. ${TIME_SENTENCE}`,
+      );
+      expect(error.data.unknownDimensions).toEqual(['time', 'country']);
+      const hint = `Remove "time" from filters and set since_period "2019" and until_period "2024", the range spanning the periods it names: ${BY_RANGE} Rename "country" to one of the dimensions the error lists.`;
+      expect(error.data.recovery.hint).toBe(hint);
+      expect(text).toContain('Rename "country" to one of the dimensions the error lists.');
+    });
+
+    it('names several time keys and several other keys together', async () => {
+      const { error } = await refused({
+        filters: { time: ['2019'], TIME_PERIOD: ['2024'], country: ['DE'], nation: ['FR'] },
+      });
+      expect(error.data.unknownDimensions).toEqual(['time', 'TIME_PERIOD', 'country', 'nation']);
+      expect(error.data.recovery.hint).toBe(
+        `Remove "time", "TIME_PERIOD" from filters and set since_period "2019" and until_period "2024", the range spanning the periods they name: ${BY_RANGE} Rename "country", "nation" each to one of the dimensions the error lists.`,
+      );
+    });
+
+    it('keeps the rename hint and leaves the period inputs out of the message with no time key', async () => {
+      const { error } = await refused({ filters: { country: ['DE'] } });
+      expect(error.message).toBe(
+        'Filter names "country", which is not a dimension of this dataset. Filterable dimensions, in key order: freq, unit, na_item, geo.',
+      );
+      expect(error.data.unknownDimensions).toEqual(['country']);
+      expect(error.data.recovery.hint).toBe(
+        'Rename each filter key the error names to one of the dimensions it lists.',
+      );
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A queued extraction (#106): Eurostat answers a SUBMITTED ticket and serves the identical
+// download minutes later. Real data and bulk services over a stubbed fetch.
+// ---------------------------------------------------------------------------
+
+/** The ticket Eurostat answered a monthly `DS-045409` download with on HTTP 200, verbatim. */
+const QUEUE_TICKET = readFileSync(
+  new URL('../fixtures/ds-045409-queue-ticket.xml', import.meta.url),
+  'utf8',
+);
+
+describe('eurostatDownloadDataset — a queued extraction (#106)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fetchMock = vi.fn(unmockedFetch);
+    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(getEurostatBulkService).mockReturnValue(
+      new EurostatBulkService({} as never, {} as never),
+    );
+    vi.mocked(getEurostatDataService).mockReturnValue(
+      new EurostatDataService({} as never, {} as never),
+    );
+    setCanvas(undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const paths = () =>
+    fetchMock.mock.calls.map(([input]) => decodeURIComponent(new URL(String(input)).pathname));
+  /** Answer the structure read with `structure` and the data read with the ticket. */
+  const serveTicket = (structure: string) =>
+    fetchMock.mockImplementation(async (input: unknown) =>
+      new URL(String(input)).pathname.includes('/sdmx/2.1/datastructure/')
+        ? new Response(structure, { status: 200 })
+        : new Response(QUEUE_TICKET, {
+            status: 200,
+            headers: { 'content-type': 'application/xml' },
+          }),
+    );
+  const failureOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    (
+      result.structuredContent as {
+        error: { code: number; data: Record<string, unknown>; message: string };
+      }
+    ).error;
+  const textOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+
+  it('marks a filtered download retryable, offering the repeat beside the dimensions left open', async () => {
+    serveTicket(
+      readFileSync(
+        new URL('../fixtures/comext/ds-045409-datastructure.xml', import.meta.url),
+        'utf8',
+      ),
+    );
+    const result = await runToolContract(eurostatDownloadDataset, {
+      dataset_code: 'DS-045409',
+      filters: { freq: ['M'], reporter: ['FI', 'IE'], flow: ['2'] },
+      since_period: '2026-07',
+      until_period: '2026-09',
+    });
+    const error = failureOf(result);
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.message).toBe(
+      'Eurostat is preparing the extraction of "DS-045409" in the background and has not served it yet: the SDMX endpoint answered with a "SUBMITTED" queue ticket instead of data.',
+    );
+    const hint =
+      'Eurostat is preparing this extraction of "DS-045409" and serves the identical download once it is ready: repeat the call in a few minutes, or narrow it. Filter on partner, product, indicators — the dimensions of "DS-045409" this request left unfiltered — or narrow since_period/until_period.';
+    expect(error.data).toEqual({ reason: 'async_queued', retryable: true, recovery: { hint } });
+    const text = textOf(result);
+    expect(text).toContain(`Recovery: ${hint}`);
+    expect(text).toContain('(reason async_queued · retryable');
+    expect(text).not.toContain('cannot be collected');
+    // One structure read for the key, one data request: the server does not repeat it.
+    expect(paths()).toEqual([
+      expect.stringContaining('/sdmx/2.1/datastructure/ESTAT/DS-045409'),
+      expect.stringContaining('/sdmx/2.1/data/DS-045409/M.FI+IE...2.'),
+    ]);
+  });
+
+  it('reads the dimensions to name for an unfiltered download, after the one data request', async () => {
+    serveTicket(sdmxDataStructureXml(DIMENSIONS.map((id, index) => ({ id, position: index + 1 }))));
+    const result = await runToolContract(eurostatDownloadDataset, { dataset_code: 'nama_10_gdp' });
+    const error = failureOf(result);
+    expect(error.data).toMatchObject({
+      reason: 'async_queued',
+      retryable: true,
+      recovery: {
+        hint: 'Eurostat is preparing this extraction of "nama_10_gdp" and serves the identical download once it is ready: repeat the call in a few minutes, or narrow it. Filter on freq, unit, na_item, geo — the dimensions of "nama_10_gdp" this request left unfiltered — or narrow since_period/until_period.',
+      },
+    });
+    expect(paths()).toEqual([
+      expect.stringContaining('/sdmx/2.1/data/nama_10_gdp'),
+      expect.stringContaining('/sdmx/2.1/datastructure/ESTAT/nama_10_gdp'),
+    ]);
+  });
+
+  it('declares the reason retryable, with a recovery that offers the repeat and promises no fit', () => {
+    const entry = eurostatDownloadDataset.errors?.find(({ reason }) => reason === 'async_queued');
+    expect(entry).toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable, retryable: true });
+    expect(entry?.recovery).toBe(
+      'Repeat the identical call in a few minutes, once Eurostat has prepared the extraction, or filter on the dimensions this download left unfiltered or narrow since_period/until_period.',
+    );
+    expect(entry?.when).toContain('serves the identical download minutes later');
+    expect(entry?.when).toContain('The server sends the request once and does not repeat it.');
+    expect(`${entry?.when} ${entry?.recovery}`).not.toMatch(/cannot be collected|time budget/);
   });
 });
 
@@ -2397,6 +2777,7 @@ describe('eurostatDownloadDataset — local transfer limits on both surfaces (#7
         expect(text).toContain('40 bytes decoded');
         expect(text).toContain('these 2 rows are the start of');
       } else {
+        // The service throw carries no hint, so the contract's recovery is what reaches the wire.
         expect(result.structuredContent).toMatchObject({
           error: {
             code: JsonRpcErrorCode.ValidationError,
@@ -2405,7 +2786,9 @@ describe('eurostatDownloadDataset — local transfer limits on both surfaces (#7
               maxBytes: budget,
               bytesRead: budget,
               rowCount: 0,
-              recovery: { hint: expect.stringContaining('filters') },
+              recovery: {
+                hint: 'Add dimension filters or narrow since_period/until_period so the first rows arrive within the byte budget.',
+              },
             },
           },
         });
@@ -2413,52 +2796,338 @@ describe('eurostatDownloadDataset — local transfer limits on both surfaces (#7
         expect(text).toContain(`${budget}-byte`);
       }
       expect(text).toContain('since_period/until_period');
-      expect(text).toContain('EUROSTAT_BULK_MAX_BYTES');
+      expect(text).not.toContain('EUROSTAT_');
       expect(cancelled).toBe(true);
       expect(requests).toHaveLength(1);
     },
   );
 
-  it('keeps a body deadline as Timeout/retry_deadline_exceeded on both surfaces', async () => {
-    vi.useFakeTimers();
-    vi.spyOn(serverConfig, 'getServerConfig').mockReturnValue({
-      ...serverConfig.getServerConfig(),
-      bulkTimeoutMs: 50,
+  /**
+   * The time budget (#108). Each case runs on fake timers with the budget set well apart from
+   * every other deadline in play, and checks the call is open 1 ms before the budget's end
+   * and settled at it, so the outcome is the budget's.
+   */
+  describe('the time budget (#108)', () => {
+    const BUDGET_MS = 50_000;
+    const HEADER = 'geo\\TIME_PERIOD\t2024 \n';
+    const textOf = (result: { content: Array<{ type: string; text?: string }> }) =>
+      result.content.map((block) => block.text ?? '').join('\n');
+    const hintOf = (result: { structuredContent?: unknown }) =>
+      (result.structuredContent as { error: { data: { recovery: { hint: string } } } }).error.data
+        .recovery.hint;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.spyOn(serverConfig, 'getServerConfig').mockReturnValue({
+        ...serverConfig.getServerConfig(),
+        bulkTimeoutMs: BUDGET_MS,
+        requestTimeoutMs: 30_000,
+      });
     });
-    const requests: Request[] = [];
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-        const request = new Request(input, init);
-        requests.push(request);
-        return new Response(
-          new ReadableStream({
+
+    /** A data body that sends `chunks`, then stalls until its request is aborted. */
+    const stallingBody = (request: Request, chunks: string[]) =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk));
+            request.signal.addEventListener(
+              'abort',
+              () => controller.error(request.signal.reason),
+              { once: true },
+            );
+          },
+        }),
+      );
+
+    /**
+     * Run the call to 1 ms before the budget's end, check it is open, then to the end. With a
+     * canvas, staging finishes on the engine's own threads after the cut, which fake timers
+     * do not drive, so only the call without one is checked settled at the budget.
+     */
+    async function settleAtBudget(input: Record<string, unknown>, staging = false) {
+      let settled = false;
+      const pending = runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'x',
+        ...input,
+      }).finally(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(BUDGET_MS - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      if (!staging) expect(settled).toBe(true);
+      return pending;
+    }
+
+    it('keeps the rows read when the budget ends the transfer, on both surfaces', async () => {
+      const requests: Request[] = [];
+      const chunks = [HEADER, 'DE\t42 \nFR\t43 \n', 'IT\t4'];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+          const request = new Request(input, init);
+          requests.push(request);
+          return stallingBody(request, chunks);
+        }),
+      );
+      const result = await settleAtBudget({});
+      const bytes = new TextEncoder().encode(chunks.join('')).length;
+
+      expect(result.structuredContent).toMatchObject({
+        budgetExceeded: true,
+        bytesRead: bytes,
+        rowCount: 2,
+        observations: [
+          { geo: 'DE', obs_value: 42 },
+          { geo: 'FR', obs_value: 43 },
+        ],
+      });
+      const notice = (result.structuredContent as { notice: string }).notice;
+      expect(notice).toContain(
+        `The 50-second time budget of this call ended the transfer after ${bytes} bytes, so these 2 rows are the start of "x" and not all of it.`,
+      );
+      expect(notice).toContain('a repeat call can stop at a different row');
+      expect(notice).toContain('dimension filters or a since_period/until_period range');
+      expect(notice).not.toContain('byte budget');
+      expect(notice).not.toContain('EUROSTAT_');
+      const text = textOf(result);
+      expect(text).toContain(`**Transfer:** ${bytes} bytes decoded`);
+      expect(text).toContain('**Budget exceeded:** true — these rows are the start of the dataset');
+      expect(text).toContain('The 50-second time budget of this call ended the transfer');
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.signal.aborted).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('stages the rows the budget kept on a canvas', async () => {
+      const { canvas, teardown } = withRealCanvas();
+      try {
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async (input: string | URL | Request, init?: RequestInit) =>
+            stallingBody(new Request(input, init), [HEADER, 'DE\t42 \nFR\t43 \n', 'IT\t4']),
+          ),
+        );
+        const result = await settleAtBudget({}, true);
+        const staged = result.structuredContent as {
+          canvasId: string;
+          stagedRowCount: number;
+          tableName: string;
+        };
+        expect(result.structuredContent).toMatchObject({
+          budgetExceeded: true,
+          rowCount: 2,
+          stagedRowCount: 2,
+        });
+        vi.useRealTimers();
+        const instance = await canvas.acquire(
+          staged.canvasId,
+          createMockContext({ tenantId: 'default' }),
+        );
+        const read = await instance.query(`SELECT geo, obs_value FROM ${staged.tableName}`);
+        expect(read.rows).toEqual([
+          { geo: 'DE', obs_value: 42 },
+          { geo: 'FR', obs_value: 43 },
+        ]);
+      } finally {
+        await teardown();
+      }
+    });
+
+    it("fails as retry_deadline_exceeded with the data endpoint's hint when no row came before the budget", async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: string | URL | Request, init?: RequestInit) =>
+          stallingBody(new Request(input, init), [HEADER, 'DE\t4']),
+        ),
+      );
+      const result = await settleAtBudget({});
+
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.Timeout,
+          data: { reason: 'retry_deadline_exceeded', deadlineMs: BUDGET_MS, elapsedMs: BUDGET_MS },
+        },
+      });
+      const hint = hintOf(result);
+      expect(hint).toContain('"x"');
+      expect(hint).toContain("read no row within this call's time budget");
+      expect(textOf(result)).toContain(`Recovery: ${hint}`);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("counts a filtered download's structure read against the budget", async () => {
+      vi.mocked(getEurostatDataService).mockReturnValue(
+        new EurostatDataService({} as never, {} as never),
+      );
+      const paths: string[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+          const request = new Request(input, init);
+          const { pathname } = new URL(request.url);
+          paths.push(pathname);
+          if (pathname.includes('/sdmx/2.1/datastructure/')) {
+            await new Promise<void>((resolve) => setTimeout(resolve, 20_000));
+            return new Response(sdmxDataStructureXml(), { status: 200 });
+          }
+          return stallingBody(request, ['geo\\TIME_PERIOD\t2024 \n', 'DE\t42 \n']);
+        }),
+      );
+      // Open at 49,999 ms and settled at 50,000: the 20 s read came out of the budget.
+      const result = await settleAtBudget({
+        dataset_code: 'earn_ses_annual',
+        filters: { geo: ['DE'] },
+      });
+
+      expect(result.structuredContent).toMatchObject({ budgetExceeded: true, rowCount: 1 });
+      expect(paths).toHaveLength(2);
+      expect(paths[0]).toContain('/sdmx/2.1/datastructure/');
+    });
+
+    it('cuts the structure read to what is left of a budget shorter than its own deadline', async () => {
+      vi.mocked(getEurostatDataService).mockReturnValue(
+        new EurostatDataService({} as never, {} as never),
+      );
+      vi.spyOn(serverConfig, 'getServerConfig').mockReturnValue({
+        ...serverConfig.getServerConfig(),
+        bulkTimeoutMs: 10_000,
+        requestTimeoutMs: 30_000,
+      });
+      const fetchMock = vi.fn(
+        (_input: string | URL | Request, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+              once: true,
+            });
+          }),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+      let settled = false;
+      const pending = runToolContract(eurostatDownloadDataset, {
+        dataset_code: 'earn_ses_annual',
+        filters: { geo: ['DE'] },
+      }).finally(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(true);
+      const result = await pending;
+
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.Timeout,
+          data: { reason: 'retry_deadline_exceeded', deadlineMs: 10_000 },
+        },
+      });
+      expect(hintOf(result)).toContain('SDMX structure endpoint');
+      // The read never answered, so no data request followed it.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps a cancellation mid-body a cancellation (characterization)', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: string | URL | Request, init?: RequestInit) =>
+          stallingBody(new Request(input, init), [HEADER, 'DE\t42 \n']),
+        ),
+      );
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 1_000);
+      const pending = runToolContract(
+        eurostatDownloadDataset,
+        { dataset_code: 'x' },
+        { context: { signal: controller.signal } },
+      );
+      await vi.advanceTimersByTimeAsync(BUDGET_MS);
+      const result = await pending;
+
+      expect(result.isError).toBe(true);
+      expect((result.structuredContent as { error: { code: number } }).error.code).toBe(
+        JsonRpcErrorCode.RequestCancelled,
+      );
+      expect(result.structuredContent).not.toHaveProperty('budgetExceeded');
+    });
+
+    it('is stated, with no environment variable, wherever the definition names a budget', () => {
+      const output = eurostatDownloadDataset.output.shape;
+      const deadline = eurostatDownloadDataset.errors?.find(
+        ({ reason }) => reason === 'retry_deadline_exceeded',
+      );
+      const description = eurostatDownloadDataset.description ?? '';
+      expect(description).toContain('a time budget counted from the start of the call');
+      expect(description).toContain('returns after about 55 seconds');
+      expect(output.budgetExceeded.description).toContain('the time budget counted from the start');
+      expect(output.bytesRead.description).toContain('the time budget did');
+      expect(deadline?.when).toContain("The call's time budget (55 seconds by default");
+      expect(deadline?.when).toContain('keeps the rows as a prefix with budgetExceeded');
+      const budget = eurostatDownloadDataset.errors?.find(
+        ({ reason }) => reason === 'byte_budget_exceeded',
+      );
+      for (const text of [
+        description,
+        output.budgetExceeded.description,
+        output.bytesRead.description,
+        deadline?.when,
+        budget?.when,
+        budget?.recovery,
+      ]) {
+        expect(text).not.toContain('EUROSTAT_');
+      }
+    });
+  });
+
+  describe('a body that breaks off mid-transfer', () => {
+    /** A data body that sends a header and two rows, then fails as a dropped connection. */
+    const brokenFetch = vi.fn(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
             start(controller) {
-              controller.enqueue(new TextEncoder().encode('geo\\TIME_PERIOD\t2024 \nDE\t42 \n'));
-              request.signal.addEventListener(
-                'abort',
-                () => controller.error(request.signal.reason),
-                { once: true },
+              controller.enqueue(
+                new TextEncoder().encode('geo\\TIME_PERIOD\t2024 \nDE\t42 \nFR\t43 \n'),
               );
             },
+            pull(controller) {
+              controller.error(new TypeError('terminated'));
+            },
           }),
+        ),
+    );
+
+    it.each([
+      ['while the rows are staged on a canvas', true],
+      ['while the rows are drained without a canvas', false],
+    ])("takes the data endpoint's contract mapping %s", async (_label, withCanvas) => {
+      const real = withCanvas ? withRealCanvas() : undefined;
+      try {
+        vi.stubGlobal('fetch', brokenFetch);
+        const result = await runToolContract(eurostatDownloadDataset, { dataset_code: 'x' });
+
+        expect(result.structuredContent).toMatchObject({
+          error: {
+            code: JsonRpcErrorCode.ServiceUnavailable,
+            data: { reason: 'upstream_fault', retryable: true },
+          },
+        });
+        const error = (result.structuredContent as { error: { message: string } }).error;
+        expect(error.message).toContain('broke off the body of "x"');
+        const hint = (
+          result.structuredContent as { error: { data: { recovery: { hint: string } } } }
+        ).error.data.recovery.hint;
+        expect(hint).toBe(
+          `Eurostat's SDMX data endpoint broke off the body of "x" before it ended — an upstream failure, not a fault in the request. Retry in a few minutes, or narrow the request with dimension filters so less has to stream.`,
         );
-      }),
-    );
-    const pending = runToolContract(eurostatDownloadDataset, { dataset_code: 'x' });
-    await vi.advanceTimersByTimeAsync(51);
-    const result = await pending;
-    expect(result.structuredContent).toMatchObject({
-      error: {
-        code: JsonRpcErrorCode.Timeout,
-        data: { reason: 'retry_deadline_exceeded', deadlineMs: 50 },
-      },
+        expect(
+          result.content.map((block) => ('text' in block ? block.text : '')).join('\n'),
+        ).toContain(`Recovery: ${hint}`);
+      } finally {
+        await real?.teardown();
+      }
     });
-    expect(result.content.map((block) => ('text' in block ? block.text : '')).join('\n')).toContain(
-      'retry_deadline_exceeded',
-    );
-    expect(requests).toHaveLength(1);
-    expect(vi.getTimerCount()).toBe(0);
   });
 });
 
@@ -2814,18 +3483,26 @@ describe('eurostatDownloadDataset — what Eurostat keeps of a period range (#84
     const since = eurostatDownloadDataset.input.shape.since_period.description ?? '';
     const until = eurostatDownloadDataset.input.shape.until_period.description ?? '';
 
-    it('state the wholly-inside rule', () => {
-      expect(since).toContain('Eurostat keeps only periods wholly inside the range');
-      expect(until).toContain('falls inside a period');
+    it('state the wholly-inside rule on since_period, and name it from until_period', () => {
+      expect(since).toContain(
+        'Eurostat keeps only periods wholly inside the range, per frequency: a bound that falls inside a period excludes it',
+      );
+      expect(until).toContain('under the wholly-inside rule of since_period');
     });
 
-    it('state how a one-day range is sent', () => {
-      expect(since).toMatch(/same day is requested as that day and the next/);
+    it('state what a one-day range selects, leaving the request it sends to appliedQuery.url', () => {
+      expect(since).toContain(
+        'A one-day range (both bounds on the same day) selects that day alone.',
+      );
+      expect(eurostatDownloadDataset.enrichment?.appliedQuery.shape.url.description).toContain(
+        'A one-day range asks for that day and the next',
+      );
     });
 
-    it('claim no mapping and offer no range that holds nothing as a working example', () => {
+    it('claim no mapping, name no request parameter, and offer no range that holds nothing as a working example', () => {
       for (const description of [since, until]) {
         expect(description).not.toMatch(/mapped onto/);
+        expect(description).not.toMatch(/sent as|startPeriod|endPeriod/);
         expect(description).not.toMatch(/"2020-06" to "2020"/);
       }
     });
@@ -3105,21 +3782,28 @@ describe('eurostatDownloadDataset — unflagged ":" rows (#90, #93)', () => {
     const output = eurostatDownloadDataset.output.shape;
     const enrichment = eurostatDownloadDataset.enrichment;
 
-    it('say what an unflagged ":" row is on every count', () => {
+    it('define what an unflagged ":" row is on absentCellCount, and name it from every other count', () => {
+      const absent = output.absentCellCount.description ?? '';
+      expect(absent).toContain(
+        'An unflagged ":" row (obs_value null with no flag, status or text) is not an observation: it is a period its series lacks, or a period of a frequency the series has no observation of.',
+      );
+      expect(absent).toContain('a frequency the same series carries');
+      expect(absent).toContain('A flagged ":" or a text value is an observation.');
       for (const description of [
+        eurostatDownloadDataset.description,
         output.rowCount.description,
         output.missingCount.description,
         enrichment?.totalCount.description,
+        enrichment?.notice.description,
       ]) {
-        expect(description).toContain('unflagged ":"');
-        expect(description).toContain('has no observation of');
+        expect(description).toContain('absentCellCount');
+        expect(description).not.toContain('has no observation of');
       }
-      expect(output.absentCellCount.description).toContain('a frequency the same series carries');
     });
 
     it('count rows, not observations, wherever they count what the download holds', () => {
       expect(eurostatDownloadDataset.description).toContain(
-        'it is expanded here into one row per non-blank TSV cell, including the unflagged ":" cells that mark a period a series lacks or a period of a frequency it has no observation of.',
+        'It is expanded into one row per non-blank TSV cell; absentCellCount says which rows are not observations.',
       );
       expect(eurostatDownloadDataset.description).not.toContain('one row per observation');
       expect(output.observations.description).toBe(
@@ -3432,7 +4116,7 @@ describe('eurostatDownloadDataset — values and periods with no observation (#9
     });
 
     it('escapes the dataset code in the byte-budget sentence', async () => {
-      mockDownload(stubDownload(makeRows(2), { budgetExceeded: true }));
+      mockDownload(stubDownload(makeRows(2), { budgetExceeded: 'bytes' }));
       const result = await runToolContract(eurostatDownloadDataset, { dataset_code: 'a**b**' });
       expect(noticeOf(result)).toContain(
         'rows are the start of "a\\*\\*b\\*\\*" and not all of it',
@@ -3563,14 +4247,20 @@ describe('eurostatDownloadDataset — values and periods with no observation (#9
       expect(description).toContain('budgetExceeded');
     });
 
-    it('keep the periods outside a span out of absentCellCount on every count', () => {
-      for (const description of [
-        output.rowCount.description,
-        output.absentCellCount.description,
-        enrichment?.totalCount.description,
-      ]) {
-        expect(description).toContain('span');
+    it('keep the periods outside a span out of absentCellCount, stated once where it is defined', () => {
+      expect(output.absentCellCount.description).toContain(
+        "inside that frequency's span from its first to its latest period any downloaded row has an observation in. Rows before or after the span are named in the notice instead",
+      );
+      for (const description of [output.rowCount.description, enrichment?.totalCount.description]) {
+        expect(description).toContain('see absentCellCount');
+        expect(description).not.toContain('span');
       }
+    });
+
+    it('state that a budget-cut download counts absent cells over its prefix', () => {
+      expect(output.absentCellCount.description).toContain(
+        'a budget-cut download counts over its prefix',
+      );
     });
 
     it('state how filters treat "+", ".", and a value with no observation', () => {

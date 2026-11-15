@@ -423,6 +423,7 @@ describe('Injection resistance', () => {
       } as never);
       vi.mocked(getEurostatDataService).mockReturnValue({
         getDimensionOrder: vi.fn().mockResolvedValue(['freq', 'geo']),
+        forgetDimensionOrder: vi.fn(),
       } as never);
       setCanvas(undefined);
     });
@@ -511,6 +512,10 @@ describe('Injection resistance', () => {
         code: JsonRpcErrorCode.ValidationError,
         data: { reason: 'invalid_dimension' },
       });
+      // The refused key was built on the cached order, which is dropped for the repeat (#105).
+      expect(vi.mocked(getEurostatDataService)().forgetDimensionOrder).toHaveBeenCalledWith(
+        'nama_10_gdp',
+      );
     });
   });
 });
