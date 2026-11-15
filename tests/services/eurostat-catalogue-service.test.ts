@@ -21,6 +21,8 @@ import {
   MAX_VALUE_SEARCH_WORDS,
   searchTierOf,
 } from '@/services/eurostat-catalogue/eurostat-catalogue-service.js';
+import { parseSdmxDataflowList } from '@/services/eurostat-data/sdmx-metadata.js';
+import { comextFixture } from '../helpers/comext-fixtures.js';
 
 /** Minimal mock AppConfig and StorageService — the service ignores both */
 const mockConfig = {} as never;
@@ -189,6 +191,34 @@ describe('EurostatCatalogueService — parseToc', () => {
     expect(entries[2].depth).toBe(2);
     expect(entries[2].parentIndex).toBe(1); // l2's parent is l1
   });
+
+  it("reads a last-update column holding the TOC's single space as no date (#111)", async () => {
+    const svc = await makeLoadedService([
+      tocLine('Economy', 'econ', 'folder', ' '),
+      tocLine('    GDP', 'nama_10_gdp', 'dataset', '14.10.2026'),
+    ]);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const [folder, dataset] = (svc as any).cache.entries;
+    expect(folder).not.toHaveProperty('lastUpdated');
+    expect(dataset.lastUpdated).toBe('14.10.2026');
+  });
+
+  it('dates every dataset and table of the recorded TOC and no folder (#111)', () => {
+    const excerpt = readFileSync(
+      new URL('../fixtures/toc-2026-10-14-excerpt.tsv', import.meta.url),
+      'utf8',
+    );
+    // The recording carries the live folder row: a single space in every empty column.
+    expect(excerpt).toContain('"data"\t"folder"\t" "\t" "\t" "\t" "');
+    const svc = new EurostatCatalogueService(mockConfig, mockStorage);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const entries: Array<{ lastUpdated?: string; type: string }> = (svc as any).parseToc(excerpt);
+    const folders = entries.filter((e) => e.type === 'folder');
+    const leaves = entries.filter((e) => e.type !== 'folder');
+    expect([folders.length, leaves.length]).toEqual([97, 50]);
+    expect(folders.filter((e) => 'lastUpdated' in e)).toEqual([]);
+    expect(leaves.every((e) => /^\d{2}\.\d{2}\.\d{4}$/.test(e.lastUpdated ?? ''))).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -322,6 +352,81 @@ describe('EurostatCatalogueService — browse', () => {
     const fetchSpy = vi.spyOn(svc as any, 'fetchAndParseToc');
     // fetchAndParseToc should NOT have been called a second time (cache hit)
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('carries each dataset and table its last update date, and no folder one (#111)', async () => {
+    const svc = await makeLoadedService([
+      tocLine('Root', 'root', 'folder', ' '),
+      tocLine('    Economy', 'econ', 'folder', ' '),
+      tocLine('        National accounts', 'nama', 'folder', ' '),
+      tocLine('            Quarterly', 'namq', 'dataset', '01.10.2026'),
+      tocLine('        GDP', 'nama_10_gdp', 'dataset', '14.10.2026', '1975', '2025', 1_082_919),
+      tocLine('        GDP per capita', 'tec00001', 'table', '08.10.2026', '2014', '2025', 300),
+      tocLine('        Undated', 'nodate', 'dataset', '', '2000', '2020'),
+    ]);
+    const { items } = await svc.browse('econ', createMockContext());
+    expect(items).toEqual([
+      { code: 'nama', label: 'National accounts', type: 'folder', hasChildren: true },
+      {
+        code: 'nama_10_gdp',
+        label: 'GDP',
+        type: 'dataset',
+        hasChildren: false,
+        dataStart: '1975',
+        dataEnd: '2025',
+        lastUpdated: '14.10.2026',
+        obsCount: 1_082_919,
+      },
+      {
+        code: 'tec00001',
+        label: 'GDP per capita',
+        type: 'table',
+        hasChildren: false,
+        dataStart: '2014',
+        dataEnd: '2025',
+        lastUpdated: '08.10.2026',
+        obsCount: 300,
+      },
+      {
+        code: 'nodate',
+        label: 'Undated',
+        type: 'dataset',
+        hasChildren: false,
+        dataStart: '2000',
+        dataEnd: '2020',
+      },
+    ]);
+    // The root listing holds folders alone, so it gains nothing.
+    expect((await svc.browse(undefined, createMockContext())).items).toEqual([
+      { code: 'econ', label: 'Economy', type: 'folder', hasChildren: true },
+    ]);
+  });
+
+  it('gives each merged DS-* collection the same lastUpdated search reports for it (#111)', async () => {
+    const svc = await makeLoadedService([
+      tocLine('Database by themes', 'data', 'folder', ' '),
+      tocLine('    International trade in goods', 'ext_go', 'folder', ' '),
+      tocLine('    Industry, trade and services', 'icts', 'folder', ' '),
+    ]);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = svc as any;
+    internals.cache = internals.buildCache(
+      internals.cache.entries,
+      parseSdmxDataflowList(comextFixture('comext-dataflows.xml')),
+      new Date(),
+    );
+    const ctx = createMockContext();
+    const items = [
+      ...(await svc.browse('ext_go_detail', ctx)).items,
+      ...(await svc.browse('prom', ctx)).items,
+    ];
+    expect(items).toHaveLength(11);
+    for (const item of items) {
+      const [searched] = (await svc.search(item.code, 10, undefined, ctx)).datasets;
+      expect(item.lastUpdated).toMatch(/^\d{2}\.\d{2}\.\d{4}$/);
+      expect(item.lastUpdated).toBe(searched?.lastUpdated);
+    }
+    expect(items.find((i) => i.code === 'DS-059358')?.lastUpdated).toBe('16.09.2026');
   });
 });
 
@@ -1180,32 +1285,43 @@ describe('EurostatCatalogueService — pages and cursors of matching searches (c
     'utf8',
   );
 
-  /** Every page of `query`, three rows a page, over the excerpt as loaded at a fixed time. */
+  /**
+   * Every page of `query`, three rows a page, over the excerpt as loaded at a fixed time.
+   * The clock is held at that load time: the expected cursors encode it, and on the real
+   * clock the copy would be past its TTL and the walk would page a live refresh instead.
+   */
   async function walk(query: string) {
-    const svc = new EurostatCatalogueService(mockConfig, mockStorage);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const parsed = (svc as any).parseToc(EXCERPT);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (svc as any).cache = {
-      entries: parsed,
+    const loadedAt = new Date('2026-11-08T12:00:00Z');
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(loadedAt);
+    try {
+      const svc = new EurostatCatalogueService(mockConfig, mockStorage);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      codeIndex: (svc as any).buildCodeIndex(parsed),
-      loadedAt: new Date('2026-11-08T12:00:00Z'),
-    };
-    const pages: Array<{ codes: string[]; keys: string[]; nextCursor?: string }> = [];
-    const totals = new Set<number>();
-    let cursor: string | undefined;
-    do {
-      const page = await svc.search(query, 3, cursor, createMockContext());
-      totals.add(page.totalMatches);
-      pages.push({
-        codes: page.datasets.map((d) => d.code),
-        keys: Object.keys(page).sort(),
-        ...(page.nextCursor && { nextCursor: page.nextCursor }),
-      });
-      cursor = page.nextCursor;
-    } while (cursor);
-    return { pages, totals: [...totals] };
+      const parsed = (svc as any).parseToc(EXCERPT);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (svc as any).cache = {
+        entries: parsed,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        codeIndex: (svc as any).buildCodeIndex(parsed),
+        loadedAt,
+      };
+      const pages: Array<{ codes: string[]; keys: string[]; nextCursor?: string }> = [];
+      const totals = new Set<number>();
+      let cursor: string | undefined;
+      do {
+        const page = await svc.search(query, 3, cursor, createMockContext());
+        totals.add(page.totalMatches);
+        pages.push({
+          codes: page.datasets.map((d) => d.code),
+          keys: Object.keys(page).sort(),
+          ...(page.nextCursor && { nextCursor: page.nextCursor }),
+        });
+        cursor = page.nextCursor;
+      } while (cursor);
+      return { pages, totals: [...totals] };
+    } finally {
+      vi.useRealTimers();
+    }
   }
 
   const middle = ['datasets', 'nextCursor', 'totalMatches'];

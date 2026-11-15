@@ -159,6 +159,7 @@ describe('eurostatGetDimensionValues', () => {
     const result = await runToolContract(eurostatGetDimensionValues, {
       dataset_code: 'tgs00010',
       dimension: 'geo',
+      geo_level: 'country',
     });
     expect(result.isError).toBe(true);
     expect(result.structuredContent).toMatchObject({
@@ -764,7 +765,7 @@ describe('eurostatGetDimensionValues — every geo level on a canvas (#99)', () 
 
     // Both surfaces carry the every-level disclosure and the overlap warning.
     expect(structured.notice).toBe(
-      `Table \`${body.tableName}\` on canvas \`${canvasId}\` holds every "geo" level "nama_10r_2gdp" lists, not only the country values listed here — aggregate 1, country 34, nuts1 127, nuts2 309 — with each code's level in a level column (NULL for a code with no NUTS level). Aggregates and regions overlap the countries they contain, so a JOIN on this table keeps them beside the countries: filter g.level (e.g. WHERE g.level = 'country') before summing or averaging, or pass geo_level to stage one level. Search or join it with eurostat_dataframe_query.`,
+      `Table \`${body.tableName}\` on canvas \`${canvasId}\` holds every "geo" level "nama_10r_2gdp" lists, not only the country values listed here — aggregate 1, country 34, nuts1 127, nuts2 309 — with each code's level in a level column (NULL for a code with no NUTS level). Aggregates and regions overlap the countries they contain, so a JOIN on this table keeps them beside the countries: filter g.level (e.g. WHERE g.level = 'country') before summing or averaging, or pass geo_level to stage one level. Inspect it with eurostat_dataframe_describe, then search or join it with eurostat_dataframe_query.`,
     );
     const text = textOf(result);
     expect(text).toContain(`> ${structured.notice}`);
@@ -927,6 +928,209 @@ describe('eurostatGetDimensionValues — geo codes with no NUTS level (#99)', ()
       );
       expect(nulls.rows).toEqual([{ n: 0 }]);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A dataset listing no country values (#112) — the real data service over the
+// tgs00010 structure as Eurostat served it on 2026-10-31: 351 geo codes, all NUTS 2.
+// ---------------------------------------------------------------------------
+
+describe('eurostatGetDimensionValues — canvas_id on a dataset listing no country values (#112)', () => {
+  let canvas: DataCanvas;
+  let teardown: () => Promise<void>;
+  const ctx = () => createMockContext({ tenantId: 'default' });
+  const errorOf = (result: { structuredContent?: unknown }) =>
+    (
+      result.structuredContent as {
+        error: {
+          code: number;
+          message: string;
+          data: { reason: string; recovery: { hint: string } };
+        };
+      }
+    ).error;
+  /** Answer both structure reads with the given bodies. */
+  const serve = (dataflow: string, constraint: string) =>
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        const { pathname } = new URL(String(input));
+        if (pathname.includes('/sdmx/2.1/dataflow/'))
+          return new Response(dataflow, { status: 200 });
+        if (pathname.includes('/sdmx/2.1/contentconstraint/'))
+          return new Response(constraint, { status: 200 });
+        throw new Error(`Unexpected URL: ${pathname}`);
+      }),
+    );
+  const geo = (extra: Record<string, unknown> = {}) =>
+    runToolContract(eurostatGetDimensionValues, {
+      dataset_code: 'tgs00010',
+      dimension: 'geo',
+      ...extra,
+    } as never);
+  type Staged = {
+    canvasId: string;
+    geoLevel: string;
+    matchCount?: number;
+    notice?: string;
+    stagedRowCount: number;
+    tableName: string;
+    totalCount: number;
+    values: Value[];
+  };
+  const levelsOf = async (canvasId: string, table: string) =>
+    (
+      await (
+        await canvas.acquire(canvasId, ctx())
+      ).query(
+        `SELECT level, CAST(COUNT(*) AS INTEGER) AS n FROM ${table} GROUP BY level ORDER BY level NULLS LAST`,
+      )
+    ).rows;
+  const tablesOn = async (canvasId: string) =>
+    (await (await canvas.acquire(canvasId, ctx())).describe()).map(({ name }) => name);
+  const NO_RESULTS = {
+    message:
+      'Dataset "tgs00010" has no "geo" values at the "country" level. It lists "geo" values at: nuts2.',
+    hint: 'Dataset "tgs00010" has no "geo" values at the "country" level. Choose geo_level from the levels it lists: nuts2.',
+  };
+
+  beforeAll(async () => {
+    ({ canvas, teardown } = withRealCanvas());
+    await canvas.acquire(undefined, ctx());
+  });
+  afterAll(async () => {
+    await teardown();
+  });
+  beforeEach(() => {
+    setCanvas(canvas);
+    serve(recordedXml('tgs00010-dataflow'), recordedXml('tgs00010-constraint'));
+    vi.mocked(getEurostatDataService).mockReturnValue(
+      new EurostatDataService({} as never, {} as never),
+    );
+  });
+  afterEach(() => {
+    setCanvas(undefined);
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('stages all 351 NUTS 2 codes over an empty country page, naming the level it holds', async () => {
+    const { canvasId } = await canvas.acquire(undefined, ctx());
+    const result = await geo({ canvas_id: canvasId });
+    expect(result.isError).not.toBe(true);
+    const body = eurostatGetDimensionValues.output.parse(result.structuredContent) as Staged;
+    expect(body).toEqual({
+      dimensionCode: 'geo',
+      dimensionLabel: expect.any(String),
+      geoLevel: 'country',
+      values: [],
+      totalCount: 0,
+      canvasId,
+      tableName: expect.stringMatching(/^df_[0-9a-f]{8}$/),
+      stagedRowCount: 351,
+    });
+    expect(await levelsOf(canvasId, body.tableName)).toEqual([{ level: 'nuts2', n: 351 }]);
+
+    const { notice } = result.structuredContent as Staged;
+    expect(notice).toBe(
+      `Table \`${body.tableName}\` on canvas \`${canvasId}\` holds every "geo" level "tgs00010" lists — nuts2 351 — with each code's level in a level column (NULL for a code with no NUTS level). "tgs00010" lists no country values, so none are listed here: pass geo_level (nuts2) to list one level inline. Inspect the table with eurostat_dataframe_describe, then search or join it with eurostat_dataframe_query.`,
+    );
+    const text = textOf(result);
+    expect(text).toContain('**Geo level:** `country`\n**Total values:** 0\n');
+    expect(text).toContain(
+      `**Staged:** table \`${body.tableName}\` on canvas \`${canvasId}\` (stagedRowCount 351), columns code, label and level (NUTS level, NULL when the code has none) — every geo level the dataset lists, though it lists no country values, so none are listed below — inspect it with eurostat_dataframe_describe first, then join it in eurostat_dataframe_query`,
+    );
+    expect(text).toContain(`> ${notice}`);
+    // A country filter selects no row of this table, so neither surface offers one.
+    for (const surface of [JSON.stringify(result.structuredContent), text]) {
+      expect(surface).not.toContain("= 'country'");
+      expect(surface).not.toContain('overlap');
+    }
+  });
+
+  it.each([
+    ['without canvas_id', false, {}],
+    ['with canvas_id on a deployment without a canvas', true, { unconfigured: true }],
+  ] as const)(
+    'keeps the no_results message and hint %s, staging nothing (characterization)',
+    async (_label, withCanvasId, options) => {
+      const { canvasId } = await canvas.acquire(undefined, ctx());
+      const before = await tablesOn(canvasId);
+      if ('unconfigured' in options) setCanvas(undefined);
+      const result = await geo(withCanvasId ? { canvas_id: canvasId } : {});
+      expect(result.isError).toBe(true);
+      expect(errorOf(result)).toMatchObject({
+        code: JsonRpcErrorCode.NotFound,
+        message: NO_RESULTS.message,
+        data: { reason: 'no_results', recovery: { hint: NO_RESULTS.hint } },
+      });
+      expect(textOf(result)).toContain(`Recovery: ${NO_RESULTS.hint}`);
+      expect(await tablesOn(canvasId)).toEqual(before);
+    },
+  );
+
+  it('fails an explicit geo_level "country" with canvas_id as no_results, staging nothing (characterization)', async () => {
+    const { canvasId } = await canvas.acquire(undefined, ctx());
+    const before = await tablesOn(canvasId);
+    const result = await geo({ canvas_id: canvasId, geo_level: 'country' });
+    expect(errorOf(result)).toMatchObject({
+      message: NO_RESULTS.message,
+      data: { reason: 'no_results', recovery: { hint: NO_RESULTS.hint } },
+    });
+    expect(await tablesOn(canvasId)).toEqual(before);
+  });
+
+  it('sends a filter that matched nothing and the empty country level in one notice', async () => {
+    const { canvasId } = await canvas.acquire(undefined, ctx());
+    const result = await geo({ canvas_id: canvasId, filter: 'bayern' });
+    const body = result.structuredContent as Staged;
+    expect(body).toMatchObject({ values: [], totalCount: 0, matchCount: 0, stagedRowCount: 351 });
+    expect(body.notice).toMatch(
+      /^No "geo" value at geo_level "country" of "tgs00010" matched filter "bayern": .* Table `df_[0-9a-f]{8}` on canvas `[^`]+` holds every "geo" level "tgs00010" lists — nuts2 351 — .* pass geo_level \(nuts2\) to list one level inline\. Inspect the table with eurostat_dataframe_describe, then search or join it with eurostat_dataframe_query\.$/,
+    );
+    // One notice, quoted on one line: a second notice call would have replaced the first.
+    expect(textOf(result)).toContain(`> ${body.notice}`);
+  });
+
+  it('names every level a no-country table holds and warns that they overlap', async () => {
+    serve(SDMX_DATAFLOW_XML, SDMX_CONSTRAINT_WITHOUT_COUNTRIES_XML);
+    const { canvasId } = await canvas.acquire(undefined, ctx());
+    const result = await geo({ dataset_code: 'earn_ses_annual', canvas_id: canvasId });
+    const body = result.structuredContent as Staged;
+    expect(body).toMatchObject({ values: [], totalCount: 0, stagedRowCount: 5 });
+    expect(body.notice).toBe(
+      `Table \`${body.tableName}\` on canvas \`${canvasId}\` holds every "geo" level "earn_ses_annual" lists — aggregate 2, nuts1 1, nuts2 1, nuts3 1 — with each code's level in a level column (NULL for a code with no NUTS level). Codes at different levels overlap, an aggregate or region containing the regions below it, so a JOIN on this table keeps them side by side: filter g.level to one level before summing or averaging. "earn_ses_annual" lists no country values, so none are listed here: pass geo_level (aggregate, nuts1, nuts2, nuts3) to list one level inline. Inspect the table with eurostat_dataframe_describe, then search or join it with eurostat_dataframe_query.`,
+    );
+    expect(JSON.stringify(result.structuredContent)).not.toContain("= 'country'");
+    expect(textOf(result)).not.toContain("= 'country'");
+  });
+
+  it('stages codes that carry no NUTS level with level NULL, and says no geo_level lists them', async () => {
+    serve(
+      SDMX_DATAFLOW_XML.replaceAll(
+        /<c:Annotations><c:Annotation><c:AnnotationTitle>[^<]*<\/c:AnnotationTitle><c:AnnotationType>LEVEL<\/c:AnnotationType><\/c:Annotation><\/c:Annotations>/g,
+        '',
+      ),
+      SDMX_CONSTRAINT_XML,
+    );
+    const { canvasId } = await canvas.acquire(undefined, ctx());
+    const result = await geo({ dataset_code: 'earn_ses_annual', canvas_id: canvasId });
+    const body = result.structuredContent as Staged;
+    expect(body).toMatchObject({ values: [], totalCount: 0, stagedRowCount: 7 });
+    expect(await levelsOf(canvasId, body.tableName)).toEqual([{ level: null, n: 7 }]);
+    expect(body.notice).toBe(
+      `Table \`${body.tableName}\` on canvas \`${canvasId}\` holds every "geo" level "earn_ses_annual" lists — NULL 7 — with each code's level in a level column (NULL for a code with no NUTS level). "earn_ses_annual" lists no country values, so none are listed here, and none of its "geo" codes carries a NUTS level, so no geo_level lists them inline. Inspect the table with eurostat_dataframe_describe, then search or join it with eurostat_dataframe_query.`,
+    );
+    expect(textOf(result)).toContain(`> ${body.notice}`);
+  });
+
+  it('fails an unknown canvas_id as canvas_not_found, since the list has values to stage', async () => {
+    const result = await geo({ canvas_id: 'Zz9Zz9Zz9Z' });
+    expect(errorOf(result)).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'canvas_not_found' },
+    });
   });
 });
 
@@ -1656,8 +1860,9 @@ describe('eurostatGetDimensionValues — failures raised by the real data servic
     const when = eurostatGetDimensionValues.errors?.find(
       ({ reason }) => reason === 'upstream_fault',
     )?.when;
-    expect(when).toContain('answered HTTP 501, which is not retried');
-    expect(when).toContain('could not be reached on every retry, which the error marks retryable');
+    expect(when).toBe(
+      'Eurostat returned a dataset structure this server cannot read, or refused the structure read, which is not retried; marked retryable when the structure endpoint failed or could not be reached on every retry.',
+    );
   });
 
   it('declares exactly the failures its metadata, paging and staging paths can raise', () => {
@@ -2345,7 +2550,7 @@ describe('eurostatGetDimensionValues — paging beside a canvas (#64)', () => {
     };
     expect(body).toMatchObject({ values: [], matchCount: 0, stagedRowCount: 2_352 });
     expect(body.notice).toBe(
-      `No "airp_pr" value of "avia_par_de" matched filter "münchen lepa": every word must appear in a value's code or label, in any order, ignoring case and accents. Drop or shorten a word, or search all 2,352 values, staged as table \`${body.tableName}\` on canvas \`${instance.canvasId}\`, with eurostat_dataframe_query (e.g. \`SELECT code, label FROM ${body.tableName} WHERE label ILIKE '%term%'\`).`,
+      `No "airp_pr" value of "avia_par_de" matched filter "münchen lepa": every word must appear in a value's code or label, in any order, ignoring case and accents. Drop or shorten a word, or search all 2,352 values, staged as table \`${body.tableName}\` on canvas \`${instance.canvasId}\`: inspect it with eurostat_dataframe_describe, then query it with eurostat_dataframe_query (e.g. \`SELECT code, label FROM ${body.tableName} WHERE label ILIKE '%term%'\`).`,
     );
     expect(textOf(result)).toContain(`> ${body.notice}`);
     // The SQL the notice offers runs against the staged table as written.
@@ -2363,13 +2568,13 @@ describe('eurostatGetDimensionValues — paging beside a canvas (#64)', () => {
       'a cut page',
       {},
       (table: string) =>
-        `Every one of the 2,352 values is staged as table \`${table}\` on canvas \`${EMPHASIS_ID}\` — search it with eurostat_dataframe_query (e.g. \`SELECT code, label FROM ${table} WHERE label ILIKE '%term%'\`).`,
+        `Every one of the 2,352 values is staged as table \`${table}\` on canvas \`${EMPHASIS_ID}\` — inspect it with eurostat_dataframe_describe, then search it with eurostat_dataframe_query (e.g. \`SELECT code, label FROM ${table} WHERE label ILIKE '%term%'\`).`,
     ],
     [
       'a filter that matched nothing',
       { filter: 'münchen lepa' },
       (table: string) =>
-        `search all 2,352 values, staged as table \`${table}\` on canvas \`${EMPHASIS_ID}\`, with eurostat_dataframe_query (e.g. \`SELECT code, label FROM ${table} WHERE label ILIKE '%term%'\`).`,
+        `search all 2,352 values, staged as table \`${table}\` on canvas \`${EMPHASIS_ID}\`: inspect it with eurostat_dataframe_describe, then query it with eurostat_dataframe_query (e.g. \`SELECT code, label FROM ${table} WHERE label ILIKE '%term%'\`).`,
     ],
   ])(
     'renders the canvas ID, table name and SQL as code spans after %s',

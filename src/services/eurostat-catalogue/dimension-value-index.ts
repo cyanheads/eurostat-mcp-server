@@ -480,16 +480,23 @@ async function* gzipText(
 }
 
 /**
+ * The bound on each of the index's two downloads, in milliseconds. Fixed rather than read
+ * from `EUROSTAT_BULK_TIMEOUT_MS`, the download tool's per-call time budget: the index loads
+ * in the background, outside any caller's request.
+ */
+const INDEX_DOWNLOAD_TIMEOUT_MS = 120_000;
+
+/**
  * Download and build the index: the metabase first, then the codelist dump, each within
- * `EUROSTAT_BULK_TIMEOUT_MS`. One attempt; the caller schedules retries.
+ * {@link INDEX_DOWNLOAD_TIMEOUT_MS}. One attempt; the caller schedules retries.
  */
 export function fetchDimensionValueIndex(context: RequestContext): Promise<DimensionValueIndex> {
-  const { baseUrl, bulkTimeoutMs } = getServerConfig();
+  const { baseUrl } = getServerConfig();
   return buildDimensionValueIndex(
-    gzipText(`${baseUrl}/catalogue/metabase.txt.gz`, bulkTimeoutMs, context),
+    gzipText(`${baseUrl}/catalogue/metabase.txt.gz`, INDEX_DOWNLOAD_TIMEOUT_MS, context),
     gzipText(
       `${baseUrl}/sdmx/2.1/codelist/ESTAT/all/latest?compressed=true`,
-      bulkTimeoutMs,
+      INDEX_DOWNLOAD_TIMEOUT_MS,
       context,
     ),
   );

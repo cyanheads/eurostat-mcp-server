@@ -361,6 +361,21 @@ describe('eurostatBrowseThemes', () => {
     expect(text).not.toContain('Also filed under');
   });
 
+  it('renders a root listing exactly as before, with no date line (characterization, #111)', () => {
+    const text = eurostatBrowseThemes.format!({ items: mockRootItems, parentPath: [] })
+      .map((b) => (b.type === 'text' ? b.text : ''))
+      .join('');
+    expect(text).toBe(
+      [
+        '**2 items**\n',
+        '📁 **Economy and finance**',
+        '  **Code:** econ | **Type:** folder (has children)',
+        '📁 **Population and social conditions**',
+        '  **Code:** pop | **Type:** folder (has children)',
+      ].join('\n'),
+    );
+  });
+
   it('renders the nextStep hint when present', () => {
     const result = {
       items: mockRootItems,
@@ -371,6 +386,81 @@ describe('eurostatBrowseThemes', () => {
     const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
     expect(text).toContain('Next step');
     expect(text).toContain('sub-themes');
+  });
+});
+
+/** lastUpdated on dataset and table items (#111), from the real service over the recorded TOC. */
+describe('eurostatBrowseThemes — last update dates', () => {
+  const excerpt = readFileSync(
+    new URL('../fixtures/toc-2026-10-14-excerpt.tsv', import.meta.url),
+    'utf8',
+  );
+  const textOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    result.content.map((block) => ('text' in block ? block.text : '')).join('\n');
+  beforeEach(() => {
+    const service = new EurostatCatalogueService({} as never, {} as never);
+    const internals = service as unknown as {
+      buildCache(entries: unknown, flows: unknown[], loadedAt: Date): unknown;
+      cache: unknown;
+      parseToc(text: string): unknown;
+    };
+    internals.cache = internals.buildCache(internals.parseToc(excerpt), [], new Date());
+    vi.mocked(getEurostatCatalogueService).mockReturnValue(service);
+  });
+
+  it('carries each table its date on both surfaces, after its observation count', async () => {
+    const result = await runToolContract(eurostatBrowseThemes, { theme_code: 'ei_is' });
+    const { items } = eurostatBrowseThemes.output.parse(result.structuredContent);
+    expect(items.map(({ code, lastUpdated }) => [code, lastUpdated])).toEqual([
+      ['ei_isin_m', '14.10.2026'],
+      ['ei_isse_q', '14.10.2026'],
+    ]);
+    expect(textOf(result)).toContain(
+      [
+        '📊 **Industry - monthly data - index (2015 = 100) (NACE Rev. 2)**',
+        '  **Code:** ei_isin_m | **Type:** table (no children)',
+        '  **Period:** 1980-01 – 2026-09',
+        '  **Observations:** 2,873,791',
+        '  **Last updated:** 14.10.2026',
+        '📊 **Turnover in services - quarterly data - growth rates (NACE Rev.2)**',
+      ].join('\n'),
+    );
+  });
+
+  it('gives folders no date on either surface', async () => {
+    const result = await runToolContract(eurostatBrowseThemes, { theme_code: 'euroind' });
+    const { items } = eurostatBrowseThemes.output.parse(result.structuredContent);
+    expect(items.map(({ code }) => code)).toEqual(['ei_is', 'ei_lm', 'ei_qna']);
+    expect(items.filter((item) => 'lastUpdated' in item)).toEqual([]);
+    expect(textOf(result)).not.toContain('Last updated');
+  });
+
+  it('writes the date line only for the items that carry one', () => {
+    const text = eurostatBrowseThemes.format!({
+      items: [
+        { code: 'nama', label: 'National accounts', type: 'folder', hasChildren: true },
+        {
+          code: 'DS-045409',
+          label: 'EU trade since 1988 by HS2-4-6 and CN8',
+          type: 'dataset',
+          hasChildren: false,
+          lastUpdated: '13.11.2026',
+        },
+        { code: 'undated', label: 'Undated', type: 'dataset', hasChildren: false },
+      ],
+      parentPath: ['International trade in goods - detailed data (Comext)'],
+    })
+      .map((b) => (b.type === 'text' ? b.text : ''))
+      .join('');
+    expect(text).toContain(
+      [
+        '📊 **EU trade since 1988 by HS2-4-6 and CN8**',
+        '  **Code:** DS-045409 | **Type:** dataset (no children)',
+        '  **Last updated:** 13.11.2026',
+        '📊 **Undated**',
+      ].join('\n'),
+    );
+    expect(text.match(/Last updated/g)).toHaveLength(1);
   });
 });
 
@@ -643,7 +733,8 @@ describe('eurostatBrowseThemes — an unavailable catalogue host on a cold start
     const when = eurostatBrowseThemes.errors?.find(
       ({ reason }) => reason === 'upstream_fault',
     )?.when;
-    expect(when).toContain('table of contents answered HTTP 501, which is not retried');
-    expect(when).toContain('could not be reached on every retry, which the error marks retryable');
+    expect(when).toBe(
+      "No catalogue was loaded yet and Eurostat's table of contents could not be read: marked retryable after a timeout, rate limit, server error or unreachable host on every retry, not after a refusal Eurostat would repeat. Once a catalogue is loaded, a failed refresh serves that copy instead.",
+    );
   });
 });

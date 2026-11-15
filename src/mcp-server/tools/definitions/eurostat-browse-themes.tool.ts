@@ -11,14 +11,14 @@ import { outageAnswer } from '@/services/eurostat-outage.js';
 export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
   title: 'Browse Eurostat Theme Hierarchy',
   description:
-    'Navigate the Eurostat theme tree. Without theme_code returns the top-level theme folders (Economy, Population, Transport, etc.) — the practical starting points. With a theme_code returns its immediate children: subtheme folders and datasets in that branch. Use this for structured discovery when you know the domain but not the dataset code, or to drill down from a broad topic to a specific dataset. Pair with eurostat_search_datasets for keyword-based discovery. The tree is the dissemination table of contents plus the Comext host\'s DS-* collections: detailed trade under ext_go_detail (inside ext_go, "International trade in goods") and PRODCOM under prom (inside icts, "Industry, trade and services"). A collection on neither, such as the legacy PRODCOM DS-056120, is not disseminated and appears nowhere in the tree.',
+    "Navigate the Eurostat theme tree, for discovery when you know the domain but not the dataset code; eurostat_search_datasets finds datasets by keyword. Without theme_code it returns the top-level theme folders, with one that folder's immediate subfolders and datasets. The tree is the dissemination table of contents plus the Comext host's DS-* collections: detailed trade under ext_go_detail (in ext_go) and PRODCOM under prom (in icts). A collection on neither, such as the legacy PRODCOM DS-056120, is not disseminated and appears nowhere in the tree.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     theme_code: z
       .string()
       .optional()
       .describe(
-        'Folder code to expand (e.g., "economy", "reg"). Exact codes take precedence, then case-insensitive matching applies. Omit to list the top-level theme folders.',
+        'Folder code to expand (e.g., "economy", "reg"), matched exactly, then ignoring case. Omit for the top-level folders.',
       ),
   }),
   output: z.object({
@@ -29,83 +29,74 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
             code: z
               .string()
               .describe(
-                'Theme or dataset code. Pass to theme_code to drill into a folder, or use as dataset_code for data tools.',
+                'A folder code to pass as theme_code, or a dataset code for eurostat_get_dataset_info.',
               ),
-            label: z.string().describe('Human-readable name.'),
+            label: z.string().describe('Display name.'),
             type: z
               .enum(['folder', 'dataset', 'table'])
-              .describe(
-                'Item type: "folder" has sub-items; "dataset"/"table" can be queried for data.',
-              ),
-            hasChildren: z
-              .boolean()
-              .describe(
-                'True when this folder contains sub-items. Only meaningful for type "folder".',
-              ),
+              .describe('Entry type: "folder", or a queryable "dataset" or "table".'),
+            hasChildren: z.boolean().describe('True when a folder holds sub-items.'),
             dataStart: z
               .string()
               .optional()
               .describe(
-                'Earliest data period (e.g., "1995"). Omitted for folders and when not reported.',
+                'Earliest period (e.g., "1995"); omitted for folders and when not reported.',
               ),
             dataEnd: z
               .string()
               .optional()
-              .describe('Most recent data period. Omitted for folders and when not reported.'),
+              .describe('Latest period; omitted for folders and when not reported.'),
             obsCount: z
               .number()
               .optional()
               .describe(
-                'Approximate observation count. Omitted for folders and when not reported.',
+                'Approximate observation count; omitted for folders and when not reported.',
+              ),
+            lastUpdated: z
+              .string()
+              .optional()
+              .describe(
+                'Date of the last data update (e.g., "22.05.2026"); omitted for folders and when not reported.',
               ),
           })
           .describe('A theme folder, dataset, or table entry.'),
       )
-      .describe(
-        'Immediate children of the requested theme, or the root themes if theme_code was omitted.',
-      ),
+      .describe('Immediate children of theme_code, or the root themes without it.'),
     parentPath: z
       .array(z.string())
-      .describe(
-        'Breadcrumb from root to the requested theme (e.g., ["Database by themes", "Economy and finance"]). Empty when browsing root.',
-      ),
+      .describe('Breadcrumb from the root to theme_code; empty at the root.'),
     otherPlacements: z
       .array(
         z
           .array(z.string())
-          .describe('Breadcrumb from root to one other folder carrying the requested code.'),
+          .describe('Breadcrumb from the root to one other folder carrying the code.'),
       )
       .optional()
       .describe(
-        'Breadcrumbs of the other branches that file this same theme_code. Eurostat lists a few folder codes in more than one branch; the items above come from the first one the catalogue lists, which never has fewer children than the branches named here but can list different ones. theme_code takes a bare code, so those branches cannot be addressed directly — browse down to them from the root instead. Omitted when the code has a single placement — the normal case.',
+        'Breadcrumbs of other branches filing this same folder code. items come from the first branch the catalogue lists, which never has fewer children but can list different ones; reach the others by browsing down from the root. Omitted for a code with one placement.',
       ),
-    nextStep: z
-      .string()
-      .optional()
-      .describe(
-        'Suggested next action based on these results. Populated when there is a clear follow-up call.',
-      ),
+    nextStep: z.string().optional().describe('Suggested next call, when one is clear.'),
   }),
   enrichment: {
-    itemCount: z.number().describe('Number of items returned in this level.'),
-    themeCode: z.string().optional().describe('Folder code that was browsed, or omitted for root.'),
+    itemCount: z.number().describe('Number of items at this level.'),
+    themeCode: z.string().optional().describe('Folder code browsed; omitted at the root.'),
     comextListMissing: z
       .boolean()
       .optional()
       .describe(
-        'True on a browse of ext_go or icts when the Comext dataflow list could not be loaded, so the DS-* collection folder filed there is not listed. Omitted otherwise.',
+        'True on a browse of ext_go or icts when the Comext dataflow list could not be loaded, so its DS-* collection folder is not listed. Omitted otherwise.',
       ),
     catalogueLoadedAt: z
       .string()
       .optional()
       .describe(
-        'When the catalogue that answered was loaded (ISO 8601). Present only when a refresh failed and that older copy is still in service; omitted otherwise.',
+        'When the catalogue that answered was loaded (ISO 8601); present only when a failed refresh left that older copy in service.',
       ),
     notice: z
       .string()
       .optional()
       .describe(
-        'Names each part of the catalogue this listing is missing — the Comext collections, or updates since a refresh failed — and what to do about it. Omitted when the whole catalogue answered.',
+        'Names any part of the catalogue missing from this listing and what to do about it.',
       ),
   },
 
@@ -113,21 +104,21 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
     {
       reason: 'not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The provided theme_code does not exist in the TOC — or is a Comext folder (ext_go_detail, prom, comext) or DS-* code while the Comext dataflow list cannot be loaded.',
+      when: 'theme_code is not in the catalogue, or is a Comext folder (ext_go_detail, prom, comext) or DS-* code while the Comext list cannot be loaded.',
       recovery:
         'Call eurostat_browse_themes without theme_code to see valid root themes, then navigate from there. A Comext folder missing because its list could not be loaded returns once the merge is retried, about once a minute; eurostat_get_dataset_info reads a DS-* code directly.',
     },
     {
       reason: 'not_a_folder',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The provided theme_code identifies a dataset or table entry instead of a folder.',
+      when: 'theme_code names a dataset or table, not a folder.',
       recovery:
         'Pass the code to eurostat_get_dataset_info to inspect it, then eurostat_query_dataset to retrieve data.',
     },
     {
       reason: 'upstream_fault',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: "The server had no catalogue loaded yet, and Eurostat's table of contents answered HTTP 501, which is not retried, or a 4xx status other than 408 and 429, which its URL carries no caller input to cause; or it answered HTTP 408, HTTP 429 or another HTTP 5xx, or could not be reached on every retry, which the error marks retryable. Once a catalogue is loaded, a failed refresh serves that copy instead.",
+      when: "No catalogue was loaded yet and Eurostat's table of contents could not be read: marked retryable after a timeout, rate limit, server error or unreachable host on every retry, not after a refusal Eurostat would repeat. Once a catalogue is loaded, a failed refresh serves that copy instead.",
       recovery:
         "Retry in a few minutes: the catalogue load failed on Eurostat's side and runs again on the next call.",
     },
@@ -230,6 +221,7 @@ export const eurostatBrowseThemes = tool('eurostat_browse_themes', {
       }
       if (item.obsCount != null)
         lines.push(`  **Observations:** ${item.obsCount.toLocaleString('en-US')}`);
+      if (item.lastUpdated) lines.push(`  **Last updated:** ${item.lastUpdated}`);
     }
     if (result.otherPlacements && result.otherPlacements.length > 0) {
       lines.push(

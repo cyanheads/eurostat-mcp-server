@@ -571,7 +571,8 @@ export class EurostatCatalogueService {
       const stackTop = depthStack[depthStack.length - 1];
       const parentIndex = stackTop?.index ?? -1;
 
-      const lastUpdated = col3 ? this.unquote(col3) || undefined : undefined;
+      // A folder row holds " " in every empty column, so each one is trimmed before the presence check.
+      const lastUpdated = col3 ? this.unquote(col3).trim() || undefined : undefined;
       const dataStart = col5 ? this.unquote(col5).trim() || undefined : undefined;
       const dataEnd = col6 ? this.unquote(col6).trim() || undefined : undefined;
 
@@ -740,15 +741,16 @@ export class EurostatCatalogueService {
           { reason: 'not_found', themeCode, comextListMissing: true, ...this.staleness(toc) },
         );
       }
-      throw notFound(
-        `Theme "${themeCode}" not found in the Eurostat TOC. Use eurostat_browse_themes without theme_code to see top-level themes, then navigate from there.`,
-        { reason: 'not_found', themeCode, ...this.staleness(toc) },
-      );
+      throw notFound(`Theme "${themeCode}" is not in the Eurostat catalogue.`, {
+        reason: 'not_found',
+        themeCode,
+        ...this.staleness(toc),
+      });
     }
     themeCode = folderEntry.code;
     if (folderEntry.type !== 'folder') {
       throw validationError(
-        `Theme code "${themeCode}" identifies a ${folderEntry.type} entry, not a folder. Only folder codes can be expanded with eurostat_browse_themes.`,
+        `Theme code "${themeCode}" identifies a ${folderEntry.type} entry, not a folder.`,
         { reason: 'not_a_folder', themeCode, entryType: folderEntry.type },
       );
     }
@@ -793,6 +795,7 @@ export class EurostatCatalogueService {
       hasChildren,
       ...(e.dataStart && { dataStart: e.dataStart }),
       ...(e.dataEnd && { dataEnd: e.dataEnd }),
+      ...(e.lastUpdated && { lastUpdated: e.lastUpdated }),
       ...(e.obsCount !== undefined && { obsCount: e.obsCount }),
     };
   }
@@ -1189,7 +1192,7 @@ export class EurostatCatalogueService {
 /** The one rejection for every unusable search cursor. */
 function invalidCursor() {
   return invalidParams(
-    'Unusable pagination cursor: it is malformed, was issued for a different query, or was issued against a catalogue snapshot that has since refreshed. Repeat the search without a cursor, then page with the nextCursor it returns.',
+    'Unusable pagination cursor: it is malformed, was issued for a different query, or was issued against a catalogue snapshot that has since refreshed.',
     { reason: 'invalid_cursor' },
   );
 }

@@ -166,7 +166,7 @@ describe('EurostatCatalogueService — Comext folders in browse (#46)', () => {
     expect(items.map((i) => i.code)).toEqual(['sts', 'prom']);
   });
 
-  it('lists the collections inside each folder with no coverage or counts', async () => {
+  it('lists the collections inside each folder with their update date and no coverage or counts', async () => {
     const svc = service();
     const trade = await svc.browse('ext_go_detail', ctx());
     expect(trade.items.map((i) => i.code).sort()).toEqual([...TRADE_CODES].sort());
@@ -179,7 +179,14 @@ describe('EurostatCatalogueService — Comext folders in browse (#46)', () => {
     const prodcom = await svc.browse('prom', ctx());
     expect(prodcom.items.map((i) => i.code).sort()).toEqual([...PRODCOM_CODES].sort());
     for (const item of [...trade.items, ...prodcom.items]) {
-      expect(Object.keys(item).sort()).toEqual(['code', 'hasChildren', 'label', 'type']);
+      expect(Object.keys(item).sort()).toEqual([
+        'code',
+        'hasChildren',
+        'label',
+        'lastUpdated',
+        'type',
+      ]);
+      expect(item.lastUpdated).toMatch(/^\d{2}\.\d{2}\.\d{4}$/);
     }
   });
 

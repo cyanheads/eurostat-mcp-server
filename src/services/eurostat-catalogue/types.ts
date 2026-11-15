@@ -57,6 +57,8 @@ export interface BrowseItem {
   dataStart?: string;
   hasChildren: boolean;
   label: string;
+  /** Date of last data update, as `TocEntry.lastUpdated`. Datasets and tables only. */
+  lastUpdated?: string;
   obsCount?: number;
   type: 'folder' | 'dataset' | 'table';
 }

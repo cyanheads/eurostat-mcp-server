@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs';
 import { gzipSync } from 'node:zlib';
 import { requestContextService } from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as serverConfig from '@/config/server-config.js';
 import {
   buildDimensionValueIndex,
   type DimensionValueIndex,
@@ -411,6 +412,82 @@ describe('fetchDimensionValueIndex', () => {
     await expect(
       fetchDimensionValueIndex(requestContextService.createRequestContext({ operation: 'test' })),
     ).rejects.toThrow();
+  });
+
+  /**
+   * The index loads in the background, so the download tool's per-call time budget
+   * (`EUROSTAT_BULK_TIMEOUT_MS`) must not bound it: each of its two downloads has a fixed
+   * two minutes (#108).
+   */
+  describe('its own bound, whatever EUROSTAT_BULK_TIMEOUT_MS is (#108)', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+
+    /**
+     * Answer the metabase after `metabaseDelayMs` (never, when undefined), honoring the
+     * abort, and the codelist dump at once.
+     */
+    function stubSlowMetabase(metabaseDelayMs: number | undefined): void {
+      vi.useFakeTimers();
+      vi.spyOn(serverConfig, 'getServerConfig').mockReturnValue({
+        ...serverConfig.getServerConfig(),
+        bulkTimeoutMs: 1_000,
+      });
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          (input: string | URL | Request, init?: RequestInit) =>
+            new Promise<Response>((resolve, reject) => {
+              const url = input instanceof Request ? input.url : String(input);
+              if (!url.includes('metabase')) return resolve(new Response(gzipSync(CODELISTS)));
+              const timer =
+                metabaseDelayMs === undefined
+                  ? undefined
+                  : setTimeout(() => resolve(new Response(gzipSync(METABASE))), metabaseDelayMs);
+              init?.signal?.addEventListener(
+                'abort',
+                () => {
+                  clearTimeout(timer);
+                  reject(init.signal?.reason);
+                },
+                { once: true },
+              );
+            }),
+        ),
+      );
+    }
+
+    it('still builds from a metabase that answers 5 s in, past a 1 s EUROSTAT_BULK_TIMEOUT_MS', async () => {
+      stubSlowMetabase(5_000);
+      const pending = fetchDimensionValueIndex(
+        requestContextService.createRequestContext({ operation: 'test' }),
+      );
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(answers(await pending)).toEqual(answers(await build()));
+    });
+
+    it('gives up on a metabase that never answers at 120 s, not before', async () => {
+      stubSlowMetabase(undefined);
+      let outcome: unknown;
+      const pending = fetchDimensionValueIndex(
+        requestContextService.createRequestContext({ operation: 'test' }),
+      ).then(
+        () => {
+          outcome = 'resolved';
+        },
+        (err: unknown) => {
+          outcome = err;
+        },
+      );
+      await vi.advanceTimersByTimeAsync(119_999);
+      expect(outcome).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      await pending;
+      expect(outcome).toBeInstanceOf(Error);
+      expect((outcome as Error).message).toMatch(/timed out|timeout/i);
+    });
   });
 });
 
