@@ -30,7 +30,7 @@ export const eurostatDatasetResource = resource('eurostat://dataset/{dataset_cod
               .number()
               .optional()
               .describe(
-                'Number of dataset-available values from the content constraint, including the full period count for "time". Omitted only when Eurostat does not supply a measurable value set.',
+                'Values the dataset carries in this dimension; for "time", its period count. Omitted when Eurostat supplies no measurable value set.',
               ),
             sampleValues: z
               .array(
@@ -81,7 +81,7 @@ export const eurostatDatasetResource = resource('eurostat://dataset/{dataset_cod
     {
       reason: 'not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The dataset code does not exist or is not available for dissemination.',
+      when: 'The dataset code does not exist or is not disseminated.',
       recovery:
         'Use eurostat_search_datasets or eurostat_browse_themes to find a valid dataset code.',
       thrownBy: 'service',
@@ -89,7 +89,7 @@ export const eurostatDatasetResource = resource('eurostat://dataset/{dataset_cod
     {
       reason: 'upstream_fault',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: "Eurostat returned a dataset structure or content constraint this server cannot read — malformed, truncated, not XML, or missing the requested dataset's dataflow; the structure endpoint answered HTTP 501, which is not retried; or it answered another HTTP 5xx or could not be reached on every retry, which the error marks retryable.",
+      when: 'Eurostat returned a dataset structure this server cannot read, or refused the structure read, which is not retried; marked retryable when the structure endpoint failed or could not be reached on every retry.',
       recovery:
         'Retry in a few minutes, since a failed structure read is not cached. If it fails the same way, eurostat_query_dataset reads the observations, with dimension codes and labels, from a separate endpoint.',
       thrownBy: 'service',

@@ -11,35 +11,29 @@ import { acquireCanvas, getCanvas, isCanvasFailure } from '@/services/canvas-acc
 export const eurostatDataframeDescribe = tool('eurostat_dataframe_describe', {
   title: 'Describe Eurostat Dataframes',
   description:
-    'List the tables staged on a Eurostat dataframe canvas, with their row counts and column names and types. Call this before eurostat_dataframe_query to learn the table and column names to write SQL against. The canvas_id comes from a eurostat_query_dataset or eurostat_download_dataset response that reported a staged table. Three tools stage tables, and they write different columns, so read the columns reported here rather than assuming. The two observation stagers keep every column flat: eurostat_query_dataset gives each dimension a code column named after the dimension (e.g. "geo") plus a label companion (e.g. "geo_label"); eurostat_download_dataset gives code columns only — the bulk endpoint carries no labels — plus a "time" column. Both write the same five measure columns — obs_value, obs_flag, obs_flag_label, conf_status, conf_status_label — carrying the same codes for the same observation, so their tables join on dimension codes and time and compare like with like. A table staged from a DS-* dataset (Comext detailed trade, PRODCOM) adds obs_value_text, holding a value Eurostat published as text, such as a PRODCOM quantity unit. eurostat_get_dimension_values, given a canvas_id, stages one dimension\'s value list as columns code and label, plus level for geo (NULL for a code with no NUTS level), which labels a download\'s code column through a join (e.g. d.geo = g.code). A geo list staged without geo_level holds every level, aggregates and regions beside the countries they contain, so filter level before aggregating.',
+    'List the tables on a Eurostat dataframe canvas with row counts and column names and types; call it before eurostat_dataframe_query for the names to write SQL against, and read the columns here rather than assuming them. eurostat_query_dataset tables give each dimension a code column (e.g. "geo") and a label column ("geo_label"); eurostat_download_dataset tables carry code columns only, plus "time". Both write the same measure columns (obs_value, obs_flag, obs_flag_label, conf_status, conf_status_label) with the same codes, so they join on dimension codes and time; DS-* tables add obs_value_text for a value published as text. A eurostat_get_dimension_values table has code and label, plus level for geo (NULL for a code with no NUTS level), and labels a download\'s codes through a join (d.geo = g.code); staged without geo_level, a geo list holds every level, so filter level before aggregating.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({
     canvas_id: CanvasIdSchema.describe(
-      'Canvas identifier returned as canvasId by eurostat_query_dataset, eurostat_download_dataset, or eurostat_get_dimension_values. Identifies the workspace holding the staged tables.',
+      'The canvasId a eurostat_query_dataset, eurostat_download_dataset or eurostat_get_dimension_values response returned.',
     ),
   }),
   output: z.object({
-    canvasId: z.string().describe('Canvas identifier the tables were read from.'),
+    canvasId: z.string().describe('Canvas the tables were read from.'),
     expiresAt: z
       .string()
-      .describe(
-        'ISO 8601 timestamp when the canvas expires. Every call on it slides this forward.',
-      ),
+      .describe('ISO 8601 expiry of the canvas; each call on it slides this forward.'),
     tables: z
       .array(
         z
           .object({
             name: z.string().describe('Table name to reference in SQL.'),
-            kind: z
-              .enum(['table', 'view'])
-              .describe('Whether the entry is a base table or a view.'),
+            kind: z.enum(['table', 'view']).describe('Base table or view.'),
             rowCount: z.number().describe('Rows the table holds.'),
             expiresAt: z
               .string()
               .optional()
-              .describe(
-                'ISO 8601 expiry of this table specifically. Omitted when the table ages with the canvas rather than on its own clock.',
-              ),
+              .describe('ISO 8601 expiry of this table; omitted when it ages with the canvas.'),
             columns: z
               .array(
                 z
@@ -54,22 +48,17 @@ export const eurostatDataframeDescribe = tool('eurostat_dataframe_describe', {
           })
           .describe('One table or view staged on the canvas.'),
       )
-      .describe(
-        'Tables staged on this canvas. Empty when nothing has been staged yet, or when every staged table has expired.',
-      ),
+      .describe('Staged tables; empty when none is staged or all have expired.'),
   }),
   enrichment: {
-    notice: z
-      .string()
-      .optional()
-      .describe('Guidance when the canvas holds no tables. Omitted when it holds at least one.'),
+    notice: z.string().optional().describe('Guidance when the canvas holds no tables.'),
   },
 
   errors: [
     {
       reason: 'canvas_disabled',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'This deployment runs without a dataframe canvas, so there is nothing to describe.',
+      when: 'This deployment runs without a dataframe canvas.',
       retryable: false,
       recovery:
         'Query the data inline with eurostat_query_dataset, narrowing dimension filters until the result fits.',
@@ -77,7 +66,7 @@ export const eurostatDataframeDescribe = tool('eurostat_dataframe_describe', {
     {
       reason: 'canvas_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The canvas_id is unknown or its lifetime has elapsed.',
+      when: 'The canvas_id is unknown or expired.',
       recovery:
         'Re-run eurostat_query_dataset or eurostat_download_dataset without canvas_id and use the canvasId it returns; eurostat_get_dimension_values stages onto that canvas but never starts one.',
     },

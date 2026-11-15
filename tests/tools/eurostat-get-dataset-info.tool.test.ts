@@ -502,8 +502,9 @@ describe('eurostatGetDatasetInfo — the metadata path through the real data ser
     const when = eurostatGetDatasetInfo.errors?.find(
       ({ reason }) => reason === 'upstream_fault',
     )?.when;
-    expect(when).toContain('answered HTTP 501, which is not retried');
-    expect(when).toContain('could not be reached on every retry, which the error marks retryable');
+    expect(when).toBe(
+      'Eurostat returned a dataset structure this server cannot read, or refused the structure read, which is not retried; marked retryable when the structure endpoint failed or could not be reached on every retry.',
+    );
   });
 
   it('declares exactly the failures its metadata path can raise', () => {

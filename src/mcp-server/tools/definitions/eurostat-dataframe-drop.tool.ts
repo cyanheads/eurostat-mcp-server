@@ -20,7 +20,7 @@ export const eurostatDataframeDrop = tool('eurostat_dataframe_drop', {
   },
   input: z.object({
     canvas_id: CanvasIdSchema.describe(
-      'Canvas identifier returned as canvasId by eurostat_query_dataset, eurostat_download_dataset, or eurostat_get_dimension_values. Identifies the workspace holding the table to drop.',
+      'The canvasId a eurostat_query_dataset, eurostat_download_dataset or eurostat_get_dimension_values response returned.',
     ),
     table_name: z
       .string()
@@ -59,7 +59,7 @@ export const eurostatDataframeDrop = tool('eurostat_dataframe_drop', {
     {
       reason: 'canvas_disabled',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'This deployment runs without a dataframe canvas, so there are no staged tables to drop.',
+      when: 'This deployment runs without a dataframe canvas.',
       retryable: false,
       recovery:
         'Nothing is staged without a dataframe canvas, so there is nothing to drop; eurostat_query_dataset answers inline with narrower dimension filters.',
@@ -67,7 +67,7 @@ export const eurostatDataframeDrop = tool('eurostat_dataframe_drop', {
     {
       reason: 'canvas_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The canvas_id is unknown or its lifetime has elapsed.',
+      when: 'The canvas_id is unknown or expired.',
       recovery:
         'An expired canvas has already released every table it held, so nothing is left to drop; otherwise copy the canvasId exactly as eurostat_query_dataset, eurostat_download_dataset, or eurostat_get_dimension_values returned it.',
     },

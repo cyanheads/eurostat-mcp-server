@@ -11,19 +11,19 @@ import { outageAnswer } from '@/services/eurostat-outage.js';
 export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
   title: 'Get Eurostat Dataset Info',
   description:
-    'Fetch metadata for a Eurostat dataset: dimensions with valid values, time range, observation count, and last-update date. Call this before eurostat_query_dataset or eurostat_download_dataset to discover what dimension codes are valid (unit, na_item, geo, etc.); eurostat_download_dataset builds its positional filter key from this dimension list, so a filter naming a dimension absent here is rejected outright. Returns up to 10 sample values per dimension for orientation; use eurostat_get_dimension_values to list the full set for large dimensions. A DS-* code (detailed trade and PRODCOM, in any case) is read from the Comext dissemination host, which reports no period coverage or observation count, so timeRange and obsCount come back unreported; the first call on a large Comext collection downloads its full structure (23 MB for DS-045409) and takes longer, and repeat calls within the hour reuse it.',
+    "Fetch a Eurostat dataset's metadata: dimensions with sample values, time range, observation count and last update. Call it before eurostat_query_dataset or eurostat_download_dataset to learn the dimension codes their filters take; the download rejects a filter naming a dimension absent here. Up to 10 sample values per dimension; eurostat_get_dimension_values lists the rest. A DS-* code (detailed trade and PRODCOM, any case) is read from the Comext host, which reports no period coverage or observation count; the first call on a large Comext collection downloads its full structure and takes longer, and repeat calls within the hour reuse it.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     dataset_code: z
       .string()
       .min(1)
       .describe(
-        'Dataset code (e.g., "nama_10_gdp", or "DS-045409" for a Comext collection). Use eurostat_search_datasets or eurostat_browse_themes to find codes.',
+        'Dataset code (e.g., "nama_10_gdp", or "DS-045409" for a Comext collection), from eurostat_search_datasets or eurostat_browse_themes.',
       ),
   }),
   output: z.object({
     code: z.string().describe('Dataset code as provided.'),
-    label: z.string().describe('Human-readable dataset title.'),
+    label: z.string().describe('Dataset title.'),
     dimensions: z
       .array(
         z
@@ -31,81 +31,71 @@ export const eurostatGetDatasetInfo = tool('eurostat_get_dataset_info', {
             code: z
               .string()
               .describe(
-                'Dimension code (e.g., "unit", "geo", "na_item"). Use these as filter keys in eurostat_query_dataset and eurostat_download_dataset.',
+                'Dimension code (e.g., "geo"), the filter key in eurostat_query_dataset and eurostat_download_dataset.',
               ),
-            label: z.string().describe('Human-readable dimension name (e.g., "Unit of measure").'),
+            label: z.string().describe('Dimension name (e.g., "Unit of measure").'),
             valuesCount: z
               .number()
               .optional()
               .describe(
-                'Number of dataset-available values in this dimension, taken from the dataset content constraint. For "time" this is the full period count. Omitted only when Eurostat does not supply a measurable value set.',
+                'Values the dataset carries in this dimension; for "time", its period count. Omitted when Eurostat supplies no measurable value set.',
               ),
             sampleValues: z
               .array(
                 z
                   .object({
-                    code: z.string().describe('Dimension value code.'),
-                    label: z.string().describe('Human-readable label for this value.'),
+                    code: z.string().describe('Value code.'),
+                    label: z.string().describe('Value label.'),
                   })
                   .describe('A dimension value code and label pair.'),
               )
               .optional()
               .describe(
-                'First 10 dataset-available values for orientation. Use eurostat_get_dimension_values for the full constrained list. Omitted alongside valuesCount when Eurostat does not supply a measurable value set.',
+                'The first 10 values; eurostat_get_dimension_values lists all. Omitted alongside valuesCount.',
               ),
           })
           .describe('A dataset dimension with its valid values.'),
       )
-      .describe('All dimensions of the dataset with their valid codes and labels.'),
+      .describe("The dataset's dimensions."),
     timeRange: z
       .object({
         start: z
           .string()
           .optional()
-          .describe(
-            'Earliest available period (e.g., "1975"). Omitted when Eurostat does not report it.',
-          ),
+          .describe('Earliest period (e.g., "1975"); omitted when not reported.'),
         end: z
           .string()
           .optional()
-          .describe(
-            'Most recent available period (e.g., "2024"). Omitted when Eurostat does not report it.',
-          ),
+          .describe('Latest period (e.g., "2024"); omitted when not reported.'),
       })
-      .describe(
-        'Overall data coverage period for this dataset. Each bound is omitted when Eurostat does not report it — an omitted bound is unknown, not empty.',
-      ),
+      .describe('Dataset coverage. An omitted bound is unknown, not empty.'),
     obsCount: z
       .number()
       .optional()
       .describe(
-        'Total number of observations in the full dataset (all periods). Omitted when Eurostat does not report it — an omitted count is unknown, not zero.',
+        'Observations across the whole dataset; omitted when not reported, which means unknown, not zero.',
       ),
     lastUpdated: z
       .string()
       .optional()
-      .describe(
-        'ISO 8601 timestamp of the most recent data update. Omitted when Eurostat does not report it.',
-      ),
+      .describe('ISO 8601 timestamp of the last data update; omitted when not reported.'),
     metadataUrl: z
       .string()
       .optional()
-      .describe(
-        'URL to the ESMS HTML metadata page for this dataset. Omitted when not provided by Eurostat.',
-      ),
+      .describe('ESMS metadata page URL; omitted when Eurostat gives none.'),
   }),
   errors: [
     {
       reason: 'not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The dataset code does not exist or is not available for dissemination.',
+      when: 'The dataset code does not exist or is not disseminated.',
       recovery:
         'Use eurostat_search_datasets or eurostat_browse_themes to find a valid dataset code.',
     },
     {
       reason: 'upstream_fault',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: "Eurostat returned a dataset structure or content constraint this server cannot read — malformed, truncated, not XML, or missing the requested dataset's dataflow; the structure endpoint answered HTTP 501, which is not retried; or it answered another HTTP 5xx or could not be reached on every retry, which the error marks retryable.",
+      when: 'Eurostat returned a dataset structure this server cannot read, or refused the structure read, which is not retried; marked retryable when the structure endpoint failed or could not be reached on every retry.',
       recovery:
         'Retry in a few minutes, since a failed structure read is not cached. If it fails the same way, eurostat_query_dataset reads the observations, with dimension codes and labels, from a separate endpoint.',
     },

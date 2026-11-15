@@ -728,8 +728,9 @@ describe('eurostatSearchDatasets — an unavailable catalogue host on a cold sta
     const when = eurostatSearchDatasets.errors?.find(
       ({ reason }) => reason === 'upstream_fault',
     )?.when;
-    expect(when).toContain('table of contents answered HTTP 501, which is not retried');
-    expect(when).toContain('could not be reached on every retry, which the error marks retryable');
+    expect(when).toBe(
+      "No catalogue was loaded yet and Eurostat's table of contents could not be read: marked retryable after a timeout, rate limit, server error or unreachable host on every retry, not after a refusal Eurostat would repeat. Once a catalogue is loaded, a failed refresh serves that copy instead.",
+    );
   });
 });
 

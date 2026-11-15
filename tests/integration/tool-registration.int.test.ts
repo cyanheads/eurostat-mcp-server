@@ -4,7 +4,8 @@
  * environment or in a `.env` file, and checks the two surfaces a gate controls:
  * `tools/list`, which is what a client can call, and the landing page, where a
  * gated tool stays visible with the reason it is off and the setting that turns
- * it on.
+ * it on. Also holds `tools/list` description prose, which every client loads
+ * once per session, to a byte budget.
  * @module tests/integration/tool-registration.int.test
  */
 
@@ -460,5 +461,55 @@ describe('dataframe tool registration', () => {
     expect(output).toContain('EUROSTAT_DATAFRAME_DROP_ENABLED');
     // A clean banner, not an uncaught error's stack trace.
     expect(output).not.toMatch(/^\s+at /m);
+  });
+});
+
+/** Every string-valued `description` key removed, at any depth. */
+function withoutDescriptions(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(withoutDescriptions);
+  if (node === null || typeof node !== 'object') return node;
+  return Object.fromEntries(
+    Object.entries(node)
+      .filter(([key, value]) => !(key === 'description' && typeof value === 'string'))
+      .map(([key, value]) => [key, withoutDescriptions(value)]),
+  );
+}
+
+/**
+ * The bytes descriptions add to one serialized `tools/list` entry: the tool
+ * description, every input and output field's, and the `errors[].when` text the
+ * framework folds into the output schema's error reason.
+ */
+const descriptionBytes = (entry: unknown): number =>
+  Buffer.byteLength(JSON.stringify(entry)) -
+  Buffer.byteLength(JSON.stringify(withoutDescriptions(entry)));
+
+/** Ceilings in bytes, canvas on: the whole list, and the two data tools, which carry the most. */
+const DESCRIPTION_BUDGET = {
+  total: 42_800,
+  eurostat_query_dataset: 11_400,
+  eurostat_download_dataset: 10_200,
+} as const;
+
+describe('tools/list description budget', () => {
+  it('keeps the description bytes of every tool listed with the canvas on under budget', async () => {
+    await withServer({ CANVAS_PROVIDER_TYPE: 'duckdb' }, async (port) => {
+      const message = await rpc(port, 'tools/list', {});
+      const tools = message.result?.tools as Array<{ name: string }>;
+      expect(tools.map(({ name }) => name)).toEqual([
+        ...CORE_TOOLS,
+        'eurostat_dataframe_describe',
+        'eurostat_dataframe_query',
+      ]);
+      const measured = new Map(tools.map((entry) => [entry.name, descriptionBytes(entry)]));
+      const total = [...measured.values()].reduce((sum, bytes) => sum + bytes, 0);
+      const over = Object.entries(DESCRIPTION_BUDGET).flatMap(([name, ceiling]) => {
+        const bytes = name === 'total' ? total : measured.get(name);
+        return bytes !== undefined && bytes <= ceiling
+          ? []
+          : [`${name}: ${bytes} B > ${ceiling} B`];
+      });
+      expect(over).toEqual([]);
+    });
   });
 });

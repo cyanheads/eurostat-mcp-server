@@ -10,21 +10,19 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { acquireCanvas, getCanvas, isCanvasFailure } from '@/services/canvas-accessor.js';
 
 const QueryOutputSchema = z.object({
-  canvasId: z.string().describe('Canvas identifier the query ran against.'),
+  canvasId: z.string().describe('Canvas the query ran against.'),
   columns: z.array(z.string()).describe('Column names in projection order.'),
   rows: z
     .array(z.record(z.string(), z.unknown()))
     .describe(
-      'Complete result rows, keyed by column name, bounded by the canvas row limit. Nested cells render as JSON; 64-bit integers arrive as strings so they survive intact. Cast to DOUBLE in SQL if a number is wanted.',
+      'Complete rows keyed by column name, nested cells as JSON. 64-bit integers arrive as strings; cast to DOUBLE in SQL for a number.',
     ),
-  rowCount: z
-    .number()
-    .describe(
-      'Complete rows returned after the canvas row limit. Advance SQL OFFSET by this actual count.',
-    ),
+  rowCount: z.number().describe('Complete rows returned.'),
   truncated: z
     .boolean()
-    .describe('True when the canvas row limit omitted rows. Follow notice for SQL paging.'),
+    .describe(
+      'True when the canvas row limit cut rows: page the same deterministic SELECT over unchanged tables with a total ORDER BY (tie-breakers for tied keys) and LIMIT/OFFSET, advancing OFFSET by rowCount; an unordered first page restarts sorted at OFFSET 0.',
+    ),
 });
 type QueryOutput = z.infer<typeof QueryOutputSchema>;
 
@@ -51,34 +49,29 @@ function cutNotice(rows: number): string {
 export const eurostatDataframeQuery = tool('eurostat_dataframe_query', {
   title: 'Query Eurostat Dataframes',
   description:
-    "Run a read-only SQL SELECT against tables staged on a Eurostat dataframe canvas, reaching observations beyond an inline preview and aggregating or joining tables without re-fetching Eurostat. Call eurostat_dataframe_describe first for table and column names. Only a single SELECT runs: statement chaining, non-SELECT verbs, and functions reading files or external data are rejected. Columns are flat: dimension codes, obs_value, obs_flag / obs_flag_label, and conf_status / conf_status_label. Tables eurostat_query_dataset staged also carry dimension _label companions; DS-* tables also carry obs_value_text for published text values. Join observation tables on dimension codes and time. A staged dimension value list has code and label columns, plus level for geo; join it to an observation dimension code to add labels. A geo list staged without geo_level holds every level, and aggregates and regions overlap the countries they contain, so filter level (e.g. g.level = 'country') before summing or averaging. Returns every complete row the canvas supplies, bounded only by the canvas row limit; nested cells render as lossless JSON. A row-limit cut sets truncated and adds a notice: page the same deterministic SELECT over unchanged tables with a total ORDER BY and LIMIT/OFFSET, advancing by actual rowCount. Restart an unordered first page sorted at offset zero; tied keys need tie-breakers. Volatile SQL and changing or expired tables cannot provide stable paging.",
+    'Run one read-only SQL SELECT against the tables staged on a Eurostat dataframe canvas, to reach observations past an inline preview and to aggregate or join them without re-fetching. Call eurostat_dataframe_describe first for the table and column names. Statement chaining, other verbs, and functions that read files or external data are rejected. Returns every complete row up to the canvas row limit.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({
     canvas_id: CanvasIdSchema.describe(
-      'Canvas identifier returned as canvasId by eurostat_query_dataset, eurostat_download_dataset, or eurostat_get_dimension_values. Identifies the workspace holding the staged tables.',
+      'The canvasId a eurostat_query_dataset, eurostat_download_dataset or eurostat_get_dimension_values response returned.',
     ),
     sql: z
       .string()
       .min(1)
       .describe(
-        "A single read-only SELECT statement. Reference tables by the names eurostat_dataframe_describe reports. Example: SELECT geo, geo_label, AVG(obs_value) AS mean FROM df_a1b2c3d4 WHERE time >= '2020' GROUP BY geo, geo_label ORDER BY mean DESC.",
+        "One read-only SELECT over the names eurostat_dataframe_describe reports, e.g. SELECT geo, AVG(obs_value) AS mean FROM df_a1b2c3d4 WHERE time >= '2020' GROUP BY geo ORDER BY mean DESC.",
       ),
   }),
   output: QueryOutputSchema,
   enrichment: {
-    notice: z
-      .string()
-      .optional()
-      .describe(
-        'Whole-row cut disclosure and deterministic SQL paging guidance. Omitted when no rows were omitted.',
-      ),
+    notice: z.string().optional().describe('Row-limit cut disclosure with SQL paging guidance.'),
   },
 
   errors: [
     {
       reason: 'canvas_disabled',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'This deployment runs without a dataframe canvas, so there is nothing to query.',
+      when: 'This deployment runs without a dataframe canvas.',
       retryable: false,
       recovery:
         'Query the data inline with eurostat_query_dataset, narrowing dimension filters until the result fits.',
@@ -86,14 +79,14 @@ export const eurostatDataframeQuery = tool('eurostat_dataframe_query', {
     {
       reason: 'canvas_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The canvas_id is unknown or its lifetime has elapsed.',
+      when: 'The canvas_id is unknown or expired.',
       recovery:
         'Re-run eurostat_query_dataset or eurostat_download_dataset without canvas_id and use the canvasId it returns; eurostat_get_dimension_values stages onto that canvas but never starts one.',
     },
     {
       reason: 'missing_table',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The SQL names a table that is not staged on this canvas, or that has expired.',
+      when: 'The SQL names a table not staged on this canvas, or expired.',
       recovery:
         'Call eurostat_dataframe_describe for the staged table names, or re-run the tool that staged them (eurostat_query_dataset, eurostat_download_dataset, or eurostat_get_dimension_values with canvas_id).',
     },

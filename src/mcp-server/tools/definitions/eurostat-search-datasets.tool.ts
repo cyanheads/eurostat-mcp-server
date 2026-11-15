@@ -116,7 +116,7 @@ function renderMatchedValues(
 export const createEurostatSearchDatasets = (clampLimits: boolean) =>
   tool('eurostat_search_datasets', {
     title: 'Search Eurostat Datasets',
-    description: `Search the Eurostat catalogue by keyword. Returns matching datasets with codes, descriptions, period coverage, and theme breadcrumbs. Matches are ordered by where the words were found: first datasets whose label contains the query as a phrase beginning at the start of a word, then those whose label or code contains every word, then those that match a word only through their theme breadcrumb, each group in table-of-contents order. When no dataset's label, theme breadcrumb, or code holds every word, a query of up to ${MAX_VALUE_SEARCH_WORDS} distinct words also has the words a dataset lacks looked for at the start of a word in the English labels of the dimension values Eurostat lists for it (time excluded); those rows carry matchedValues, whose codes are the filters eurostat_query_dataset takes. Use this to discover dataset codes before calling eurostat_get_dataset_info, then eurostat_query_dataset for a slice of a dataset or eurostat_download_dataset for the whole of one. Results are limited to datasets and predefined tables — folders are excluded. The catalogue joins two sources: the dissemination table of contents, and the Comext host's dataflow list, which adds the DS-* collections — detailed trade by CN8, HS, SITC, BEC and CPA, and PRODCOM — filed under "International trade in goods - detailed data (Comext)" and "Statistics on the production of manufactured goods (PRODCOM)". Comext entries report a last-update date but no period coverage or observation count. A collection on neither list, such as the legacy PRODCOM DS-056120, is not disseminated and cannot be reached through this server.`,
+    description: `Search the Eurostat catalogue by keyword for dataset codes, with labels, period coverage and theme breadcrumbs; datasets and predefined tables only, no folders. Pass a code to eurostat_get_dataset_info, then eurostat_query_dataset for a slice or eurostat_download_dataset for the whole dataset. The catalogue joins the dissemination table of contents with the Comext host's dataflow list, which adds the DS-* collections (detailed trade by CN8, HS, SITC, BEC and CPA, and PRODCOM); Comext entries report a last-update date but no period coverage or observation count. A collection on neither list, such as the legacy PRODCOM DS-056120, is not disseminated and cannot be reached.`,
     annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
     input: z.object({
       query: z
@@ -124,18 +124,18 @@ export const createEurostatSearchDatasets = (clampLimits: boolean) =>
         .min(1)
         .regex(/\S/, 'Query must contain at least one non-whitespace search term.')
         .describe(
-          `Search terms — at least one non-whitespace token is required. Split on whitespace into tokens; every token must match (AND), case-insensitively, somewhere across the dataset label, theme breadcrumb, or code. Spacing beside punctuation in the catalogue is ignored, so "Rev.2" also finds "Rev. 2" and "2015=100" finds "2015 = 100"; a token keeps its own punctuation, as in "R&D", "non-EU", or "DS-045409". Word order does not matter, so "business demography NUTS 3" or "regional economic accounts" resolve without naming a label verbatim. When no dataset holds every token, a query of up to ${MAX_VALUE_SEARCH_WORDS} distinct tokens is searched again with each token a dataset lacks also matching where it begins a word of the English label of one of its dimension values: "pharmacist" finds "Pharmacists" (med_spec=PHARM), "sex" does not find "Essex". When nothing matches, the error names each word whose removal alone would find matches or, when no single removal would and both catalogue sources were searched, the words that match no dataset label, theme breadcrumb, or code, and says when dimension value labels were not searched.`,
+          `Search words, at least one. Every word must match, in any order and ignoring case, somewhere in the dataset label, theme breadcrumb or code. Spacing beside punctuation in the catalogue is ignored ("Rev.2" finds "Rev. 2"); a word keeps its own punctuation ("R&D", "DS-045409"). When no dataset holds every word, a query of up to ${MAX_VALUE_SEARCH_WORDS} distinct words is searched again, each word a dataset lacks also matching at the start of a word in the English label of one of its dimension values (time excluded); those rows carry matchedValues. When nothing matches, the error names the words to drop.`,
         ),
       limit: (clampLimits ? z.number().multipleOf(1).min(1) : z.number().int().min(1).max(100))
         .default(20)
         .describe(
-          `Page size — maximum datasets returned per page. Default 20; ${clampLimits ? 'positive integers above 100 are clamped to 100 with a notice' : 'maximum 100; larger values are rejected'}. To retrieve matches beyond one page, pass the returned nextCursor back as cursor; the page size is fixed by this first call and limit is ignored on cursor calls.`,
+          `Datasets per page, default 20; ${clampLimits ? 'values above 100 clamp to 100 with a notice' : 'maximum 100, larger values are rejected'}. Fixed by the first call and ignored with cursor.`,
         ),
       cursor: z
         .string()
         .optional()
         .describe(
-          "Opaque pagination cursor from a previous call's nextCursor. Omit for the first page; pass it back — with the same query — to fetch the next page of matches over a stable order. A cursor is bound to the query that produced it and to the catalogue snapshot in effect at that time, so reusing one with a different query, or after the catalogue refreshes, is rejected rather than silently paging a different result set.",
+          'Opaque nextCursor from the previous page; omit for the first. Bound to its query and to the catalogue snapshot that issued it: sent with another query, or after the catalogue refreshes, it is rejected.',
         ),
     }),
     output: z.object({
@@ -146,42 +146,34 @@ export const createEurostatSearchDatasets = (clampLimits: boolean) =>
               code: z
                 .string()
                 .describe(
-                  'Dataset code (e.g., "nama_10_gdp"). Use this in eurostat_get_dataset_info, eurostat_query_dataset, and eurostat_download_dataset.',
+                  'Dataset code (e.g., "nama_10_gdp") for eurostat_get_dataset_info, eurostat_query_dataset and eurostat_download_dataset.',
                 ),
-              label: z.string().describe('Human-readable dataset title.'),
+              label: z.string().describe('Dataset title.'),
               type: z
                 .enum(['dataset', 'table'])
-                .describe(
-                  'Entry type: "dataset" for standard datasets, "table" for predefined tables.',
-                ),
+                .describe('Entry type: "dataset", or "table" for a predefined table.'),
               dataStart: z
                 .string()
                 .optional()
-                .describe(
-                  'Earliest data period available (e.g., "1975"). Omitted when not reported by Eurostat.',
-                ),
+                .describe('Earliest period (e.g., "1975"); omitted when not reported.'),
               dataEnd: z
                 .string()
                 .optional()
-                .describe(
-                  'Most recent data period available (e.g., "2025"). Omitted when not reported by Eurostat.',
-                ),
+                .describe('Latest period (e.g., "2025"); omitted when not reported.'),
               lastUpdated: z
                 .string()
                 .optional()
                 .describe(
-                  'Date of last data update (e.g., "22.05.2026"). Omitted when not reported.',
+                  'Date of the last data update (e.g., "22.05.2026"); omitted when not reported.',
                 ),
               obsCount: z
                 .number()
                 .optional()
-                .describe(
-                  'Approximate number of observations. Omitted when not reported by Eurostat.',
-                ),
+                .describe('Approximate observation count; omitted when not reported.'),
               themePath: z
                 .array(z.string())
                 .describe(
-                  'Breadcrumb path from root theme to this dataset (e.g., ["Database by themes", "Economy and finance"]). Eurostat files some datasets under several branches; this is the first branch that matched the query. Empty for top-level entries.',
+                  'Breadcrumb from the root theme to this dataset; for a dataset filed under several branches, the first that matched. Empty for top-level entries.',
                 ),
               matchedValues: z
                 .array(
@@ -190,75 +182,54 @@ export const createEurostatSearchDatasets = (clampLimits: boolean) =>
                       dimension: z
                         .string()
                         .describe(
-                          'Dimension the value belongs to (e.g., "med_spec") — the key in eurostat_query_dataset filters.',
+                          'Dimension code (e.g., "med_spec"), the key in eurostat_query_dataset filters.',
                         ),
                       code: z
                         .string()
-                        .describe(
-                          'The value\'s code (e.g., "PHARM") — the value in eurostat_query_dataset filters.',
-                        ),
-                      label: z
-                        .string()
-                        .describe(
-                          "The value's English label, which holds a query word at the start of a word.",
-                        ),
+                        .describe('Value code (e.g., "PHARM"), the value in those filters.'),
+                      label: z.string().describe("The value's English label."),
                     })
-                    .describe(
-                      'A dimension value of this dataset whose label carries a query word.',
-                    ),
+                    .describe('A dimension value whose label carries a query word.'),
                 )
                 .optional()
                 .describe(
-                  "Present only when no dataset's label, theme breadcrumb, or code holds every query word: this dataset's dimension values whose English labels carry the words its own text lacks, those carrying the most of the words first and then in Eurostat's metabase order, each value once. Omitted on every other search.",
+                  "Only when no dataset's own text holds every query word: this dataset's dimension values whose labels carry the words its text lacks, those carrying the most words first, then in Eurostat's order.",
                 ),
             })
             .describe('A matched dataset entry.'),
         )
         .describe(
-          "Matching datasets for the current page, up to the requested limit. Ordered first by label phrase matches (the query as a phrase beginning at the start of a word of the label), then datasets whose label or code holds every word, then datasets that match a word only through their theme breadcrumb; table-of-contents order within each group. Rows matched through dimension values (each carrying matchedValues) are ordered by fewer words found only in value labels, then datasets where one value's label carries all of those words, then the groups above over the words the dataset's own text holds, then table-of-contents order.",
+          "This page of matches, up to limit, ordered: the query as a phrase from the start of a label word, then a label or code holding every word, then a match only through the theme breadcrumb; table-of-contents order within each group. Rows with matchedValues come by fewest words found only in value labels, then one value's label carrying all of them, then the groups above.",
         ),
-      nextStep: z
-        .string()
-        .optional()
-        .describe(
-          'Suggested next action based on these results. Populated when there is a clear follow-up call.',
-        ),
+      nextStep: z.string().optional().describe('Suggested next call, when one is clear.'),
     }),
     enrichment: {
       query: z.string().describe('Search terms as submitted.'),
-      totalMatches: z
-        .number()
-        .describe(
-          'Total distinct dataset codes matching the query across all pages, before the page limit.',
-        ),
+      totalMatches: z.number().describe('Distinct datasets matching across all pages.'),
       truncated: z
         .boolean()
-        .describe(
-          'True when more matches remain beyond this page — pass nextCursor as cursor to fetch them.',
-        ),
+        .describe('True when more matches follow; pass nextCursor as cursor for them.'),
       nextCursor: z
         .string()
         .optional()
-        .describe(
-          'Opaque cursor for the next page of matches. Pass it back as cursor with the same query; it stops working once the catalogue refreshes. Omitted on the last page.',
-        ),
+        .describe('Cursor for the next page. Omitted on the last page.'),
       comextListMissing: z
         .boolean()
         .optional()
         .describe(
-          'True when the Comext dataflow list could not be loaded, so the DS-* collections (detailed trade and PRODCOM) were not searched and totalMatches counts the dissemination table of contents alone. Omitted when both sources were searched.',
+          'True when the Comext dataflow list could not be loaded, so the DS-* collections were not searched and totalMatches counts the table of contents alone. Omitted otherwise.',
         ),
       catalogueLoadedAt: z
         .string()
         .optional()
         .describe(
-          'When the catalogue that answered was loaded (ISO 8601). Present only when a refresh failed and that older copy is still in service; omitted otherwise.',
+          'When the catalogue that answered was loaded (ISO 8601); present only when a failed refresh left that older copy in service.',
         ),
       notice: z
         .string()
         .optional()
         .describe(
-          'Says when the results came through dimension value labels, and names each part of the catalogue this answer is missing — the Comext collections, or updates since a refresh failed — and what to do about it. Omitted when the whole catalogue answered through its own text.',
+          'Says when results came through dimension value labels, and names any part of the catalogue missing from this answer and what to do about it.',
         ),
     },
 
@@ -266,20 +237,21 @@ export const createEurostatSearchDatasets = (clampLimits: boolean) =>
       {
         reason: 'no_match',
         code: JsonRpcErrorCode.NotFound,
-        when: 'No datasets matched the query string — including a query naming a DS-* code that neither the dissemination table of contents nor the Comext dataflow list carries, which is a collection Eurostat does not disseminate, and any query while the Comext dataflow list cannot be loaded and only the table of contents is searched.',
-        recovery: `Try a broader or different search term, or eurostat_browse_themes to explore without text search; for a multi-word query the hint names each word whose removal alone finds matches, with the count, or else, when both catalogue sources were searched, the words that match no dataset label, theme breadcrumb, or code. A DS-* code on neither list is not disseminated, so search for its subject (e.g. "prodcom", "CN8") to find the collections that are. While the Comext dataflow list cannot be loaded, eurostat_get_dataset_info reads a DS-* code directly. The hint also says when dimension value labels were not searched: while their index loads, or for a query of more than ${MAX_VALUE_SEARCH_WORDS} distinct words.`,
+        when: 'No dataset matched the query. A DS-* code on neither catalogue list is not disseminated; while the Comext list cannot be loaded, only the table of contents is searched.',
+        recovery:
+          'Try a broader term, or eurostat_browse_themes to explore without text search; the hint names the words to drop. For a DS-* code on neither list, search for its subject (e.g. "prodcom", "CN8") instead.',
       },
       {
         reason: 'invalid_cursor',
         code: JsonRpcErrorCode.InvalidParams,
-        when: 'The cursor is malformed, came from a different query, or came from a catalogue snapshot — or, for results matched through dimension values, a value index — that has since refreshed.',
+        when: 'The cursor is malformed, came from another query, or predates a catalogue or value-index refresh.',
         recovery:
           'Repeat the search without a cursor, then page using the nextCursor that call returns.',
       },
       {
         reason: 'upstream_fault',
         code: JsonRpcErrorCode.ServiceUnavailable,
-        when: "The server had no catalogue loaded yet, and Eurostat's table of contents answered HTTP 501, which is not retried, or a 4xx status other than 408 and 429, which its URL carries no caller input to cause; or it answered HTTP 408, HTTP 429 or another HTTP 5xx, or could not be reached on every retry, which the error marks retryable. Once a catalogue is loaded, a failed refresh serves that copy instead.",
+        when: "No catalogue was loaded yet and Eurostat's table of contents could not be read: marked retryable after a timeout, rate limit, server error or unreachable host on every retry, not after a refusal Eurostat would repeat. Once a catalogue is loaded, a failed refresh serves that copy instead.",
         recovery:
           "Retry in a few minutes: the catalogue load failed on Eurostat's side and runs again on the next call.",
       },
