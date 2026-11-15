@@ -72,10 +72,10 @@
         },
         {
           "name": "EUROSTAT_BULK_TIMEOUT_MS",
-          "description": "Total allowance for one eurostat_download_dataset transfer across request retries, backoff and streaming body consumption, and for each download that builds the dimension value index, in milliseconds. Defaults to 120000.",
+          "description": "Time budget for one eurostat_download_dataset call in milliseconds, counted from the start of the call: a filtered download's structure read, request retries, backoff and the streamed body with its staging all come out of it. Reached after rows have streamed, it keeps them as a prefix with budgetExceeded set; before the first row, the call fails as retry_deadline_exceeded. Defaults to 55000, under the 60-second request timeout of MCP SDK clients.",
           "format": "string",
           "isRequired": false,
-          "default": "120000"
+          "default": "55000"
         },
         {
           "name": "EUROSTAT_BULK_MAX_BYTES",
@@ -221,10 +221,10 @@
         },
         {
           "name": "EUROSTAT_BULK_TIMEOUT_MS",
-          "description": "Total allowance for one eurostat_download_dataset transfer across request retries, backoff and streaming body consumption, and for each download that builds the dimension value index, in milliseconds. Defaults to 120000.",
+          "description": "Time budget for one eurostat_download_dataset call in milliseconds, counted from the start of the call: a filtered download's structure read, request retries, backoff and the streamed body with its staging all come out of it. Reached after rows have streamed, it keeps them as a prefix with budgetExceeded set; before the first row, the call fails as retry_deadline_exceeded. Defaults to 55000, under the 60-second request timeout of MCP SDK clients.",
           "format": "string",
           "isRequired": false,
-          "default": "120000"
+          "default": "55000"
         },
         {
           "name": "EUROSTAT_BULK_MAX_BYTES",
